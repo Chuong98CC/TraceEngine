@@ -1,0 +1,81 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "trace-models"
+version = "0.1.0"
+description = "Model inference with ONNX/TensorRT — Depth estimation, 3D reconstruction, and more."
+requires-python = ">=3.12, <3.13"
+readme = "README.md"
+
+dependencies = [
+    "pre-commit",
+    "trimesh",
+    "torch==2.11.0+cu128",
+    "torchvision==0.26.0+cu128",
+    "einops",
+    "huggingface_hub",
+    "imageio",
+    "numpy==2.2.6",
+    "opencv-python",
+    "open3d",
+    "typer",
+    "pillow",
+    "omegaconf",
+    "evo",
+    "e3nn",
+    "moviepy",
+    "plyfile",
+    "pillow_heif",
+    "safetensors",
+    "uvicorn",
+    "moviepy==1.0.3",
+    "typer>=0.9.0",
+    "pycolmap",
+    "onnxruntime-gpu==1.28.0",
+    "tensorrt-cu12==11.1.0.106",
+    "onnx>=1.22.0",
+    "numba",
+    "onnxconverter-common>=1.16.0",
+    "ninja", # build-time parallel backend for the vendored pointops2 CUDA extension
+    "pointops2",
+    "ftfy",
+    "matplotlib",
+    "regex",
+    "ipykernel",
+    "lerobot==0.6.1",
+    "lerobot[dataset]",
+    "lz4",
+]
+
+[project.optional-dependencies]
+data = ["pandas"]
+dev = ["pre-commit", "pytest", "pytest-cov", "ruff"]
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu128" }
+torchvision = { index = "pytorch-cu128" }
+# pointops2's setup.py imports torch at build time, so it must build inside the
+# project environment (no build isolation).
+pointops2 = { path = "third_party/pointops2" }
+
+
+[tool.uv]
+no-build-isolation-package = ["pointops2"]
+
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/base", "src/depth_models", "src/flow_models", "src/utils", "src/det_seg_models", "tools"]
