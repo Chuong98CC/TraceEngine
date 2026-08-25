@@ -210,7 +210,7 @@ python tools/general_test/run_stream.py \
 | Argument | Default | Description |
 |---|---|---|
 | `--backend` | **required** | `da3` or `vggt_omega` |
-| `--input-dirs` | **required** | Image folders, one per camera; all must contain the same synchronized frame stems |
+| `--input-dirs` | **required** | Can be 1 or several Image folders, one per camera; all must contain the same synchronized frame stems |
 | `--mask-dirs` | — | Optional binary motion-mask folders (one per `--input-dirs`, same order). Pixels above 127 are moving; their confidence is zeroed **during chunk alignment only** — depth outputs are unaffected |
 | `--start-frame` | `0` | First frame to process |
 | `--max-frames` | all | Max frames per camera to process |
