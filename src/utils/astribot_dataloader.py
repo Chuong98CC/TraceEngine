@@ -8,7 +8,7 @@ import lz4.frame
 # Paths relative to repo root
 # ---------------------------------------------------------------------------
 DATA_ROOT = Path(__file__).resolve().parents[2] / "assets"
-CALIB_PATH = DATA_ROOT / "astribot_cam_calib" / "astribot_calibration_full_640x480.json"
+CALIB_PATH = DATA_ROOT / "astribot_cam_calib" / "astribot_calibration_full.json"
 IMAGES_ROOT = DATA_ROOT / "astribot_test_imgs"
 # ---------------------------------------------------------------------------
 # Mapping: image directory suffix → calibration key
@@ -69,6 +69,13 @@ def _scale_intrinsics_matrix(
     K[1, 1] *= sy  # fy
     K[1, 2] *= sy  # cy
     return K
+
+def _parse_resolution(res) -> tuple[int, int]:
+    """Parse a calibration resolution ('WxH' string or [w, h]) into (w, h)."""
+    if isinstance(res, str):
+        w, h = map(int, res.split("x"))
+        return w, h
+    return int(res[0]), int(res[1])
 
 def _get_resolution(cam_data: dict) -> Optional[str]:
     """Extract resolution string from camera data (camera-level or intrinsics-level)."""
@@ -134,12 +141,20 @@ def get_camera_params(
         to_world_to_camera: If True, convert loaded camera-to-world extrinsics
             into world-to-camera before returning.
     """
-    exts, ixts = [], []
+    exts, ixts, resolutions = [], [], []
     for name in camera_names:
         cam = calib["camera"][name]
         exts.append(np.array(cam["extrinsics"]["matrix"], dtype=np.float64).reshape(4, 4))
         ixts.append(np.array(cam["intrinsics"][sensor_type]["matrix"], dtype=np.float64).reshape(3, 3))
-    return np.stack(exts), np.stack(ixts)
+        # The resolution the ext/ixt are recorded at lives at the intrinsics
+        # level ('WxH' string, rewritten to the target by load_calib), with
+        # optional per-sensor or camera-level overrides.
+        sensor = cam["intrinsics"].get(sensor_type, {})
+        res = sensor.get("resolution") or cam["intrinsics"].get("resolution") or cam.get("resolution")
+        if res is None:
+            raise ValueError(f"No resolution recorded for camera '{name}'")
+        resolutions.append(np.array(_parse_resolution(res), dtype=np.int32))
+    return np.stack(exts), np.stack(ixts), resolutions
 
 def load_depth_lz4(depth_path: Path, shape: tuple[int, int]) -> np.ndarray:
     raw = depth_path.read_bytes()
@@ -221,11 +236,15 @@ def normalize_depth_for_display(depth: np.ndarray) -> np.ndarray:
     return out
 
 
-def load_rgbd(frame_idx: int, camera_name: str) -> tuple[str, str, np.ndarray, np.ndarray]:
+def load_rgbd(frame_idx: int, camera_name: str) -> tuple[str, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Load RGB and depth images for a given frame index.
 
     Returns:
-        (rgb_path, depth_metrics, valid_mask, extrinsics, intrinsics)
+        (rgb_path, depth_metrics, extrinsics, intrinsics, resolution)
+        where ``resolution`` is the (w, h) the intrinsics/extrinsics are
+        recorded at — the intrinsics are scaled to depth resolution 0 by ``load_calib``,
+        so callers resizing the RGB image should scale the intrinsics from
+        this resolution to the target via ``_scale_intrinsics_matrix``.
     """
     assert camera_name in CAMERA_DEPTH_CONFIG, f"Unknown camera: {camera_name}"
     rgb_path = f"{IMAGES_ROOT}/{camera_name}/color/img_{frame_idx:06d}.jpg"
@@ -239,5 +258,5 @@ def load_rgbd(frame_idx: int, camera_name: str) -> tuple[str, str, np.ndarray, n
     depth_metrics[depth_metrics > 1.0] = 0.0
 
     calib = load_calib(CALIB_PATH)
-    exts, ixts = get_camera_params(calib, [camera_name], sensor_type="color")
-    return rgb_path, depth_metrics, exts[0], ixts[0]
+    exts, ixts, resolutions = get_camera_params(calib, [camera_name], sensor_type="color")
+    return rgb_path, depth_metrics, exts[0], ixts[0], resolutions[0]

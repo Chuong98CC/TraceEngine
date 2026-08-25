@@ -222,3 +222,4 @@ weights
 .vscode/
 uv.lock
 cache/
+my_scripts/

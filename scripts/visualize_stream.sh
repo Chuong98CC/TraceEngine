@@ -1,6 +1,6 @@
 LEFT_DIR="demo_data/astribot_stereo_lrb/extract_frames/stereo_left"
 RIGHT_DIR="demo_data/astribot_stereo_lrb/extract_frames/stereo_right"
-OUTPUT_DIR="output/da3_da3_cs64_mask"
+OUTPUT_DIR="output/vggt_vggt_omega_cs64_mask"
 
 # python da3_streaming/visualize_glb.py --stem frame_000211 \
 #     --input-dirs $LEFT_DIR $RIGHT_DIR \

@@ -4,7 +4,7 @@ test_any2full.py — Any2Full inference on Astribot head RGB-D frames, via the
 torch.export (PT2) runtime, exporting a coloured point cloud (.glb).
 
 Loads an Astribot head frame (RGB path + grayscale-derived metric depth +
-camera params) through utils.astribot_dataloader.load_rgbd_head, runs
+camera params) through utils.astribot_dataloader.load_rgbd, runs
 Any2Full_PT2 (preprocess -> infer -> postprocess), then back-projects the
 predicted depth into a point cloud with utils.visualize_depth.export_glb.
 
@@ -26,7 +26,7 @@ import numpy as np
 import torch
 
 from depth_models.a3f.any2full import Any2Full_PT2
-from utils.astribot_dataloader import load_rgbd
+from utils.astribot_dataloader import _scale_intrinsics_matrix, load_rgbd
 from utils.visualize_depth import export_glb
 from PIL import Image
 import matplotlib
@@ -94,7 +94,7 @@ def main() -> None:
     )
 
     # ---- load Astribot head frame: rgb path + metric depth + camera params ----
-    rgb_path, depth_metrics, ext, ixt = load_rgbd(args.frame_idx, args.camera_name)
+    rgb_path, depth_metrics, ext, ixt, ixt_res = load_rgbd(args.frame_idx, args.camera_name)
     print(f"[{args.frame_idx}] {rgb_path}")
 
     # depth_metrics is already physical metres; Any2Full_PT2's ndarray branch
@@ -122,6 +122,10 @@ def main() -> None:
     rgb_u8 = cv2.cvtColor(rgb_bgr, cv2.COLOR_BGR2RGB)
     if rgb_u8.shape[:2] != pred.shape:
         rgb_u8 = cv2.resize(rgb_u8, (pred.shape[1], pred.shape[0]))
+    if (int(ixt_res[0]), int(ixt_res[1])) != (pred.shape[1], pred.shape[0]):
+        ixt = _scale_intrinsics_matrix(
+            ixt, int(ixt_res[0]), int(ixt_res[1]), pred.shape[1], pred.shape[0],
+        )
 
     out_path = Path(args.out_dir) / f"frame_{args.frame_idx:06d}.glb"
     export_glb(

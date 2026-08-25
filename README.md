@@ -308,5 +308,9 @@ python tools/general_test/test_any2full.py \
 
 ## Notes
 
-See the per-model docs in [`docs/`](docs/) for model-specific usage notes
-(preprocessing, output formats, conventions).
+- **General-test tools** — per-script usage for the inference/visualization
+  entry points in `tools/general_test` (optical flow, segmentation, depth
+  densification, streaming, tracking) is documented in
+  [`docs/general_test.md`](docs/general_test.md).
+- See the per-model docs in [`docs/`](docs/) for model-specific usage notes
+  (preprocessing, output formats, conventions).
