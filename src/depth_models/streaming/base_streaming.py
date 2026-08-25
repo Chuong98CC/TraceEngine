@@ -157,11 +157,6 @@ class BaseStreaming:
         self.mask_paths: list[str] | None = None  # parallel to img_list
         self.chunk_indices: list[tuple[int, int]] = []
 
-        self.dummy_intrinsics = np.array(
-            [[400.0, 0.0, 320.0], [0.0, 400.0, 240.0], [0.0, 0.0, 1.0]],
-            dtype=np.float32,
-        )
-
     # ------------------------------------------------------------------
     # Backend-specific hooks
     # ------------------------------------------------------------------

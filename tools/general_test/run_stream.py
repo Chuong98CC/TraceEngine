@@ -10,8 +10,10 @@ Usage:
         --start-frame 0 --max-frames 60
 
 Backends:
-- ``da3``        pre-exported DA3 any-view TorchScript (.pt) model
-                 (fixed num_views).
+- ``da3``        two pre-exported DA3 torch.export programs (.pt2): the
+                 any-view graph (fixed num_views) + the metric-depth graph,
+                 composed by DA3NestedPT2 so the metric component can be
+                 swapped independently.
 - ``vggt_omega`` pre-exported VGGT-Omega torch.export program (.pt2/.pt)
                  (fixed num_views).
 
@@ -140,14 +142,27 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--model-path",
         default=None,
-        help="Model artifact path (.pt / .pt2); overrides the backend's default",
+        help="VGGT-Omega model artifact path (.pt / .pt2); overrides the "
+        "backend's default",
+    )
+    parser.add_argument(
+        "--anyview-model-path",
+        default=None,
+        help="DA3 any-view model artifact path (.pt2); overrides the backend's "
+        "default",
+    )
+    parser.add_argument(
+        "--metric-model-path",
+        default=None,
+        help="DA3 metric-depth model artifact path (.pt2); overrides the "
+        "backend's default",
     )
     parser.add_argument(
         "--no-compile",
         action="store_true",
-        help="torchcompile only: run the exported-program runtime instead of "
-        "wrapping the loaded module in torch.compile (Inductor).  Slower, but "
-        "useful for debugging numeric differences.",
+        help="DA3 only: run the exported programs without wrapping them in "
+        "torch.compile (Inductor).  Slower, but useful for debugging numeric "
+        "differences.",
     )
     parser.add_argument("--config", default="src/depth_models/streaming/configs/base_config.yaml")
     parser.add_argument("--output-dir", default=None)
@@ -205,10 +220,12 @@ def main(argv: list[str] | None = None) -> int:
         device=args.device,
         mask_dirs=args.mask_dirs,
     )
-    if args.backend in ("da3", "vggt_omega"):
-        kwargs["model_path"] = args.model_path
-    if args.backend == "torchcompile":
+    if args.backend == "da3":
+        kwargs["anyview_model_path"] = args.anyview_model_path
+        kwargs["metric_model_path"] = args.metric_model_path
         kwargs["compile"] = not args.no_compile
+    elif args.backend == "vggt_omega":
+        kwargs["model_path"] = args.model_path
 
     streaming = cls(**kwargs)
     if torch.cuda.is_available():

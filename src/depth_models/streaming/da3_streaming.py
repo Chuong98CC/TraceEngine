@@ -1,47 +1,43 @@
 #!/usr/bin/env python3
 """
-TorchScript multi-camera streaming — generalized N-folder backend.
+torch.export multi-camera streaming — generalized N-folder backend.
 
-Implements the two backend hooks of ``da3_streaming/base_streaming.py``:
-loading the pre-exported any-view TorchScript model and running chunks
-through it.  The TorchScript export (``tools/export_torchscript.py``) has a
-FIXED view count; ``chunk_size`` is derived from the export's
-``num_views``, so the model path is the only model-related parameter.  A
+Implements the two backend hooks of ``base_streaming.BaseStreaming``:
+loading the pre-exported DA3 torch.export programs and running chunks
+through them.  DA3 is split into two independent checkpoints — the any-view
+graph (FIXED view count) and the metric-depth graph — composed by
+``DA3NestedPT2`` so the metric component can be swapped without re-exporting
+the any-view graph.  Both graphs are image-only (the any-view export
+predicts its own camera poses and intrinsics), so chunks are fed as image
+paths and no camera parameters are passed.  ``chunk_size`` is derived from
+the any-view export's ``num_views``; the two model paths are the only
+model-related parameters.  A
 short final chunk is padded with images from the previous chunk (or
 duplicated when the whole sequence is shorter than one chunk); the padded
 outputs are discarded.
 
-Run through ``da3_streaming/run_stream.py --backend torchscript``.
+Run through ``tools/general_test/run_stream.py --backend da3``.
 """
 
 from __future__ import annotations
-
-import sys
-from pathlib import Path
 
 import numpy as np
 
 from .base_streaming import BaseStreaming
 
-# -- make tools/model/ importable -------------------------------------------------
-# _TOOLS_DIR = str(Path(__file__).resolve().parent.parent / "tools")
-# if _TOOLS_DIR not in sys.path:
-#     sys.path.insert(0, _TOOLS_DIR)
-
-from depth_models.da3.base_da3 import BaseDA3Model  # noqa: E402
-from depth_models.da3.da3_model import DA3AnyViewTorchScript  # noqa: E402
+from depth_models.da3.model.da3nested import DA3NestedPT2
 
 # ---------------------------------------------------------------------------
-# Default model path (fixed num_views = 24, no extrinsics input)
+# Default model paths (any-view fixed num_views = 64, no extrinsics input)
 # ---------------------------------------------------------------------------
-_MODEL_PATH = "weights/da3/da3_anyview_24x644x490_giant-large-1.1.pt"
-
+_DEFAULT_ANYVIEW = "weights/da3/da3_anyview_64x644x490_giant-large-1.1.pt2"
+_DEFAULT_METRIC = "weights/da3/da3_metric_644x490_giant-large-1.1.pt2"
 
 # ===========================================================================
 # Backend
 # ===========================================================================
 class DA3_Streaming(BaseStreaming):
-    """TorchScript multi-camera streaming with N synchronized image folders."""
+    """torch.export multi-camera streaming with N synchronized image folders."""
 
     def __init__(
         self,
@@ -52,10 +48,14 @@ class DA3_Streaming(BaseStreaming):
         max_frames: int | None = None,
         interval: int = 1,
         device: str | None = None,
-        model_path: str | None = None,
+        anyview_model_path: str | None = None,
+        metric_model_path: str | None = None,
+        compile: bool = True,
         mask_dirs: list[str] | None = None,
     ):
-        self.model_path = model_path or _MODEL_PATH
+        self.anyview_model_path = anyview_model_path or _DEFAULT_ANYVIEW
+        self.metric_model_path = metric_model_path or _DEFAULT_METRIC
+        self.compile = compile
         self.device = device
         # chunk_size is derived from the export's fixed num_views, so the
         # model must load before the base __init__ (which needs chunk_size).
@@ -77,8 +77,14 @@ class DA3_Streaming(BaseStreaming):
     # Backend hooks
     # ------------------------------------------------------------------
     def _load_model(self) -> None:
-        print(f"Loading TorchScript model: {self.model_path}")
-        self.model = DA3AnyViewTorchScript(self.model_path, device=self.device or "cuda")
+        print(f"Loading torch.export any-view model: {self.anyview_model_path}")
+        print(f"Loading torch.export metric-depth model: {self.metric_model_path}")
+        self.model = DA3NestedPT2(
+            self.anyview_model_path,
+            self.metric_model_path,
+            device=self.device or "cuda",
+            compile=self.compile,
+        )
 
         # chunk_size is derived from the export's fixed num_views — there is
         # no user-facing chunk_size parameter for this backend.
@@ -86,37 +92,18 @@ class DA3_Streaming(BaseStreaming):
         print("Model parameters:")
         print(f"  chunk_size : {self.model_num_views}  (fixed num_views from the export)")
         print(f"  image size : {self.model.target_h}x{self.model.target_w}")
-        print(f"  extrinsics input: {self.model.uses_extrinsics}")
+        print(f"  camera input: none (image-only; poses + intrinsics predicted by the graph)")
 
     def _process_chunk(self, start: int, end: int) -> dict:
         paths = self.img_list[start:end]
-        n = len(paths)
-        dummy_intrs = np.tile(self.dummy_intrinsics[None], (n, 1, 1))
 
-        img_batch, intrs_adj, metas = self.model.preprocess_views(paths, dummy_intrs)
-        feed = self.model.build_anyview_feed(img_batch, None, intrs_adj)
-        raw = self.model.run(feed)
-        result = BaseDA3Model.map_anyview_keys(raw)
-
-        depth = np.stack(
-            [BaseDA3Model.crop_to_tile(result["depth"][0, i], metas[i]) for i in range(n)]
-        ).astype(np.float32)
-        conf = np.stack(
-            [BaseDA3Model.crop_to_tile(result["depth_conf"][0, i], metas[i]) for i in range(n)]
-        ).astype(np.float32)
-
-        intr = result["intrinsics"][0].copy()
-        for i in range(n):
-            intr[i, 0, 2] -= metas[i]["pad_left"]
-            intr[i, 1, 2] -= metas[i]["pad_top"]
-
-        ext = result["extrinsics"][0]
-        if ext.shape[1] == 4:
-            ext = ext[:, :3, :]
-
-        return {
-            "depth": depth,
-            "conf": conf,
-            "extrinsics": ext.copy().astype(np.float32),
-            "intrinsics": intr.astype(np.float32),
-        }
+        # The nested pipeline preprocesses the views, runs the any-view graph,
+        # runs the metric graph per view, aligns any-view depth to the metric
+        # depth, crops the padded outputs back to the tile region, and un-pads
+        # the intrinsics — no camera parameters are fed (the any-view graph is
+        # the image-only export and predicts its own poses and intrinsics).
+        # The pipeline returns "depth_conf"; the base streaming contract and
+        # its consumers (alignment pair, mask stacking) expect "conf".
+        result = self.model.infer(paths)
+        result["conf"] = result.pop("depth_conf")
+        return result

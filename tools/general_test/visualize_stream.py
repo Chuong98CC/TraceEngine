@@ -40,7 +40,7 @@ from utils.visualize_depth import (  # noqa: E402
     _index_color_rgb,
 )
 
-from utils.stream_utils import load_npz_data, load_pair  # noqa: E402
+from utils.streaming_utils import load_npz_data, load_pair  # noqa: E402
 
 
 # ===========================================================================

@@ -4,12 +4,16 @@ This repo provides an end-to-end pipeline that turns **one or several folders
 of frames extracted from synchronized camera videos** into the **3D trace of a
 moving object**, along with camera poses and metric depth for the whole
 sequence. It combines several models, each deployed with the runtime it fits
-best (ONNX Runtime, TensorRT, or TorchScript / `torch.export`):
+best (ONNX Runtime, TensorRT, TorchScript, or `torch.export` programs):
 
+- **Any2Full** — RGB-D depth densification: grounds a Depth Anything prediction
+  with the RGB-D sensor's sparse metric depth as a prompt, producing a densified
+  metric point cloud (`torch.export` / `.pt2`).
 - **WAFT** — dense optical flow, used to build motion masks.
 - **DA3 / VGGT-Omega (streaming)** — multi-camera depth + camera pose estimation
   over long trajectories.
 - **TAPIP3D** — 3D point tracking (traces).
+- **SAM3** — promptable segmentation (`torch.export` / `.pt2`).
 
 ## Pipeline
 
@@ -38,6 +42,8 @@ flowchart LR
    mask).
 
 Each step is detailed below with its reference script and key flags.
+Any2Full (single-frame RGB-D densification) is a separate capability, described
+in its [own section](#rgb-d-depth-densification-any2full).
 
 ## Installation
 
@@ -47,29 +53,43 @@ Install the environment simply by:
 uv sync
 ```
 
-with pinned inference runtimes: `torch==2.7.1+cu128`,
+with pinned inference runtimes: `torch==2.11.0+cu128`,
 `onnxruntime-gpu==1.28.0`, `tensorrt-cu12==11.1.0.106`.
 
 ## Layout
 
 ```
-data                 # Astribot sample data (symlink)
-demo_data            # demo sequences (symlink)
+assets               # Astribot demo images + calibration (symlink)
 src/
-├── base/            # TRTModel / ONNXModel wrappers, CameraIntrinsics/Extrinsics
+├── base/             # TRTModel / ONNXModel wrappers, CameraIntrinsics/Extrinsics
 ├── depth_models/
-│   ├── da3/         # Depth Anything 3 (metric / any-view / nested)
-│   ├── vggt_omega/  # VGGT-Omega (torch.export program)
-│   └── streaming/   # chunked multi-camera streaming + long-trajectory alignment
+│   ├── a3f/          # Any2Full — RGB-D depth densification (.pt2)
+│   ├── da3/          # Depth Anything 3 — any-view TorchScript backend + shared pre/post mixin
+│   ├── streaming/    # chunked multi-camera streaming + long-trajectory alignment
+│   └── vggt_omega/   # VGGT-Omega (torch.export program)
+├── det_seg_models/
+│   └── sam3/         # SAM3 promptable segmentation (.pt2)
 ├── flow_models/
-│   ├── waft/        # WAFT optical flow (ONNX + TRT)
-│   └── tapip3d/     # TAPIP3D 3D point tracking (ONNX)
-└── utils/           # dataloaders, visualization, streaming helpers
-tools/               # inference + visualization entry points
-scripts/             # ready-to-run pipeline scripts (infer_waft, infer_stream,
-                     # visualize_stream, infer_tapip3d, export_trt_docker)
-weights/             # model weights (ONNX / TRT / TorchScript), clone from HG
+│   ├── waft/         # WAFT optical flow (ONNX + TRT)
+│   └── tapip3d/      # TAPIP3D 3D point tracking (ONNX)
+└── utils/            # Astribot dataloader, image IO, visualization, streaming helpers
+tools/
+├── export_trt.py     # ONNX → TensorRT via trtexec
+├── general_test/     # inference + visualization entry points
+│   ├── run_stream.py # streaming (--backend da3|vggt_omega)
+│   ├── infer_waft.py / infer_tapip3d.py
+│   ├── test_any2full.py / test_sam3.py
+│   └── visualize_stream.py / visualize_rgbd.py
+└── hifi-umi/         # HiFi-UMI dataset preprocessing (extract_frames, generate_masks)
+scripts/              # ready-to-run pipeline scripts (infer_waft, infer_stream,
+                      # visualize_stream, infer_tapip3d, export_trt_docker, ...)
+weights/              # model weights (ONNX / TRT / TorchScript / .pt2)
 ```
+
+The bundled sample data lives under `assets/`: `astribot_test_imgs/` (per-camera
+RGB-D frames) plus `astribot_cam_calib/astribot_calibration_full_640x480.json`,
+consumed by `tools/general_test/test_any2full.py` and `visualize_rgbd.py`
+through `src/utils/astribot_dataloader.py`.
 
 ## Model weights
 
@@ -77,22 +97,24 @@ The model weights are expected under `weights/` in the following structure:
 
 ```
 weights
+├── any2full/
+│   ├── Any2Full_vitl.pt2            # RGB-D densification, vit-large, fp32
+│   └── Any2Full_vitl_bf16.pt2       # RGB-D densification, vit-large, bf16
 ├── vggt_omg/
-│   └── vggt_omg_24x640x480.pt2
+│   └── vggt_omg_64x640x480_bf16.pt2 # VGGT-Omega streaming, fixed 64 views
 ├── da3/
-│   ├── da3_anyview_24x644x490_giant-large-1.1.pt        # TorchScript (streaming)
-│   ├── da3_anyview_24x644x490_giant-large-1.1.pt2
-│   └── ...                                              # metric/any-view ONNX + TRT
+│   ├── da3_anyview_24x644x490_giant-large-1.1.pt   # TorchScript (streaming)
+│   └── da3_anyview_24x644x490_giant-large-1.1.pt2
+├── sam3/
+│   └── sam3_image_exported_bf16.pt2
 ├── waftv2/
 │   ├── waftv2_dinov3_i5_640x480.onnx
-│   └── waftv2_dinov3_i5_640x480_tf32.engine
-├── tapip3d/
-│   ├── tapip3d_encoder_480x640.onnx
-│   ├── tapip3d_updater.onnx
-│   └── tapip3d_corr_forward.onnx
-└── s2m2/
-    ├── S2M2_XL_640_480_v2_torch21.onnx
-    └── S2M2_XL_640_480_v2_torch21.engine
+│   ├── waftv2_dinov3_i5_640x480_tf32.engine
+│   └── waftv2_dav2_i5_672x448.onnx
+└── tapip3d/
+    ├── tapip3d_encoder_480x640.onnx
+    ├── tapip3d_updater.onnx
+    └── tapip3d_corr_forward.onnx
 ```
 
 ### Precompiled weights
@@ -100,7 +122,9 @@ weights
 For convenience, ONNX checkpoints can be downloaded from Hugging Face
 [Chuong98vt/DepthModels](https://huggingface.co/Chuong98vt/DepthModels/tree/main). Model name conventions:
 
-- **VGGT-Omega (streaming)**: `vggt_omg_24x640x480` — fixed 24 views per chunk,
+- **Any2Full**: `Any2Full_vitl` — vit-large backbone, exported at a fixed
+  480×640 input; `_bf16` variants run the exported graph in bf16.
+- **VGGT-Omega (streaming)**: `vggt_omg_64x640x480` — fixed 64 views per chunk,
   inference at 640×480.
 - **DA3 (streaming)**: `da3_anyview_24x644x490` — fixed 24 views per chunk,
   644×490 (must be divisible by 14).
@@ -112,9 +136,8 @@ For convenience, ONNX checkpoints can be downloaded from Hugging Face
 (Optional) To export the ONNX models yourself, clone the PyTorch source repos
 and run their `export_onnx.py`:
 - DA3: https://github.com/Chuong98CC/Depth-Anything-3
-- S2M2: https://github.com/Chuong98CC/s2m2
 - WAFT: https://github.com/Chuong98CC/WAFT
-- TAPIP3D / VGGT-Omega: see the model sources for the export scripts.
+- TAPIP3D / VGGT-Omega / Any2Full: see the model sources for the export scripts.
 
 ### Export ONNX → TensorRT
 
@@ -148,7 +171,7 @@ demo_data/astribot_stereo_lrb/extract_frames/stereo_right/frame_*.jpg
 magnitude into binary motion masks:
 
 ```bash
-python tools/infer_waft.py --input <frames_dir> --backend trt \
+python tools/general_test/infer_waft.py --input <frames_dir> --backend trt \
     --checkpoint weights/waftv2/waftv2_dinov3_i5_640x480_tf32.engine \
     --start 210 --stride 4 -thr 2 -o mask \
     --output-dir demo_data/astribot_stereo_lrb/motion_mask/
@@ -169,19 +192,20 @@ python tools/infer_waft.py --input <frames_dir> --backend trt \
 folders in sliding chunks and aligns the chunks into a single world frame:
 
 ```bash
-python tools/run_stream.py \
+python tools/general_test/run_stream.py \
     --backend vggt_omega \            # or "da3"
     --input-dirs <left_frames_dir> <right_frames_dir> \
     --mask-dirs <left_mask_dir> <right_mask_dir> \
-    --chunk-size 24 \
     --start-frame 210 --max-frames 160 --interval 4 \
+    --model-path weights/vggt_omg/vggt_omg_64x640x480_bf16.pt2 \
     --output-dir output/masked_stream_stereo_vggt_omega
 ```
 
 - `--backend` selects the pre-exported model: `vggt_omega` (VGGT-Omega
-  `torch.export` program, `weights/vggt_omg/vggt_omg_24x640x480.pt2`) or `da3`
-  (TorchScript any-view). Both exports have a **fixed number of views**, so
-  `--chunk-size` must equal 24 and be divisible by the number of cameras.
+  `torch.export` program) or `da3` (TorchScript any-view). Both exports have a
+  **fixed number of views**, which is read from the model — the chunk size is
+  derived automatically (64 for the shipped VGGT-Omega export, 24 for DA3), so
+  `--model-path` is only needed to override the backend's default weight.
 - `--mask-dirs` (optional) supplies the motion masks from step 2, used during
   chunk alignment only — outputs are unaffected.
 - `--interval 4` / `--max-frames` subsample the sequence (every 4th frame).
@@ -195,7 +219,7 @@ a video of the coloured depth point cloud with camera frustums and the growing
 camera path:
 
 ```bash
-python tools/visualize_stream.py \
+python tools/general_test/visualize_stream.py \
     --input-dirs <left_frames_dir> <right_frames_dir> \
     --result-dir output/masked_stream_stereo_vggt_omega \
     --output output/masked_stream_stereo_vggt_omega/vggt_omega_stream.mp4 \
@@ -209,7 +233,7 @@ frames plus per-frame geometry (depth + camera poses) of the view the object is
 tracked in:
 
 ```bash
-python tools/infer_tapip3d.py \
+python tools/general_test/infer_tapip3d.py \
     --encoder weights/tapip3d/tapip3d_encoder_480x640.onnx \
     --updater weights/tapip3d/tapip3d_updater.onnx \
     --corr_forward weights/tapip3d/tapip3d_corr_forward.onnx \
@@ -237,6 +261,50 @@ python tools/infer_tapip3d.py \
 - Output: `coords.npy` (T, Q, 3) — the world-space 3D traces, `visibs.npy`
   (T, Q) — per-point visibility, and `metadata.json`. With `--visualize` a
   rendering of the tracks is saved as a video.
+
+## RGB-D depth densification (Any2Full)
+
+A standalone single-frame capability: **Any2Full** turns an RGB image plus the
+RGB-D sensor's **sparse metric depth into a densified metric depth map** — and
+therefore a denser, higher-quality point cloud — by using the sensor depth as a
+*prompt* to ground the prediction of a Depth Anything model.
+
+The runtime is `depth_models.a3f.any2full.Any2Full_PT2`, a `torch.export`
+wrapper with deterministic pre/post processing:
+
+- **Preprocess** — ImageNet-normalized RGB and the sparse metric depth are
+  resized to the exported **fixed 480×640** input (any input size is accepted).
+- **Infer** — the exported graph runs with `init_scaling` disabled and returns
+  `(depth, disparity_pre, prompt_depth_resized)`.
+- **Postprocess** — metric scale is recovered with a **deterministic affine
+  least-squares fit** of the predicted disparity against the sparse depth
+  anchors (`init_scaling`, no random jitter), converted disparity → depth,
+  un-resized to the input resolution and clamped to `[min_depth, max_depth]`.
+- Optional **denoising** of the sparse depth (`remove_outliers`, a scipy
+  `generic_filter` that drops isolated / anomalous depth points without
+  filling).
+
+Run it on an Astribot head RGB-D frame and export the point cloud as a `.glb`:
+
+```bash
+python tools/general_test/test_any2full.py \
+    --pt2 weights/any2full/Any2Full_vitl_bf16.pt2 \
+    --frame_idx 0 \
+    --out_dir ./outputs
+```
+
+- `--camera_name` selects the Astribot camera (`head_rgbd` by default; also
+  `torso_rgbd`, wrist cameras). Frames are loaded through
+  `utils.astribot_dataloader.load_rgbd`, which returns the metric depth in
+  metres and the calibrated intrinsics/extrinsics.
+- `--denoise` enables sparse-depth denoising before inference (`--denoise_threshold`,
+  `--denoise_min_valid`, `--denoise_kernel_size`).
+- `--init_scaling` (default on) enables the affine scale recovery; turn it off
+  to use the raw graph depth.
+- `--max_depth` / `--min_depth` clamp the final output (default 10 m / 0).
+- Output: `frame_<idx>.glb` (coloured point cloud back-projected with the
+  camera intrinsics), `frame_<idx>.npy` (metric depth), `frame_<idx>.png`
+  (colour-mapped depth).
 
 ## Notes
 

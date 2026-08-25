@@ -27,9 +27,9 @@ from depth_models.vggt_omega.vggt_omega import VGGT_Omega
 from .base_streaming import BaseStreaming
 
 # ---------------------------------------------------------------------------
-# Default model path (fixed num_views = 32)
+# Default model path (fixed num_views = 64)
 # ---------------------------------------------------------------------------
-_MODEL_PATH = "weights/vggt_omg/vggt_omg_24x640x480_bf16.pt2"
+_MODEL_PATH = "weights/vggt_omg/vggt_omg_64x640x480_bf16.pt2"
 
 
 # ===========================================================================
