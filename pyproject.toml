@@ -47,6 +47,7 @@ dependencies = [
     "lerobot==0.6.1",
     "lerobot[dataset]",
     "lz4",
+    "rich",
 ]
 
 [project.optional-dependencies]
