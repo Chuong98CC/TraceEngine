@@ -8,12 +8,12 @@ Three independent modes:
   also runs on datasets whose videos are not on disk. Saves the gripper plot
   (raw + filtered state, key frames, split frames) and a subtask_splits.json
   recording the split frames under <out_dir>/subtask/<episode>/.
-- extract_frames: loads subtask_splits.json and saves one jpg per split frame
-  and selected camera under <out_dir>/key_frames/<episode>/<camera>/.
-- video: loads subtask_splits.json and cuts one mp4 per sub-task segment
-  (the episode split at the split frames) per selected camera from the
-  source videos with ffmpeg (stream copy by default, no per-frame Python
-  decode; --exact re-encodes for frame-accurate boundaries), under
+- extract_frames: saves one jpg per split frame and selected camera under
+  <out_dir>/key_frames/<episode>/<camera>/.
+- video: cuts one mp4 per sub-task segment (the episode split at the split
+  frames) per selected camera from the source videos with ffmpeg (stream
+  copy by default, no per-frame Python decode; --exact re-encodes for
+  frame-accurate boundaries), under
   <out_dir>/subtask_videos/<episode>/<camera>/.
 
 Key frames are the first and last frame of an episode plus every frame where
@@ -22,9 +22,13 @@ on the low-pass filtered signal; runs of closed state shorter than
 KEY_FRAME_MIN_CLOSE_S seconds are dropped first, so a noisy blip does not
 produce a key-frame pair. The sub-task split frames are the re-grasp
 midpoints of the combined 1 -> 0 -> 1 gripper pattern (see
-_subtask_split_idxes). The dataset videos must be present on disk for the
-extract_frames and video modes (LeRobotDataset is opened with
-download_videos=False).
+_subtask_split_idxes). The extract_frames and video modes prefer the
+dataset's ground-truth subtask_index column when it exists — the split
+frames are then the first frame of each new sub-task segment (see
+_split_frames_from_ground_truth) — and fall back to subtask_splits.json
+only when the episode has fewer than two sub-tasks. The dataset videos
+must be present on disk for the extract_frames and video modes
+(LeRobotDataset is opened with download_videos=False).
 
 Examples
 --------
@@ -441,16 +445,16 @@ class DataExtract:
         return int(rows["task_index"].iloc[0]) if len(rows) else None
 
     def _load_episode_table(self):
-        """The current episode's rows from the tabular parquet (absolute index
-        and task_index, plus observation.state and subtask_index when grippers
-        are in play). Reads no video."""
+        """The current episode's rows from the tabular parquet (absolute index,
+        task_index and subtask_index, plus observation.state when grippers are
+        in play). Reads no video."""
         import pandas as pd
         import pyarrow.parquet as pq
 
         path = self._tabular_path(self.ep_idx)
-        cols = ["index", "task_index"]
+        cols = ["index", "task_index", "subtask_index"]
         if self.gripper_idxes:
-            cols += ["observation.state", "subtask_index"]
+            cols += ["observation.state"]
         # datasets may lack optional columns (e.g. subtask_index); read only
         # the columns the schema actually has
         cols = [c for c in cols if c in set(pq.read_schema(path).names)]
@@ -603,9 +607,32 @@ class DataExtract:
         with open(path, "w") as f:
             json.dump(data, f, indent=2)
 
+    def _split_frames_from_ground_truth(self):
+        """Split frames from the dataset's ground-truth subtask_index
+        column: the first frame of each new sub-task segment (every frame
+        where the value changes). Returns None when the dataset has no
+        subtask_index column, or when the episode has fewer than two
+        sub-tasks (nothing to split)."""
+        df = self._load_episode_table()
+        if "subtask_index" not in df.columns:
+            return None
+        subtasks = df["subtask_index"].to_numpy()
+        if len(np.unique(subtasks)) < 2:
+            return None
+        frames = df["index"].to_numpy()
+        changes = np.flatnonzero(subtasks[1:] != subtasks[:-1])
+        return [int(frames[t + 1]) for t in changes]
+
     def _load_splits(self):
-        """subtask_splits.json of the current episode, as written by the
-        split_subtask mode."""
+        """Split frames of the current episode, ground truth first: when
+        the dataset stores a per-frame subtask_index column, they are
+        collected at every frame where the subtask changes (see
+        _split_frames_from_ground_truth). An episode must have at least two
+        sub-tasks; otherwise the split frames are loaded from the
+        subtask_splits.json written by the split_subtask mode."""
+        splits = self._split_frames_from_ground_truth()
+        if splits is not None:
+            return {"split_frames": splits}
         path = self._split_file_path()
         if not os.path.isfile(path):
             raise FileNotFoundError(

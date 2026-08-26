@@ -80,6 +80,8 @@ tools/
 │   ├── infer_waft.py / infer_tapip3d.py
 │   ├── test_any2full.py / test_sam3.py
 │   └── visualize_stream.py / visualize_rgbd.py
+├── astribot/         # Astribot dataset preprocessing (extract_frames: sub-task
+│                     #   splits, key frames, per-subtask videos)
 └── hifi-umi/         # HiFi-UMI dataset preprocessing (extract_frames, generate_masks)
 scripts/              # ready-to-run pipeline scripts (infer_waft, infer_stream,
                       # visualize_stream, infer_tapip3d, export_trt_docker, ...)
@@ -312,5 +314,9 @@ python tools/general_test/test_any2full.py \
   entry points in `tools/general_test` (optical flow, segmentation, depth
   densification, streaming, tracking) is documented in
   [`docs/general_test.md`](docs/general_test.md).
+- **Astribot data extraction** — splitting LeRobot Astribot episodes into
+  sub-task segments (ground-truth `subtask_index` preferred, gripper-based
+  inference fallback), key-frame jpgs and per-subtask videos is documented in
+  [`docs/astribot_extract_frames.md`](docs/astribot_extract_frames.md).
 - See the per-model docs in [`docs/`](docs/) for model-specific usage notes
   (preprocessing, output formats, conventions).
