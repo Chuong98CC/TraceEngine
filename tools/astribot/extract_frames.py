@@ -18,7 +18,9 @@ Three independent modes:
 
 Key frames are the first and last frame of an episode plus every frame where
 the gripper state crosses the KEY_FRAME_CHANGE open/close threshold, detected
-on the low-pass filtered signal; the sub-task split frames are the re-grasp
+on the low-pass filtered signal; runs of closed state shorter than
+KEY_FRAME_MIN_CLOSE_S seconds are dropped first, so a noisy blip does not
+produce a key-frame pair. The sub-task split frames are the re-grasp
 midpoints of the combined 1 -> 0 -> 1 gripper pattern (see
 _subtask_split_idxes). The dataset videos must be present on disk for the
 extract_frames and video modes (LeRobotDataset is opened with
@@ -62,6 +64,10 @@ KEY_FRAME_CHANGE = 20
 # moving-average window (frames) applied to the gripper state before the
 # binarization, to suppress sensor noise
 KEY_FRAME_SMOOTH_WIN = 5
+# runs of closed (1) shorter than this many seconds are sensor noise (a
+# gripper that blips closed and re-opens) and are zeroed out before the
+# key-frame change detection; default for --min-close-seconds
+KEY_FRAME_MIN_CLOSE_S = 1.5
 # output roots per mode, under <out_dir>: split_subtask writes the
 # subtask_splits.json + gripper plot, extract_frames the key-frame jpgs,
 # video the per-subtask mp4s
@@ -109,6 +115,11 @@ def parse_args():
                              "default ffmpeg -c copy: frame-accurate at the "
                              "split frames (stream copy is much faster but "
                              "boundaries snap to the nearest keyframes)")
+    parser.add_argument("--min-close-seconds", type=float,
+                        default=KEY_FRAME_MIN_CLOSE_S,
+                        help="runs of closed gripper state shorter than this "
+                             "(seconds) are dropped as noise before key-frame "
+                             "detection (default: %(default)s)")
     return parser.parse_args()
 
 
@@ -474,17 +485,39 @@ class DataExtract:
             smooth[t] = vals[max(0, t - half): min(n, t + half + 1)].mean(axis=0)
         return smooth
 
+    def _suppress_short_closes(self, binary):
+        """Zero out runs of closed (1) shorter than --min-close-seconds,
+        per gripper column: a gripper that blips closed for a few frames
+        and re-opens is sensor noise, not a real grasp, and would otherwise
+        create a spurious key-frame pair (0 -> 1, 1 -> 0)."""
+        min_frames = max(1, round(self.args.min_close_seconds * self.fps))
+        out = binary.copy()
+        for col in range(out.shape[1]):
+            b = out[:, col]
+            # run boundaries: diff of the zero-padded column is +1 at a run
+            # start and -1 at its end; the pairs are (start, end)
+            bounds = np.flatnonzero(np.diff(
+                np.concatenate(([False], b, [False]))))
+            for s, e in bounds.reshape(-1, 2):
+                if e - s < min_frames:
+                    b[s:e] = False
+        return out
+
     def _key_frame_idxes(self, frames, vals, smooth=None):
         """Dataset indices of the episode's key frames: the first frame, the
         last frame, plus every frame where the (smoothed) gripper state
-        crosses the KEY_FRAME_CHANGE threshold (0 -> 1 or 1 -> 0). Without
-        gripper data, falls back to the start / middle / end frames. The
-        low-passed signal may be passed in to avoid recomputing it."""
+        crosses the KEY_FRAME_CHANGE threshold (0 -> 1 or 1 -> 0). Runs of
+        closed state shorter than KEY_FRAME_MIN_CLOSE_S seconds are dropped
+        first (see _suppress_short_closes), so a noisy blip does not produce
+        a key-frame pair. Without gripper data, falls back to the start /
+        middle / end frames. The low-passed signal may be passed in to avoid
+        recomputing it."""
         if vals is None or not len(frames):
             return [self.from_idx, self.middle_idx, self.to_idx - 1]
         if smooth is None:
             smooth = self._low_pass(vals)
         binary = smooth > KEY_FRAME_CHANGE  # (T, n_grippers) 0/1
+        binary = self._suppress_short_closes(binary)
         key_idxes = [frames[0]]
         # a change from 0 to 1 or 1 to 0 marks the first frame of the new
         # level as a key frame. The smoothed crossing flips up to half a
