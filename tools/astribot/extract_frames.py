@@ -4,8 +4,12 @@ For each episode: saves key frames (the first and last frames, plus every
 frame where the gripper state crosses the KEY_FRAME_CHANGE open/close
 threshold, detected on the low-pass filtered signal), writes a re-encoded
 mp4 per selected camera, and/or saves a gripper_left/right state plot that
-also marks the detected key frames. The dataset videos must already be
-present on disk (LeRobotDataset is opened with download_videos=False).
+marks the detected key frames, with the per-frame subtask index drawn as a
+step line in a second subplot below (raw values, not rescaled), and the
+inferred sub-task split frames (re-grasp midpoints of the combined
+1 -> 0 -> 1 gripper pattern, see _subtask_split_idxes) as red vertical
+lines. The dataset videos must already be present on disk
+(LeRobotDataset is opened with download_videos=False).
 
 Examples
 --------
@@ -97,6 +101,7 @@ class DataExtract:
         self.dataset = LeRobotDataset(repo_id=args.repo_id, root=args.data_root,
                                       download_videos=False)
         self.tasks = getattr(self.ds_meta, "tasks", None)
+        self.subtasks = self._load_subtasks()
         self.out_dir = args.out_dir or (args.data_root + "/eps_data")
 
         self.cam_keys = self._select_cameras()
@@ -203,6 +208,21 @@ class DataExtract:
             from_idx = int(eps["dataset_from_index"][ep_idx])
         return int(self.dataset[from_idx]["task_index"].item())
 
+    def _load_subtasks(self):
+        """Dataset subtask mapping {subtask_index: description} from
+        meta/subtasks.parquet, or None when the dataset has none. The parquet
+        index holds the descriptions and the subtask_index column the index,
+        mirroring the tasks.parquet layout."""
+        path = os.path.join(self.ds_meta.root, "meta", "subtasks.parquet")
+        if not os.path.isfile(path):
+            return None
+        import pandas as pd
+
+        df = pd.read_parquet(path)
+        if not len(df) or "subtask_index" not in df.columns:
+            return None
+        return {int(idx): str(desc) for desc, idx in df["subtask_index"].items()}
+
     def _task_description(self, tid):
         """Task description for a task id, or '?' when unknown."""
         tasks = self.tasks
@@ -245,8 +265,8 @@ class DataExtract:
         return self.args.mode in ("plot_gripper_state", "frames", "all")
 
     def _print_meta_info(self):
-        """Print the dataset meta info: summary lines, the camera table and
-        the observation.state table."""
+        """Print the dataset meta info: summary lines, the camera table, the
+        observation.state table and the subtask table."""
         meta = self.ds_meta
         print(f"repo: {self.args.repo_id}")
         print(f"episodes: {meta.total_episodes} | frames: {meta.total_frames}"
@@ -257,6 +277,7 @@ class DataExtract:
             print(f"video: {meta.video_width}x{meta.video_height}")
         self._print_camera_table()
         self._print_state_table()
+        self._print_subtask_table()
 
     def _print_camera_table(self):
         """Available cameras as a rich table, marking the selected ones."""
@@ -303,6 +324,22 @@ class DataExtract:
             table.add_row(str(i), name, str(dtype) if dtype else "-")
         console.print(table)
 
+    def _print_subtask_table(self):
+        """Print the subtask index -> description mapping as a rich table."""
+        from rich.console import Console
+        from rich.table import Table
+
+        console = Console()
+        if not self.subtasks:
+            console.print("[yellow]note: no subtasks.parquet in dataset[/yellow]")
+            return
+        table = Table(title=f"subtasks: {len(self.subtasks)}", title_style="bold cyan")
+        table.add_column("index", justify="right", style="cyan")
+        table.add_column("subtask", style="white")
+        for idx in sorted(self.subtasks):
+            table.add_row(str(idx), self.subtasks[idx])
+        console.print(table)
+
     def _setup_gripper(self):
         """Resolve the gripper columns of observation.state."""
         names = self._state_feature_names(self.ds_meta)
@@ -315,6 +352,16 @@ class DataExtract:
     def _get_gripper_state(self, frame):
         """Gripper state columns of one frame (left/right in dataset order)."""
         return frame["observation.state"][self.gripper_idxes]
+
+    @staticmethod
+    def _subtask_index(frame):
+        """Scalar subtask index of a frame (frame['subtask_index']), or None
+        when the dataset has no such column."""
+        try:
+            s = frame["subtask_index"]
+        except (KeyError, TypeError):
+            return None
+        return s.item() if hasattr(s, "item") else s
 
     # --- output helpers ---------------------------------------------------------
 
@@ -373,6 +420,35 @@ class DataExtract:
             key_idxes.append(frames[-1])
         return key_idxes
 
+    def _subtask_split_idxes(self, states):
+        """Split-frame indices between sub-tasks, inferred from the
+        combined gripper state only (the dataset's subtask_index labels are
+        ground truth for reference and are never used here).
+
+        The combined binary state is the OR of the two gripper columns. A
+        split is placed at the middle of the key-frame pair bounding an
+        open phase of a complete 1 -> 0 -> 1 pattern (closed, released,
+        re-closed): (k0 + k1) // 2, with k0 the 1 -> 0 toggle key frame and
+        k1 the 0 -> 1 toggle key frame. The open phase at the episode start
+        (no preceding 1) or end (no return to 1) yields no split."""
+        if not self.gripper_idxes or not states:
+            return []
+        frames = [f for f, _ in states]
+        vals = np.stack([s.detach().cpu().numpy() if hasattr(s, "detach")
+                         else np.asarray(s) for _, s in states])  # (T, n_grippers)
+        combined = np.any(vals > KEY_FRAME_CHANGE, axis=1)
+        pos = {f: i for i, f in enumerate(frames)}
+        splits = []
+        key_idxes = self._key_frame_idxes(states)
+        for k0, k1 in zip(key_idxes, key_idxes[1:]):
+            p0, p1 = pos[k0], pos[k1]
+            # k0 opens (1 -> 0) and k1 re-closes (0 -> 1); the key frames
+            # are pinned to the first raw crossing, so test the raw state
+            if (p0 > 0 and combined[p0] == 0 and combined[p0 - 1] == 1
+                    and combined[p1] == 1):
+                splits.append((k0 + k1) // 2)
+        return splits
+
     def _episode_dir(self):
         """Per-episode output root: out_dir/ep{ep_idx}_task{task_id}."""
         return os.path.join(self.out_dir, f"ep{self.ep_idx:06d}_task{self.task_id}")
@@ -401,29 +477,36 @@ class DataExtract:
             path = os.path.join(vdir, sub, f"episode_{self.ep_idx:06d}.mp4")
             writers[ci] = cv2.VideoWriter(
                 path, cv2.VideoWriter_fourcc(*"mp4v"), self.fps, (w, h))
-        states = []
+        states, subtasks = [], []
         for frame_idx in range(self.from_idx, self.to_idx + 1):
             frame = self.dataset[frame_idx]
             for ci, writer in writers.items():
                 writer.write(self._to_bgr(frame[self.cam_keys[ci]]))
             if self.gripper_idxes:
                 states.append((frame_idx, self._get_gripper_state(frame)))
+                subtasks.append(self._subtask_index(frame))
         for writer in writers.values():
             writer.release()
         if self.frame_dirs:
             self._save_key_frames(self._key_frame_idxes(states))
         if self.gripper_idxes and states:
-            self._plot_gripper_state(states)
+            self._plot_gripper_state(states, subtasks)
 
     def _collect_gripper_states(self):
-        """Per-frame gripper states of the current episode."""
-        return [(i, self._get_gripper_state(self.dataset[i]))
-                for i in range(self.from_idx, self.to_idx + 1)]
+        """Per-frame (gripper state, subtask index) of the current episode."""
+        states, subtasks = [], []
+        for i in range(self.from_idx, self.to_idx + 1):
+            frame = self.dataset[i]
+            states.append((i, self._get_gripper_state(frame)))
+            subtasks.append(self._subtask_index(frame))
+        return states, subtasks
 
-    def _plot_gripper_state(self, states):
+    def _plot_gripper_state(self, states, subtask_idxes=None):
         """Plot the per-frame gripper state columns, raw and low-pass
         filtered, mark the detected key frames with dashed vertical lines
-        annotated with their frame index, and save one png."""
+        annotated with their frame index, and save one png. When the subtask
+        index is available it is drawn as a second subplot below the gripper
+        state: a step line at the raw integer values, not rescaled."""
         import matplotlib
         matplotlib.use("Agg")  # headless
         import matplotlib.pyplot as plt
@@ -433,27 +516,61 @@ class DataExtract:
                   for _, s in states]
         stacked = np.stack(arrays)  # (T, n_grippers)
         smooth = self._low_pass(stacked)
-        plt.figure(figsize=(10, 4))
+        show_subtasks = (subtask_idxes is not None
+                         and len(subtask_idxes) == len(frames)
+                         and all(s is not None for s in subtask_idxes))
+        if show_subtasks:
+            # two stacked subplots sharing the x axis: gripper state on top,
+            # the subtask index below
+            fig, (ax, ax_sub) = plt.subplots(
+                2, 1, figsize=(10, 5.5), sharex=True,
+                gridspec_kw={"height_ratios": [3, 1], "hspace": 0.12})
+        else:
+            fig, ax = plt.subplots(figsize=(10, 4))
         for i, name in enumerate(self.gripper_names or range(stacked.shape[1])):
-            plt.plot(frames, stacked[:, i], "--", color=f"C{i}", alpha=0.35,
-                     label=f"{name} (raw)")
-            plt.plot(frames, smooth[:, i], color=f"C{i}",
-                     label=f"{name} (filtered)")
+            ax.plot(frames, stacked[:, i], "--", color=f"C{i}", alpha=0.35,
+                    label=f"{name} (raw)")
+            ax.plot(frames, smooth[:, i], color=f"C{i}",
+                    label=f"{name} (filtered)")
         # detected key frames: dashed vertical line, frame index at the top
         # edge of the axes (hanging down from ymax, ending at the line)
-        ymin, ymax = plt.ylim()
+        _, ymax = ax.get_ylim()
         for k in self._key_frame_idxes(states):
-            plt.axvline(x=k, linestyle="--", color="gray", alpha=0.6,
-                        linewidth=1)
-            plt.text(k, ymax, str(k), rotation=90, ha="right", va="top",
-                     fontsize=8, color="gray")
-        plt.xlabel("frame index")
-        plt.ylabel("gripper state")
-        plt.title(f"episode {self.ep_idx:06d} gripper state")
+            ax.axvline(x=k, linestyle="--", color="gray", alpha=0.6,
+                       linewidth=1)
+            ax.text(k, ymax, str(k), rotation=90, ha="right", va="top",
+                    fontsize=8, color="gray")
+        # inferred sub-task split frames: solid red vertical line, split
+        # position at the bottom edge (distinct from the key-frame lines)
+        splits = self._subtask_split_idxes(states)
+        if splits:
+            ymin, _ = ax.get_ylim()
+            for s in splits:
+                ax.axvline(x=s, color="red", linewidth=1.1)
+                ax.text(s, ymin, f"{s:g}", rotation=90, ha="right",
+                        va="bottom", fontsize=8, color="red")
+        ax.set_ylabel("gripper state")
+        ax.set_title(f"episode {self.ep_idx:06d} gripper state")
+        if show_subtasks:
+            # raw subtask index below: one step per frame (where="post"),
+            # integer ticks and a tight y range so the values are shown
+            # as-is instead of being rescaled
+            ax_sub.step(frames, subtask_idxes, where="post", color="C2",
+                        linewidth=1.2)
+            ax_sub.set_ylabel("subtask index")
+            ax_sub.set_yticks(sorted(set(subtask_idxes)))
+            lo, hi = min(subtask_idxes), max(subtask_idxes)
+            ax_sub.set_ylim(lo - 0.5, hi + 0.5)
+            ax_sub.set_xlabel("frame index")
+            # the inferred split frames, mirrored on the subtask subplot
+            for s in splits:
+                ax_sub.axvline(x=s, color="red", linewidth=1.1)
+        else:
+            ax.set_xlabel("frame index")
         # legend outside the axes: an in-axes legend can collide with the
         # key-frame labels at the top edge
-        plt.legend(bbox_to_anchor=(1.01, 1.0), loc="upper left",
-                   borderaxespad=0.0)
+        ax.legend(bbox_to_anchor=(1.01, 1.0), loc="upper left",
+                  borderaxespad=0.0)
         plt.tight_layout()
         gdir = os.path.join(self._episode_dir(), "gripper")
         os.makedirs(gdir, exist_ok=True)
@@ -488,11 +605,12 @@ class DataExtract:
         else:
             # Frames and/or plot: one pass over the episode collects the
             # gripper states the key frames and the plot are derived from.
-            states = self._collect_gripper_states() if self.gripper_idxes else []
+            states, subtasks = (self._collect_gripper_states()
+                                if self.gripper_idxes else ([], []))
             if self.frame_dirs:
                 self._save_key_frames(self._key_frame_idxes(states))
             if self.gripper_idxes:
-                self._plot_gripper_state(states)
+                self._plot_gripper_state(states, subtasks)
 
         self.done_tasks.add(self.task_id)
 
