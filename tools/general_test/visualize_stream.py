@@ -25,6 +25,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
 import imageio
@@ -158,10 +159,21 @@ def _union_scene_points(
     result_dir: str,
     stride: int,
 ) -> np.ndarray:
-    """Union of all frames' clouds (strided) + the trajectory, for view fitting."""
+    """Union of all frames' clouds (strided) + the trajectory, for view fitting.
+
+    Geometry only — the per-frame images are discarded anyway, so this works
+    without frame folders (e.g. the online visualizer)."""
     all_pts = []
     for stem in stems:
-        depth, extrs, intrs, _ = load_pair(stem, input_dirs, result_dir)
+        depths, exts, ints = [], [], []
+        for img_dir in input_dirs:
+            d, e, i = load_npz_data(img_dir, result_dir, stem)
+            depths.append(d)
+            exts.append(e)
+            ints.append(i)
+        depth = np.stack(depths, axis=0)
+        extrs = np.stack(exts, axis=0)
+        intrs = np.stack(ints, axis=0)
         d = depth[:, ::stride, ::stride]
         K = intrs.copy()
         K[:, :2, :] /= stride
@@ -243,6 +255,7 @@ def render_stream_video(
     size: tuple[int, int] = (960, 540),
     max_points_per_frame: int = 100_000,
     stride: int = 4,
+    frame_loader: Callable[[str], np.ndarray] | None = None,
 ) -> str:
     """Render the streaming trajectory video (current-step cloud, growing path).
 
@@ -250,6 +263,12 @@ def render_stream_video(
     first camera (glTF axes) and centered on the full trajectory, with the
     eye distance fitted to the union of all frame clouds.  Frames are
     encoded directly into ``out_path`` (H.264 mp4 via imageio-ffmpeg).
+
+    ``frame_loader`` overrides the per-step images (``(N, H, W, 3)`` uint8
+    RGB, resized to the depth resolution) when the source frames do not
+    live on disk — e.g. ``visualize_subtask_stream.py`` decodes them online
+    from a LeRobotDataset.  Geometry (depth/extrinsics/intrinsics) always
+    comes from the saved NPZs in ``result_dir``.
     """
     if not stems:
         raise ValueError("No stems to render.")
@@ -259,7 +278,11 @@ def render_stream_video(
     h -= h % 2  # x264 wants even dimensions
 
     traj = load_trajectory(stems, input_dirs, result_dir)
-    _, extr0, _, _ = load_pair(stems[0], input_dirs, result_dir)
+    exts0 = []
+    for img_dir in input_dirs:
+        _, e, _ = load_npz_data(img_dir, result_dir, stems[0])
+        exts0.append(e)
+    extr0 = np.stack(exts0, axis=0)
     # The cloud wraps around the camera path (not around the trajectory
     # median), so the view is fit to the union of clouds + trajectory.
     scene_pts = _union_scene_points(stems, input_dirs, result_dir, stride)
@@ -303,7 +326,21 @@ def render_stream_video(
     )
     try:
         for t, stem in enumerate(stems):
-            depth, extrs, intrs, images = load_pair(stem, input_dirs, result_dir)
+            if frame_loader is None:
+                depth, extrs, intrs, images = load_pair(stem, input_dirs, result_dir)
+            else:
+                # Online images: geometry from the NPZs, frames from the
+                # loader (no frame folders on disk).
+                depths, exts, ints = [], [], []
+                for img_dir in input_dirs:
+                    d, e, i = load_npz_data(img_dir, result_dir, stem)
+                    depths.append(d)
+                    exts.append(e)
+                    ints.append(i)
+                depth = np.stack(depths, axis=0)
+                extrs = np.stack(exts, axis=0)
+                intrs = np.stack(ints, axis=0)
+                images = frame_loader(stem)
             geoms = build_frame_geometries(
                 depth,
                 extrs,

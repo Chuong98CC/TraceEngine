@@ -318,5 +318,9 @@ python tools/general_test/test_any2full.py \
   sub-task segments (ground-truth `subtask_index` preferred, gripper-based
   inference fallback), key-frame jpgs and per-subtask videos is documented in
   [`docs/astribot_extract_frames.md`](docs/astribot_extract_frames.md).
+- **Astribot per-sub-task streaming** — streaming depth + pose per sub-task
+  segment directly from the dataset (online frames, optional per-chunk WAFT
+  masks) via `tools/astribot/run_subtask_stream.py` is documented in
+  [`docs/astribot_subtask_stream.md`](docs/astribot_subtask_stream.md).
 - See the per-model docs in [`docs/`](docs/) for model-specific usage notes
   (preprocessing, output formats, conventions).
