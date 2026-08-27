@@ -148,7 +148,8 @@ Each `frame_<idx>.npz` carries `depth` (H, W, metric), `extrinsics`
 sub-task segment from the saved pipeline outputs — the visualization
 counterpart of `run_subtask_stream.py`, built on
 `tools/general_test/visualize_stream.py` but with the colour frames decoded
-**online from the dataset** (no extracted frames or videos on disk):
+**online from the dataset** (no extracted frames or videos on disk). Full
+usage and argument reference: `astribot_visualize_subtask_stream.md`.
 
 ```bash
 python tools/astribot/visualize_subtask_stream.py \
