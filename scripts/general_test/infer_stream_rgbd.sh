@@ -11,7 +11,7 @@ OUTPUT_DIR="${DATA_ROOT}/experiments/rgbd_${BACKEND}"
 #     --input-dirs $RGB_DIR \
 #     --depth-dirs $DEPTH_DIR \
 #     --start-frame 0 --max-frames 160 --interval 1 \
-#     --output-dir $OUTPUT_DIR --no-depth-enhance \
+#     --output-dir $OUTPUT_DIR
 #     # --mask-dirs $LEFT_MASK_DIR $RIGHT_MASK_DIR
 
 # visualize

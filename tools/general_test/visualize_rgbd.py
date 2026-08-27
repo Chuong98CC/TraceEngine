@@ -1,5 +1,5 @@
 """Visualise RGB-D data: either the Astribot head RGB-D camera (ground-truth
-depth camera) or an explicit folder pair (RGB images + depth NPZ files).
+depth camera) or an explicit folder pair (RGB images + depth .lz4 files).
 
 Two mutually exclusive input sources:
 
@@ -7,10 +7,11 @@ Two mutually exclusive input sources:
    aligned depth frame via the astribot dataloader, recovers metric depth from
    the grey-scale depth image.
 2. **Folder mode** (``--rgb_dir`` + ``--depth_npz_dir``): pairs RGB images
-   (``<stem>.jpg/.jpeg/.png``) with depth NPZ files (``<stem>.npz``) by stem
-   and processes the pair at position ``--frame_index`` in the sorted stems.
-   The NPZ must contain ``depth`` (metres, or millimetres for uint16 —
-   auto-detected), ``extrinsics`` (3x4/4x4) and ``intrinsics`` (3x3) keys.
+   (``<stem>.jpg/.jpeg/.png``) with depth .lz4 files (``<stem>.lz4``, raw
+   uint16 mm — see utils.astribot_dataloader.load_depth_lz4) and pose NPZ
+   files (``<stem>.npz`` with ``extrinsics`` 3x4/4x4 and ``intrinsics`` 3x3
+   keys) by stem, and processes the pair at position ``--frame_index`` in
+   the sorted stems.
 
 Exactly one of the two sources must be set.
 
@@ -34,7 +35,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from utils.astribot_dataloader import _scale_intrinsics_matrix, load_rgbd
+from utils.astribot_dataloader import _scale_intrinsics_matrix, load_depth_lz4, load_rgbd
 from utils.visualize_depth import export_glb, save_depth_vis
 
 
@@ -59,8 +60,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--depth_npz_dir", type=str, default=None,
-        help="Folder of depth NPZ files (<stem>.npz) with 'depth' (metres, "
-             "uint16 = mm auto-detected), 'extrinsics' and 'intrinsics' keys. "
+        help="Folder of depth .lz4 files (<stem>.lz4, raw uint16 mm) and pose "
+             "NPZ files (<stem>.npz with 'extrinsics' and 'intrinsics' keys). "
              "Mutually exclusive with --camera_name.",
     )
     parser.add_argument(
@@ -94,10 +95,12 @@ def build_parser() -> argparse.ArgumentParser:
 def _load_folder_pair(rgb_dir: Path, npz_dir: Path, stem: str):
     """Load ``(rgb, depth_m, ext, ixt)`` for one stem from the folder pair.
 
-    ``<npz_dir>/<stem>.npz`` must contain ``depth`` (metres; uint16 millimetres
-    auto-detected), ``extrinsics`` (3x4/4x4) and ``intrinsics`` (3x3) keys.
-    The intrinsics are recorded at the depth resolution, so resizing RGB to
-    the depth resolution needs no intrinsic rescaling here.
+    ``<npz_dir>/<stem>.lz4`` holds the raw uint16 mm depth (see
+    utils.astribot_dataloader.load_depth_lz4), reshaped to the RGB frame
+    size; ``<npz_dir>/<stem>.npz`` holds ``extrinsics`` (3x4/4x4) and
+    ``intrinsics`` (3x3). The intrinsics are recorded at the depth
+    resolution, so resizing RGB to the depth resolution needs no intrinsic
+    rescaling here.
     """
     img_path = None
     for ext in (".jpg", ".jpeg", ".png"):
@@ -107,34 +110,25 @@ def _load_folder_pair(rgb_dir: Path, npz_dir: Path, stem: str):
             break
     if img_path is None:
         raise FileNotFoundError(f"No RGB image with stem {stem!r} in {rgb_dir}")
-
-    npz_path = npz_dir / f"{stem}.npz"
-    if not npz_path.exists():
-        raise FileNotFoundError(f"No depth npz with stem {stem!r}: {npz_path}")
-
-    with np.load(npz_path) as data:
-        assert "depth" in data, f"{npz_path} missing required 'depth' key"
-        assert "extrinsics" in data, f"{npz_path} missing required 'extrinsics' key"
-        assert "intrinsics" in data, f"{npz_path} missing required 'intrinsics' key"
-        depth_m = data["depth"].astype(np.float32)
-
-        # Auto-detect mm vs metres (mirrors colorize_depth in astribot_dataloader).
-        valid = depth_m[depth_m > 0.0]
-        if valid.size > 0 and float(np.median(valid)) > 100.0:
-            depth_m = depth_m / 1000.0
-
-        ext = data["extrinsics"].astype(np.float32)
-        ixt = data["intrinsics"].astype(np.float32)
-
     rgb_bgr = cv2.imread(str(img_path))
     if rgb_bgr is None:
         raise FileNotFoundError(f"Cannot read RGB frame: {img_path}")
     rgb = cv2.cvtColor(rgb_bgr, cv2.COLOR_BGR2RGB)
 
-    # Align RGB to the depth resolution (shared by viz + glb).
-    h_d, w_d = depth_m.shape
-    if rgb.shape[:2] != (h_d, w_d):
-        rgb = cv2.resize(rgb, (w_d, h_d))
+    lz4_path = npz_dir / f"{stem}.lz4"
+    if not lz4_path.exists():
+        raise FileNotFoundError(f"No depth lz4 with stem {stem!r}: {lz4_path}")
+    depth_m = (load_depth_lz4(lz4_path, shape=rgb.shape[:2]) / 1000.0).astype(np.float32)
+
+    npz_path = npz_dir / f"{stem}.npz"
+    if not npz_path.exists():
+        raise FileNotFoundError(f"No pose npz with stem {stem!r}: {npz_path}")
+    with np.load(npz_path) as data:
+        assert "extrinsics" in data, f"{npz_path} missing required 'extrinsics' key"
+        assert "intrinsics" in data, f"{npz_path} missing required 'intrinsics' key"
+        ext = data["extrinsics"].astype(np.float32)
+        ixt = data["intrinsics"].astype(np.float32)
+
     return rgb, depth_m, ext, ixt
 
 

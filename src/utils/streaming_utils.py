@@ -8,7 +8,7 @@ import torch
 from typing import Tuple
 from pathlib import Path
 
-from utils.depth_utils import decode_packed_rgb_to_log_depth
+from utils.astribot_dataloader import load_depth_lz4
 
 def resize_depth_bilinear(depth: np.ndarray, new_shape: Tuple[int, int]) -> np.ndarray:
     is_valid = (depth > 0).astype(np.float32)
@@ -57,26 +57,25 @@ def scan_image_folder(image_dir, start_frame=0, fps=1, max_frames=None):
     return sampled, frame_H, frame_W
 
 
-def load_npz_data(img_dir: str, result_dir: str, stem: str):
-    """Load ``(depth, extrinsics, intrinsics)`` from one view's result NPZ.
+def load_stream_data(img_dir: str, result_dir: str, stem: str):
+    """Load ``(depth, extrinsics, intrinsics)`` from one view's results.
 
-    ``depth`` is stored as packed-RGB ``(H, W, 3)`` uint8 (encoded log
-    depth — see ``utils.depth_utils.encode_log_depth_to_packed_rgb``) and
-    decoded back to float32 metres here when it has 3 channels; raw 2D
-    float32 depth (older NPZs) passes through unchanged.
+    Depth is raw uint16 mm in ``<stem>.lz4`` (see load_depth_lz4) and is
+    returned as float32 metres; pose lives in ``<stem>.npz``
+    (``extrinsics``, ``intrinsics``, ``shape`` — the depth shape the lz4
+    buffer must be reshaped to).
     """
-    npz_path = Path(result_dir) / f"depth_{Path(img_dir).name}/{stem}.npz"
-    if not npz_path.exists():
-        raise FileNotFoundError(f"Result file not found: {npz_path}")
-    data = np.load(npz_path)
-    depth = data["depth"]
-    if depth.ndim == 3:  # packed-RGB (H, W, 3) -> decode; 2D float32 passes through
-        depth = decode_packed_rgb_to_log_depth(depth)
-    return (
-        depth.astype(np.float32),  # (H, W)
-        data["extrinsics"].astype(np.float32),  # (3, 4)
-        data["intrinsics"].astype(np.float32),  # (3, 3)
-    )
+    pose_path = Path(result_dir) / f"depth_{Path(img_dir).name}/{stem}.npz"
+    if not pose_path.exists():
+        raise FileNotFoundError(f"Result file not found: {pose_path}")
+    with np.load(pose_path) as data:
+        depth = load_depth_lz4(pose_path.with_suffix(".lz4"),
+                               tuple(int(v) for v in data["shape"]))
+        return (
+            (depth / 1000.0).astype(np.float32),  # (H, W) uint16 mm -> metres
+            data["extrinsics"].astype(np.float32),  # (3, 4)
+            data["intrinsics"].astype(np.float32),  # (3, 3)
+        )
 
 
 def load_pair(
@@ -98,7 +97,7 @@ def load_pair(
     images_u8_list = []
 
     for img_dir in input_dirs:
-        depth, ext, intr = load_npz_data(img_dir, result_dir, stem)
+        depth, ext, intr = load_stream_data(img_dir, result_dir, stem)
         depths.append(depth)
         extrinsics_list.append(ext)
         intrinsics_list.append(intr)
@@ -142,20 +141,30 @@ def load_batch_frames(file_list, start, end):
 
 
 def load_npz_batch(npz_dir, file_list, start, end):
-    """Load NPZ data for a slice of frames by original frame index.
+    """Load geometry for a slice of frames by original frame index.
 
-    Each NPZ is named frame_{idx}.npz where idx matches the image filename.
+    Depth is raw uint16 mm in ``frame_{idx:06d}.lz4`` (returned as float32
+    metres); pose lives in ``frame_{idx:06d}.npz`` (``extrinsic``,
+    ``intrinsic``, ``shape`` — the depth shape the lz4 buffer must be
+    reshaped to).
     Returns dict with keys: depth (T,H,W), extrs (T,4,4), intrs (T,3,3).
     """
     depths, extrs, intrs = [], [], []
     for idx, _ in file_list[start:end]:
-        fpath = os.path.join(npz_dir, f"frame_{idx}.npz")
-        if not os.path.exists(fpath):
-            raise FileNotFoundError(f"Missing NPZ: {fpath}")
-        data = dict(np.load(fpath, allow_pickle=True))
-        depths.append(data["depth"])
-        extrs.append(data["extrinsic"])
-        intrs.append(data["intrinsic"])
+        lz4_path = os.path.join(npz_dir, f"frame_{idx:06d}.lz4")
+        pose_path = os.path.join(npz_dir, f"frame_{idx:06d}.npz")
+        if not os.path.exists(lz4_path) or not os.path.exists(pose_path):
+            raise FileNotFoundError(f"Missing depth/pose: {lz4_path} / {pose_path}")
+        with np.load(pose_path) as data:
+            depth = load_depth_lz4(lz4_path, tuple(int(v) for v in data["shape"]))
+            depths.append((depth / 1000.0).astype(np.float32))
+            # repo pose-npz keys are plural (extrinsics 3x4 w2c / intrinsics);
+            # accept the legacy singular 4x4 form too and pad 3x4 to 4x4
+            extr = data["extrinsics"] if "extrinsics" in data else data["extrinsic"]
+            if extr.shape == (3, 4):
+                extr = np.vstack([extr, [0, 0, 0, 1]])
+            extrs.append(extr)
+            intrs.append(data["intrinsics"] if "intrinsics" in data else data["intrinsic"])
 
     return {
         "depth": np.stack(depths, axis=0).astype(np.float32),
@@ -276,16 +285,21 @@ def load_resized_batch(file_list, npz_dir, start, end, inference_h, inference_w)
 def compute_global_depth_roi(npz_dir, file_list, inference_h, inference_w):
     """Pre-scan all frames' resized depths; return the global IQR depth ROI.
 
+    Depths are raw uint16 mm ``frame_{idx:06d}.lz4`` files with the depth
+    shape recorded in the companion ``frame_{idx:06d}.npz`` (see
+    load_npz_batch).
     Matches utils.inference_utils.inference(): roi = [1e-7, q75 + 1.5*iqr]
     computed over the resized depth maps of every frame.
     """
     all_d = []
     for idx, _ in file_list:
-        fpath = os.path.join(npz_dir, f"frame_{idx}.npz")
-        if not os.path.exists(fpath):
-            raise FileNotFoundError(f"Missing NPZ: {fpath}")
-        data = dict(np.load(fpath, allow_pickle=True))
-        d = resize_depth_bilinear(data["depth"].astype(np.float32),
+        lz4_path = os.path.join(npz_dir, f"frame_{idx:06d}.lz4")
+        pose_path = os.path.join(npz_dir, f"frame_{idx:06d}.npz")
+        if not os.path.exists(lz4_path):
+            raise FileNotFoundError(f"Missing depth lz4: {lz4_path}")
+        with np.load(pose_path) as data:
+            depth = load_depth_lz4(lz4_path, tuple(int(v) for v in data["shape"]))
+        d = resize_depth_bilinear((depth / 1000.0).astype(np.float32),
                                   (inference_w, inference_h))
         all_d.append(d[d > 0])
     d = torch.from_numpy(np.concatenate(all_d)).float()

@@ -261,11 +261,17 @@ VGGT-Omega) and `scripts/general_test/infer_stream_rgbd.sh` (RGB-D, a2f).
 
 ### visualize_stream.py
 
+> Full documentation: `docs/visualize_stream.md` (viewpoints, fov
+> auto-fit, tone-curve inversion, tuning flags).
+
 Renders the streaming output as a trajectory mp4 **without re-running
 inference** (reads the saved `.lz4` depth + `.npz` pose outputs). Each frame shows that time step's
 coloured point cloud with its camera frustums, plus the growing camera path
 from the first frame to the current one. The view is fixed for the whole
-video (aligned to the first camera, fitted to the union of all frame clouds).
+video (aligned to the first camera, fitted to the union of all frame clouds);
+with `--views 4` each frame is a 2x2 grid of viewpoints (center / down /
+left / right), all looking at the scene centre, each viewport's field of
+view auto-fitted so the scene fills the frame.
 
 ```bash
 python tools/general_test/visualize_stream.py \

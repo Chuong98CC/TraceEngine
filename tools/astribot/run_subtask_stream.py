@@ -22,7 +22,7 @@ WAFT; only the new frames of a chunk run through the model.
 
 The streaming backend runs through an ``OnlineStreaming`` subclass of the
 concrete backend (``VGGT_OMG_Streaming`` / ``DA3_Streaming``): ``img_list``
-holds virtual ``frame_%06d.jpg`` stems (output npz files are named after
+holds virtual ``frame_%06d.jpg`` stems (output files are named after
 them, so saved frames keep their absolute dataset indices), and the chunk's
 image arrays are slice-swapped in for the model forward only.  Peak memory
 is one chunk of frames + masks.
@@ -127,7 +127,7 @@ class OnlineStreaming:
 
     Mixed into a concrete backend (``VGGT_OMG_Streaming`` / ``DA3_Streaming``)
     to replace the disk-folder image/mask loading: ``img_list`` holds virtual
-    ``frame_%06d.jpg`` stems (the base run() names output npz files after
+    ``frame_%06d.jpg`` stems (the base run() names output files after
     them, and padding copies keep their stems so duplicates map to the same
     mask), and the chunk's image arrays are slice-swapped in for the model
     forward only.  Frames are decoded from the dataset online, one chunk at a
@@ -269,7 +269,7 @@ class SubtaskStreamExtract(DataExtract):
             keys = LeRobotDatasetMetadata(repo_id=args.repo_id,
                                           root=args.data_root).camera_keys
             args.camera_idxes = [i for i, key in enumerate(keys) if "depth" not in key][:1]
-        args.mode = "video"  # DataExtract needs one of its modes; only the
+        args.mode = "videos"  # DataExtract needs one of its modes; only the
                              # output-dir/camera/episode machinery is reused
         super().__init__(args)
         self.pipeline_dir = os.path.join(self.out_dir, "pipeline")

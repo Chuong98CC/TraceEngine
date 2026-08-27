@@ -190,12 +190,15 @@ class BaseDA3Model:
         av: dict,
         metric_depths: np.ndarray,
         metric_skys: np.ndarray,
+        apply_metric_scaling_step: bool = True,
     ) -> dict[str, np.ndarray]:
         """Run ``align_anyview_with_metric`` and squeeze the batch dim.
 
         ``av`` holds numpy any-view outputs (batched, ``(1,N,…)``).
         ``metric_depths``/``metric_skys`` are ``(1, N, H, W)``.  Returns numpy
         ``{depth, depth_conf, extrinsics, intrinsics}`` squeezed to ``(N, …)``.
+        ``apply_metric_scaling_step=False`` skips the focal rescale for metric
+        depths that are already metric metres (Any2Full).
         """
         aligned = align_anyview_with_metric(
             anyview_depth=torch.from_numpy(av["depth"]),
@@ -204,6 +207,7 @@ class BaseDA3Model:
             anyview_intrinsics=torch.from_numpy(av["intrinsics"]),
             metric_depth=torch.from_numpy(metric_depths),
             metric_sky=torch.from_numpy(metric_skys),
+            apply_metric_scaling_step=apply_metric_scaling_step,
         )
         out: dict[str, np.ndarray] = {}
         for k in ("depth", "depth_conf", "extrinsics", "intrinsics"):

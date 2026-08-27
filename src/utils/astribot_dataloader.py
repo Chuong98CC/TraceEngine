@@ -156,66 +156,35 @@ def get_camera_params(
         resolutions.append(np.array(_parse_resolution(res), dtype=np.int32))
     return np.stack(exts), np.stack(ixts), resolutions
 
+def save_depth_lz4(depth: np.ndarray, path: Path) -> None:
+    """Compress a uint16 depth map (mm) into an .lz4 file readable by
+    load_depth_lz4: raw little-endian uint16 bytes, lz4-frame compressed."""
+    Path(path).write_bytes(lz4.frame.compress(
+        np.asarray(depth).astype(np.uint16).tobytes()))
+
+
+def save_depth_m_lz4(depth_m: np.ndarray, path: Path) -> None:
+    """Save a float depth map in metres as uint16 millimetres (.lz4)."""
+    from utils.depth_utils import depth_m_to_uint16_mm
+
+    save_depth_lz4(depth_m_to_uint16_mm(depth_m), path)
+
+
 def load_depth_lz4(depth_path: Path, shape: tuple[int, int]) -> np.ndarray:
-    raw = depth_path.read_bytes()
+    """Load a uint16 depth map (mm) from an lz4 file (see save_depth_lz4):
+    raw little-endian uint16 bytes, lz4-frame compressed. Accepts str or
+    Path (streaming_utils passes os.path.join strs)."""
+    raw = Path(depth_path).read_bytes()
     try:
         decoded = lz4.frame.decompress(raw)
     except lz4.frame.LZ4FrameError as exc:
         raise RuntimeError(f"Failed to decompress depth file {depth_path}: {exc}") from exc
     arr = np.frombuffer(decoded, dtype=np.uint16)
     expected = shape[0] * shape[1]
-    if arr.size == expected:
-        return arr.reshape(shape)
-    if arr.size == expected * 3:
-        arr = arr.reshape((shape[0], shape[1], 3)).astype(np.float32).mean(axis=2)
-        return arr.astype(np.uint16)
-    raise ValueError(f"Unexpected decoded depth size for {depth_path}: got {arr.size}, expected {expected} or {expected*3}")
-
-def colorize_depth(depth_frame: np.ndarray, max_depth_m: float = 5.0) -> np.ndarray:
-    """
-    Convert a depth frame to a grayscale image using log-compressed, fixed normalization.
-
-    Mapping:
-      - Zero / invalid pixels (NaN, Inf, 0)  → black (0)
-      - Closest valid depth                  → dark grey (30)
-      - Furthest valid depth (max_depth_m)   → light grey (240)
-
-    Log compression (log1p) is applied so that near-field detail is preserved and
-    the same depth value always maps to the same grey level across all frames
-    (fixed scale = log1p(max_depth_m), not per-frame min/max).
-
-    Args:
-        depth_frame: (H, W) array in metres (float32) or millimetres (uint16 / large float).
-                     Unit auto-detected: if median of valid pixels > 100, assumed mm.
-        max_depth_m: far-plane clip distance in metres.
-
-    Returns:
-        (H, W, 3) uint8 BGR image (all channels equal → greyscale).
-    """
-    depth_f = depth_frame.astype(np.float32)
-
-    # Replace NaN/Inf with 0 (treated as invalid below)
-    depth_f = np.where(np.isfinite(depth_f), depth_f, 0.0)
-
-    # Auto-detect mm vs metres: median of non-zero pixels > 100 → mm
-    valid = depth_f[depth_f > 0.0]
-    if valid.size > 0 and float(np.median(valid)) > 100.0:
-        depth_f /= 1000.0
-
-    valid_mask = depth_f > 0.0
-
-    # Log-compress then normalize with fixed scale (consistent across frames)
-    clipped = np.clip(depth_f, 0.0, max_depth_m)
-    normalized = np.log1p(clipped) / np.log1p(max_depth_m)  # → [0, 1]
-
-    # dark grey (30) = close, light grey (240) = far; black (0) = invalid
-    grey = np.where(
-        valid_mask,
-        (30 + normalized * 210).astype(np.uint8),
-        np.uint8(0),
-    )
-
-    return cv2.cvtColor(grey, cv2.COLOR_GRAY2BGR)
+    if arr.size != expected:
+        raise ValueError(f"Unexpected decoded depth size for {depth_path}: "
+                         f"got {arr.size}, expected {expected}")
+    return arr.reshape(shape)
 
 def normalize_depth_for_display(depth: np.ndarray) -> np.ndarray:
     if depth.dtype == np.uint16 or depth.dtype == np.uint32:
@@ -248,7 +217,7 @@ def load_rgbd(frame_idx: int, camera_name: str) -> tuple[str, np.ndarray, np.nda
     """
     assert camera_name in CAMERA_DEPTH_CONFIG, f"Unknown camera: {camera_name}"
     rgb_path = f"{IMAGES_ROOT}/{camera_name}/color/img_{frame_idx:06d}.jpg"
-    depth_path = f"{IMAGES_ROOT}/{camera_name}/depth/img_{frame_idx:06d}.jpg"
+    depth_path = f"{IMAGES_ROOT}/{camera_name}/depth/img_{frame_idx:06d}.lz4"
     depth_shape = CAMERA_DEPTH_CONFIG[camera_name]["depth_shape"]
     depth_scale = CAMERA_DEPTH_CONFIG[camera_name]["depth_scale"]
 

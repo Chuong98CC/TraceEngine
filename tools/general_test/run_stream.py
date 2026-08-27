@@ -14,6 +14,10 @@ Backends:
                  any-view graph (fixed num_views) + the metric-depth graph,
                  composed by DA3NestedPT2 so the metric component can be
                  swapped independently.
+- ``a2f``        DA3 any-view graph + Any2Full: one RGB input folder (plus
+                 --depth-dirs, the parallel raw-depth folder with .lz4 uint16
+                 mm maps); Any2Full densifies the sparse depth and the
+                 any-view depth is aligned to it (A2F_NestedPT2).
 - ``vggt_omega`` pre-exported VGGT-Omega torch.export program (.pt2/.pt)
                  (fixed num_views).
 
@@ -40,11 +44,13 @@ from datetime import datetime
 import torch
 
 # from base_streaming import _copy_file
+from depth_models.streaming.a2f_streaming import A2F_Streaming
 from depth_models.streaming.da3_streaming import DA3_Streaming
 from depth_models.streaming.loop_utils.config_utils import load_config
 from depth_models.streaming.vggt_omg_streaming import VGGT_OMG_Streaming
 
 _BACKENDS = {
+    "a2f": A2F_Streaming,
     "da3": DA3_Streaming,
     "vggt_omega": VGGT_OMG_Streaming,
 }
@@ -113,14 +119,15 @@ def main(argv: list[str] | None = None) -> int:
         "--backend",
         required=True,
         choices=sorted(_BACKENDS),
-        help="Inference backend: da3, vggt_omega",
+        help="Inference backend: a2f, da3, vggt_omega",
     )
     parser.add_argument(
         "--input-dirs",
         nargs="+",
         required=True,
         help="Input image folders (one per camera); all folders must contain "
-        "the same synchronized frame stems",
+        "the same synchronized frame stems.  For --backend a2f, the RGB "
+        "camera folders — the raw depth goes in --depth-dirs",
     )
     parser.add_argument(
         "--mask-dirs",
@@ -130,6 +137,21 @@ def main(argv: list[str] | None = None) -> int:
         "order and image count).  Mask pixels above 127 are moving and their "
         "confidence is zeroed during chunk alignment only; outputs are "
         "unaffected.",
+    )
+    parser.add_argument(
+        "--depth-dirs",
+        nargs="+",
+        default=None,
+        help="a2f backend only: raw-depth folders (one per --input-dirs, same "
+        "order and frame stems; .lz4 uint16 mm maps, 0 = invalid).  Loaded "
+        "via load_depth_lz4 and scaled to metres by --depth-scale",
+    )
+    parser.add_argument(
+        "--depth-scale",
+        type=float,
+        default=0.001,
+        help="a2f backend only: metres per unit of the raw depth (default "
+        "0.001 = uint16 mm -> metres)",
     )
     parser.add_argument("--start-frame", type=int, default=0)
     parser.add_argument(
@@ -158,9 +180,21 @@ def main(argv: list[str] | None = None) -> int:
         "backend's default",
     )
     parser.add_argument(
+        "--a2f-model-path",
+        default=None,
+        help="Any2Full model artifact path (.pt2); overrides the a2f "
+        "backend's default",
+    )
+    parser.add_argument(
+        "--no-depth-enhance",
+        action="store_true",
+        help="a2f backend only: skip the Any2Full depth-enhance model and feed "
+        "the raw sensor depth directly into the alignment step",
+    )
+    parser.add_argument(
         "--no-compile",
         action="store_true",
-        help="DA3 only: run the exported programs without wrapping them in "
+        help="DA3/a2f only: run the exported programs without wrapping them in "
         "torch.compile (Inductor).  Slower, but useful for debugging numeric "
         "differences.",
     )
@@ -224,6 +258,13 @@ def main(argv: list[str] | None = None) -> int:
         kwargs["anyview_model_path"] = args.anyview_model_path
         kwargs["metric_model_path"] = args.metric_model_path
         kwargs["compile"] = not args.no_compile
+    elif args.backend == "a2f":
+        kwargs["anyview_model_path"] = args.anyview_model_path
+        kwargs["a2f_model_path"] = args.a2f_model_path
+        kwargs["compile"] = not args.no_compile
+        kwargs["use_depth_enhance"] = not args.no_depth_enhance
+        kwargs["depth_dirs"] = args.depth_dirs
+        kwargs["depth_scale"] = args.depth_scale
     elif args.backend == "vggt_omega":
         kwargs["model_path"] = args.model_path
 

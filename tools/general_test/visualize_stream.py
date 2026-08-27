@@ -5,7 +5,9 @@ Trajectory mp4 video for the streaming output.
 Each video frame shows one time step's coloured point cloud with its
 camera frustums, plus the growing camera path from the first frame to the
 current one.  The view is fixed for the whole video (aligned to the first
-camera, fitted to the union of all frame clouds).
+camera, eye behind it along its optical axis, fitted to the union of all
+frame clouds); with ``--views 4`` each frame is a 2x2 grid of viewpoints
+(center / down / left / right), all looking at the scene centre.
 
 CLI (no ``run_stream.py`` needed — uses the already-saved NPZ outputs):
     python da3_streaming/visualize_stream.py \
@@ -28,6 +30,7 @@ import sys
 from collections.abc import Callable
 from pathlib import Path
 
+import cv2
 import imageio
 import numpy as np
 import open3d as o3d
@@ -41,7 +44,7 @@ from utils.visualize_depth import (  # noqa: E402
     _index_color_rgb,
 )
 
-from utils.streaming_utils import load_npz_data, load_pair  # noqa: E402
+from utils.streaming_utils import load_stream_data, load_pair  # noqa: E402
 
 
 # ===========================================================================
@@ -63,7 +66,7 @@ def load_trajectory(
     for stem in stems:
         cams = []
         for img_dir in input_dirs:
-            _, ext, _ = load_npz_data(img_dir, result_dir, stem)
+            _, ext, _ = load_stream_data(img_dir, result_dir, stem)
             c2w = np.linalg.inv(_as_homogeneous44(ext))
             cams.append(c2w[:3, 3])
         centers.append(np.stack(cams, axis=0))
@@ -167,7 +170,7 @@ def _union_scene_points(
     for stem in stems:
         depths, exts, ints = [], [], []
         for img_dir in input_dirs:
-            d, e, i = load_npz_data(img_dir, result_dir, stem)
+            d, e, i = load_stream_data(img_dir, result_dir, stem)
             depths.append(d)
             exts.append(e)
             ints.append(i)
@@ -193,6 +196,38 @@ def _scene_max_extent(points: np.ndarray) -> float:
 
 
 _TONE_LUT_CACHE: dict[str, np.ndarray] = {}
+
+
+def _render_view(
+    renderer,
+    tone_lut: np.ndarray,
+    look_at: np.ndarray,
+    eye: np.ndarray,
+    fov: float,
+    aspect: float,
+) -> np.ndarray:
+    """Render the current scene from ``eye`` looking at ``look_at`` (up +y).
+
+    The field of view is re-applied after ``look_at`` (which may reset it to
+    the renderer default).
+    """
+    renderer.scene.camera.look_at(look_at, eye, [0.0, 1.0, 0.0])
+    renderer.scene.camera.set_projection(
+        fov, aspect, 0.01, 1000.0,
+        o3d.visualization.rendering.Camera.FovType.Vertical,
+    )
+    arr = np.asarray(renderer.render_to_image())
+    if arr.shape[-1] == 4:
+        arr = arr[..., :3]
+    return tone_lut[arr]
+
+
+def _label_viewport(canvas: np.ndarray, name: str, x: int, y: int) -> None:
+    """Draw ``name`` at a viewport corner (black outline + white fill)."""
+    cv2.putText(canvas, name, (x, y + 14), cv2.FONT_HERSHEY_SIMPLEX, 0.6,
+                (0, 0, 0), 3, cv2.LINE_AA)
+    cv2.putText(canvas, name, (x, y + 14), cv2.FONT_HERSHEY_SIMPLEX, 0.6,
+                (255, 255, 255), 1, cv2.LINE_AA)
 
 
 def _build_inverse_tone_curve(renderer, w: int, h: int) -> np.ndarray:
@@ -255,14 +290,34 @@ def render_stream_video(
     size: tuple[int, int] = (960, 540),
     max_points_per_frame: int = 100_000,
     stride: int = 4,
+    view_distance: float = 0.3,
+    views: int = 4,
+    view_angle: float = 45.0,
+    view_lower: float = 0.1,
+    view_raise: float = 0.1,
+    view_back: float = 0.3,
+    view_fov: float | None = None,
     frame_loader: Callable[[str], np.ndarray] | None = None,
 ) -> str:
     """Render the streaming trajectory video (current-step cloud, growing path).
 
     The view is fixed for the whole video: aligned to the first frame's
-    first camera (glTF axes) and centered on the full trajectory, with the
-    eye distance fitted to the union of all frame clouds.  Frames are
-    encoded directly into ``out_path`` (H.264 mp4 via imageio-ffmpeg).
+    first camera (glTF axes), with the eyes ``view_distance`` scene-extents
+    behind it and all looking at the scene centre (the aligned origin —
+    the alignment is centred on the union of all frame clouds).  With
+    ``views=4`` each frame is a 2x2 grid: center; the down view translated
+    ``view_raise`` extents upward and ``view_back`` extents backward (the
+    camera pose falls below the fitted viewport when the eye is directly
+    above it, so the eye is pulled back to bring the frustums/path into
+    view); the left and right views swing ``view_angle`` degrees around the
+    scene centre's vertical axis (45 deg by default) and sit ``view_lower``
+    extents below the center eye.  ``views=1`` renders only the center view.
+
+    Each viewport's field of view is auto-fitted so the scene fills the
+    frame: the union points' p90 angular extent maps to ~85% of the
+    viewport (clamped to 20-90 deg); ``view_fov`` overrides the fit in
+    vertical degrees.  Frames are encoded directly into ``out_path``
+    (H.264 mp4 via imageio-ffmpeg).
 
     ``frame_loader`` overrides the per-step images (``(N, H, W, 3)`` uint8
     RGB, resized to the depth resolution) when the source frames do not
@@ -280,7 +335,7 @@ def render_stream_video(
     traj = load_trajectory(stems, input_dirs, result_dir)
     exts0 = []
     for img_dir in input_dirs:
-        _, e, _ = load_npz_data(img_dir, result_dir, stems[0])
+        _, e, _ = load_stream_data(img_dir, result_dir, stems[0])
         exts0.append(e)
     extr0 = np.stack(exts0, axis=0)
     # The cloud wraps around the camera path (not around the trajectory
@@ -293,24 +348,83 @@ def render_stream_video(
         extent = 1.0
     cam_scale = extent * 0.03
 
-    az, el = np.deg2rad(40.0), np.deg2rad(30.0)
-    eye = (
-        np.array(
-            [np.sin(az) * np.cos(el), np.sin(el), np.cos(az) * np.cos(el)],
-            dtype=np.float64,
-        )
-        * extent
-    )
+    # Viewpoints, all looking at the scene centre (the aligned origin —
+    # the alignment is centred on the union of clouds + trajectory).  The
+    # center view sits ``view_distance`` extents behind the first camera
+    # (in the aligned glTF frame the camera looks along -z, up = +y, so
+    # behind is +z); the down view translates it ``view_raise`` extents
+    # upward and backward; the side views keep the center eye's distance
+    # from the scene centre but swing ``view_angle`` degrees around its
+    # vertical axis (left/right of the center direction — 45 deg by
+    # default), and sit ``view_lower`` extents below it.
+    c2w0 = np.linalg.inv(_as_homogeneous44(extr0[0]))
+    cam_pos = trimesh.transform_points(c2w0[:3, 3][None], alignment)[0]
+    eye_center = cam_pos + np.array([0.0, 0.0, view_distance]) * extent
+    if views == 1:
+        view_eyes = [("center", eye_center)]
+    elif views == 4:
+        swing = np.clip(np.deg2rad(float(view_angle)), 0.0, np.deg2rad(85.0))
+        c, s = np.cos(swing), np.sin(swing)
+        side_y = eye_center[1] - view_lower * extent
+        # Swing the center eye's own vector around the scene centre's
+        # vertical axis so the side eyes keep its distance from the scene:
+        # left = -view_angle, right = +view_angle (y-up rotation).
+        view_eyes = [
+            ("center", eye_center),
+            ("down", eye_center + np.array([0.0, view_raise, view_back]) * extent),
+            ("left", np.array([eye_center[0] * c - eye_center[2] * s,
+                               side_y,
+                               eye_center[0] * s + eye_center[2] * c])),
+            ("right", np.array([eye_center[0] * c + eye_center[2] * s,
+                                side_y,
+                                -eye_center[0] * s + eye_center[2] * c])),
+        ]
+    else:
+        raise ValueError(f"views must be 1 or 4, got {views}")
+    look_at = np.zeros(3)  # scene centre (aligned origin)
 
-    renderer = o3d.visualization.rendering.OffscreenRenderer(w, h)
+    # 2x2 grid of viewports at half the video size (single view uses the
+    # full size).
+    vw, vh = (w // 2, h // 2) if views == 4 else (w, h)
+
+    # Fit each viewport's field of view so the scene fills the frame: the
+    # union scene points are projected into each eye's camera frame and the
+    # p90 angular half-extent per axis is mapped to ~85% of the viewport.
+    # ``view_fov`` overrides the fit (vertical degrees, applied to all).
+    up = np.array([0.0, 1.0, 0.0])
+    pts_aligned = trimesh.transform_points(scene_pts.reshape(-1, 3), alignment)
+    pts_aligned = pts_aligned[np.isfinite(pts_aligned).all(axis=1)]
+    view_fovs: list[float] = []
+    for _, eye in view_eyes:
+        if view_fov is not None:
+            view_fovs.append(view_fov)
+            continue
+        fwd = look_at - eye
+        fwd /= np.linalg.norm(fwd)
+        right = np.cross(fwd, up)
+        right /= np.linalg.norm(right)
+        up2 = np.cross(right, fwd)
+        v = pts_aligned - eye
+        z = v @ fwd
+        keep = z > 0.01 * np.linalg.norm(eye)  # in front of, and off, the eye
+        x = np.arctan2(v[keep] @ right, z[keep])
+        y = np.arctan2(v[keep] @ up2, z[keep])
+        hx = np.percentile(np.abs(x), 90)
+        hy = np.percentile(np.abs(y), 90)
+        vfov = max(
+            2.0 * np.rad2deg(np.arctan(np.tan(hy) / 0.85)),
+            2.0 * np.rad2deg(np.arctan(np.tan(hx) * (vh / vw) / 0.85)),
+        )
+        view_fovs.append(float(np.clip(vfov, 20.0, 90.0)))
+
+    renderer = o3d.visualization.rendering.OffscreenRenderer(vw, vh)
 
     # Invert the renderer's filmic tone curve so video colours match the
     # source images.  Built first: the probe sets its own camera, and the
-    # fitted scene camera below must be the one used for rendering.
-    tone_lut = _build_inverse_tone_curve(renderer, w, h)
+    # fitted scene cameras below must be the ones used for rendering.
+    tone_lut = _build_inverse_tone_curve(renderer, vw, vh)
 
     renderer.scene.set_background([0.05, 0.05, 0.05, 1.0])
-    renderer.scene.camera.look_at(np.zeros(3), eye, [0.0, 1.0, 0.0])
 
     pcd_mat = o3d.visualization.rendering.MaterialRecord()
     pcd_mat.shader = "defaultUnlit"
@@ -333,7 +447,7 @@ def render_stream_video(
                 # loader (no frame folders on disk).
                 depths, exts, ints = [], [], []
                 for img_dir in input_dirs:
-                    d, e, i = load_npz_data(img_dir, result_dir, stem)
+                    d, e, i = load_stream_data(img_dir, result_dir, stem)
                     depths.append(d)
                     exts.append(e)
                     ints.append(i)
@@ -357,10 +471,19 @@ def render_stream_video(
                 renderer.scene.add_geometry("trajectory", geoms["trajectory"], line_mat)
             renderer.scene.add_geometry("frustums", geoms["frustums"], line_mat)
 
-            arr = np.asarray(renderer.render_to_image())
-            if arr.shape[-1] == 4:
-                arr = arr[..., :3]
-            arr = tone_lut[arr]
+            if views == 1:
+                arr = _render_view(renderer, tone_lut, look_at, view_eyes[0][1],
+                                   view_fovs[0], vw / vh)
+            else:
+                canvas = np.zeros((h, w, 3), dtype=np.uint8)
+                for k, (name, eye) in enumerate(view_eyes):
+                    row, col = divmod(k, 2)
+                    y0, x0 = row * vh, col * vw
+                    canvas[y0:y0 + vh, x0:x0 + vw] = _render_view(
+                        renderer, tone_lut, look_at, eye, view_fovs[k], vw / vh
+                    )
+                    _label_viewport(canvas, name, x0 + 8, y0 + 6)
+                arr = canvas
             writer.append_data(arr)
             print(f"  rendered {t + 1}/{len(stems)}: {stem}")
     finally:
@@ -394,6 +517,44 @@ def main(argv: list[str] | None = None) -> int:
         "--max-points", type=int, default=100_000,
         help="Max point-cloud points rendered per video frame (default: 100000)",
     )
+    parser.add_argument(
+        "--view-distance", type=float, default=0.3,
+        help="Eye distance behind the first camera, in scene-extent units "
+             "(default: 0.3)",
+    )
+    parser.add_argument(
+        "--views", type=int, choices=[1, 4], default=4,
+        help="Viewpoints per frame: 1 (center only) or 4 (2x2 grid of "
+             "center/down/left/right) (default: 4)",
+    )
+    parser.add_argument(
+        "--view-angle", type=float, default=45.0,
+        help="Side-view swing for the left/right viewpoints, in degrees off "
+             "the center view around the scene's vertical axis (clamped to "
+             "85; default: 45)",
+    )
+    parser.add_argument(
+        "--view-lower", type=float, default=0.1,
+        help="Downward shift of the left/right viewpoints below the center "
+             "eye, in scene-extent units (default: 0.1)",
+    )
+    parser.add_argument(
+        "--view-raise", type=float, default=0.1,
+        help="Elevation of the down viewpoint, in scene-extent units "
+             "(default: 0.1)",
+    )
+    parser.add_argument(
+        "--view-back", type=float, default=0.3,
+        help="Backward pull of the down viewpoint, in scene-extent units — "
+             "the camera pose falls outside the auto-fitted viewport when "
+             "the eye is straight above it, so the eye is pulled back to "
+             "bring the frustums/path into view (default: 0.3)",
+    )
+    parser.add_argument(
+        "--view-fov", type=float, default=None,
+        help="Override the auto-fitted vertical field of view in degrees "
+             "(default: auto-fit each viewport to the scene)",
+    )
     args = parser.parse_args(argv)
 
     stems = load_stems(args.result_dir, args.input_dirs)
@@ -408,6 +569,13 @@ def main(argv: list[str] | None = None) -> int:
         fps=args.fps,
         size=(w, h),
         max_points_per_frame=args.max_points,
+        view_distance=args.view_distance,
+        views=args.views,
+        view_angle=args.view_angle,
+        view_lower=args.view_lower,
+        view_raise=args.view_raise,
+        view_back=args.view_back,
+        view_fov=args.view_fov,
     )
     return 0
 

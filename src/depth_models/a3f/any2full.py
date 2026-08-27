@@ -46,6 +46,9 @@ class Any2Full_PT2(nn.Module):
         self.do_init_scaling = init_scaling
         self.max_depth = max_depth
         self.min_depth = min_depth
+        # Fixed input resolution of the exported graph (inputs are resized to
+        # it internally by preprocess) — mirrors the DA3 wrappers' target_h/w.
+        self.target_h, self.target_w = 480, 640
         # Precision of the exported graph (fp32 or bf16): inputs must match it.
         params = list(self.model.parameters())
         self.dtype = params[0].dtype if params else torch.float32
@@ -69,9 +72,9 @@ class Any2Full_PT2(nn.Module):
         # Any2Full.forward, which was removed so forward stays exportable).
         if not np.isfinite(depth_metrics).all():
             raise ValueError(f"Input depth contains nan/inf")
-        rgb = self._check_and_resize(rgb, (480, 640), "bilinear", "rgb")
+        rgb = self._check_and_resize(rgb, (self.target_h, self.target_w), "bilinear", "rgb")
         dep = torch.from_numpy(depth_metrics).unsqueeze(0).unsqueeze(0).to(device=self.device, dtype=self.dtype)
-        dep = self._check_and_resize(dep, (480, 640), "nearest", "depth")
+        dep = self._check_and_resize(dep, (self.target_h, self.target_w), "nearest", "depth")
         return rgb, dep
 
     # ---- inference ---------------------------------------------------------

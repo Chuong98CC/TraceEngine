@@ -16,7 +16,8 @@ no extracted frames or videos need to exist on disk.
 - Built on `tools/general_test/visualize_stream.py`'s `render_stream_video`
   (the same lz4-depth + npz-pose input contract), with a `frame_loader` that
   decodes the segment's dataset frames on the fly instead of reading frame
-  folders.
+  folders. The view construction, framing and `--view-*` tuning flags are
+  shared with it — see `visualize_stream.md` for the details.
 - Output: `<seg_dir>/trajectory.mp4` per segment — each video frame shows that
   step's coloured point cloud with its camera frustums and the growing camera
   path; the view is fixed per segment (aligned to the first camera, fitted to
@@ -39,10 +40,15 @@ rendered steps' frames are decoded, so memory stays flat.
 
 **Rendering.** `render_stream_video` does the offscreen rendering: per step
 the coloured point cloud (subsampled to `--max-points`), that step's camera
-frustums, and the trajectory line of all steps up to the current one; the
-whole segment uses one fixed view (aligned to the first camera, fitted to the
-union of the segment's clouds + trajectory). Output is encoded straight to
-`trajectory.mp4` (H.264, even dimensions).
+frustums, and the trajectory line of all steps up to the current one. By
+default each frame is a **2×2 grid** of four viewpoints — center / down /
+left / right — all fixed for the segment (aligned to the first camera) and
+each auto-fitted so the scene fills the frame. The `--view-*` flags tune the
+viewpoints: `--view-angle` / `--view-lower` for the side views, `--view-raise`
+/ `--view-back` for the down view (pull it back if the camera pose is cut
+off), `--view-fov` to override the auto-fit, `--views 1` for a single center
+view. Output is encoded straight to `trajectory.mp4` (H.264, even
+dimensions).
 
 ## Usage
 
@@ -99,6 +105,13 @@ read from the same `depth_<camera>` folders.
 | `--fps` | 10 | video frame rate |
 | `--size` | `960x540` | video size `WxH` (even dimensions required) |
 | `--max-points` | `100_000` | max point-cloud points rendered per video frame |
+| `--view-distance` | `0.3` | eye distance behind the first camera, in scene-extent units |
+| `--views` | `4` | `1` (center only) or `4` (2×2 grid: center/down/left/right) |
+| `--view-angle` | `45.0` | side-view swing for left/right, degrees off the center view (clamped ≤ 85) |
+| `--view-lower` | `0.1` | downward shift of the left/right viewpoints, in scene-extent units |
+| `--view-raise` | `0.1` | elevation of the down viewpoint, in scene-extent units |
+| `--view-back` | `0.3` | backward pull of the down viewpoint, in scene-extent units (keeps the camera pose inside the fitted frame) |
+| `--view-fov` | auto | override the auto-fitted vertical field of view, in degrees |
 
 ## Notes
 

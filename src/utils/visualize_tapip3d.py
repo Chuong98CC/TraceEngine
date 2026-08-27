@@ -181,12 +181,19 @@ def render_tracks(output_dir, fps=10, output=None, trail_len=30,
             continue
 
         # Load geometry from NPZ
-        npz_path = Path(npz_dir) / f"frame_{frame_idx}.npz"
+        npz_path = Path(npz_dir) / f"frame_{frame_idx:06d}.npz"
         if not npz_path.is_file():
             continue
         data = dict(np.load(str(npz_path), allow_pickle=True))
-        intr = data["intrinsic"].copy().astype(np.float32)
-        extr = data["extrinsic"].astype(np.float32)
+        # repo pose-npz keys are plural (extrinsics 3x4 w2c / intrinsics);
+        # accept the legacy singular 4x4 form too and pad 3x4 to 4x4
+        # (batch_project divides by the 4th homogeneous component)
+        extr = data["extrinsics"] if "extrinsics" in data else data["extrinsic"]
+        if extr.shape == (3, 4):
+            extr = np.vstack([extr, [0, 0, 0, 1]])
+        intr = data["intrinsics"].copy() if "intrinsics" in data else data["intrinsic"].copy()
+        intr = intr.astype(np.float32)
+        extr = extr.astype(np.float32)
 
         # Scale intrinsics to inference resolution
         scale_y = (inf_h - 1) / (orig_h - 1)

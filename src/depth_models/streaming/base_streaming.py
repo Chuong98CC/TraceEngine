@@ -11,6 +11,11 @@ Optional ``mask_dirs`` (one binary motion-mask folder per input folder)
 zero the confidence of moving pixels during chunk alignment only — depth
 outputs are unaffected.
 
+Optional ``depth_dirs`` (one raw-depth folder per input folder, ``.lz4``
+uint16 mm maps with matching frame stems) feed RGB-D backends like A2F:
+the depth files are loaded on demand by the backend (via
+``load_depth_lz4``) as paths parallel to ``img_list``.
+
 A short final chunk is padded at its start — with copies of the previous
 chunk's tail, or with duplicated images when the whole sequence fits in a
 single chunk — so fixed-N exports always see exactly ``chunk_size`` images
@@ -43,10 +48,7 @@ from depth_models.streaming.loop_utils.sim3utils import (
     accumulate_sim3_transforms,
     weighted_align_point_maps,
 )
-from utils.depth_utils import (
-    decode_packed_rgb_to_log_depth,
-    encode_log_depth_to_packed_rgb,
-)
+from utils.astribot_dataloader import load_depth_lz4, save_depth_lz4, save_depth_m_lz4
 
 
 # ---------------------------------------------------------------------------
@@ -106,6 +108,10 @@ class BaseStreaming:
     # images regardless of export type, so any total image count works.
     model_num_views: int | None = None
 
+    #: Image extensions scanned per input folder (RGB only — raw depth
+    #: folders are matched separately via ``depth_dirs``).
+    _IMG_EXTS = ("*.jpg", "*.jpeg", "*.png")
+
     def __init__(
         self,
         input_dirs: list[str],
@@ -117,6 +123,7 @@ class BaseStreaming:
         interval: int = 1,
         device: str | None = None,
         mask_dirs: list[str] | None = None,
+        depth_dirs: list[str] | None = None,
     ):
         self.config = config
         self.input_dirs = [os.path.normpath(d) for d in input_dirs]
@@ -131,6 +138,17 @@ class BaseStreaming:
                 f"of input_dirs ({self.num_cams})"
             )
         self.mask_dirs = [os.path.normpath(d) for d in mask_dirs] if mask_dirs else None
+
+        # Optional per-camera raw-depth folders (one per input_dir, same
+        # order and frame stems; .lz4 uint16 mm maps).  Paths are built
+        # parallel to img_list by _load_depth_paths; backends (A2F) load the
+        # maps on demand via load_depth_lz4.
+        if depth_dirs is not None and len(depth_dirs) != self.num_cams:
+            raise ValueError(
+                f"depth_dirs ({len(depth_dirs)} folders) must match the number "
+                f"of input_dirs ({self.num_cams})"
+            )
+        self.depth_dirs = [os.path.normpath(d) for d in depth_dirs] if depth_dirs else None
 
         # Output folders are named after the input folders — basenames must differ.
         basenames = [Path(d).name for d in self.input_dirs]
@@ -159,6 +177,7 @@ class BaseStreaming:
 
         self.img_list: list[str] = []
         self.mask_paths: list[str] | None = None  # parallel to img_list
+        self.depth_paths: list[str] | None = None  # parallel to img_list
         self.chunk_indices: list[tuple[int, int]] = []
 
     # ------------------------------------------------------------------
@@ -175,6 +194,17 @@ class BaseStreaming:
         arrays for the chunk.
         """
         raise NotImplementedError
+
+    def _out_view_slots(self) -> list[int]:
+        """Indices into ``out_dirs`` written per time step (default: all cameras).
+
+        The save loops iterate the chunk outputs as ``data[...][local_t + v]``
+        for ``v`` in these slots, so the slot list also sets the per-step
+        stride (``len(slots)``).  Backends whose input folders are not all
+        output cameras (A2F: RGB + raw-depth input, only the RGB folder emits
+        depth) override this to emit a subset.
+        """
+        return list(range(self.num_cams))
 
     def _check_fixed_num_views(self, reexport_hint: str) -> None:
         """A fixed-N export must match chunk_size exactly (dynamic-N has None)."""
@@ -194,7 +224,7 @@ class BaseStreaming:
         number of loaded time steps.
         """
         print(f"Loading images from {self.num_cams} folders:")
-        exts = ("*.jpg", "*.jpeg", "*.png")
+        exts = self._IMG_EXTS
         per_cam: list[list[Path]] = []
         for d in self.input_dirs:
             files = sorted(p for ext in exts for p in Path(d).glob(ext))
@@ -249,6 +279,19 @@ class BaseStreaming:
         )
         return n
 
+    @staticmethod
+    def _index_frames_by_number(directory: str, exts: tuple[str, ...]) -> dict[int, str]:
+        """Map frame numbers to file paths for one folder (``frame_000210.jpg`` → 210)."""
+        by_frame: dict[int, str] = {}
+        for ext in exts:
+            for p in Path(directory).glob(ext):
+                try:
+                    n = int(p.stem.split("_")[-1])
+                except ValueError:
+                    continue
+                by_frame[n] = str(p)
+        return by_frame
+
     def _load_mask_paths(self) -> None:
         """Build the per-image mask path list parallel to ``self.img_list``.
 
@@ -265,19 +308,10 @@ class BaseStreaming:
             return
 
         exts = ("*.jpg", "*.jpeg", "*.png")
-        per_cam: list[dict[int, str]] = []
-        for d in self.mask_dirs:
-            by_frame: dict[int, str] = {}
-            for ext in exts:
-                for p in Path(d).glob(ext):
-                    try:
-                        n = int(p.stem.split("_")[-1])
-                    except ValueError:
-                        continue
-                    by_frame[n] = str(p)
+        per_cam = [self._index_frames_by_number(d, exts) for d in self.mask_dirs]
+        for d, by_frame in zip(self.mask_dirs, per_cam):
             if not by_frame:
                 raise RuntimeError(f"No mask images found in {d}.")
-            per_cam.append(by_frame)
 
         mask_paths: list[str] = []
         for i, img_path in enumerate(self.img_list):
@@ -295,6 +329,44 @@ class BaseStreaming:
                 )
             mask_paths.append(mask)
         self.mask_paths = mask_paths
+
+    def _load_depth_paths(self) -> None:
+        """Build the per-image raw-depth path list parallel to ``self.img_list``.
+
+        Depth folders are matched to input folders by position, and depth
+        files to frames by number (``frame_000210.jpg`` →
+        ``frame_000210.lz4`` in the same-named depth folder).  Must be
+        called after ``_get_chunk_indices`` — padding copies spliced into
+        ``self.img_list`` duplicate their depth path automatically.  Every
+        selected image must have a depth map (the folders hold the same
+        number of files in the same order as the input folders).
+        """
+        self.depth_paths = None
+        if self.depth_dirs is None:
+            return
+
+        exts = ("*.lz4",)
+        per_cam = [self._index_frames_by_number(d, exts) for d in self.depth_dirs]
+        for d, by_frame in zip(self.depth_dirs, per_cam):
+            if not by_frame:
+                raise RuntimeError(f"No depth files found in {d}.")
+
+        depth_paths: list[str] = []
+        for i, img_path in enumerate(self.img_list):
+            try:
+                n = int(Path(img_path).stem.split("_")[-1])
+            except ValueError as e:
+                raise RuntimeError(
+                    f"Cannot parse frame number from image path {img_path}"
+                ) from e
+            depth = per_cam[i % self.num_cams].get(n)
+            if depth is None:
+                raise RuntimeError(
+                    f"No depth for frame {n} (from {img_path}) in "
+                    f"{self.depth_dirs[i % self.num_cams]}"
+                )
+            depth_paths.append(depth)
+        self.depth_paths = depth_paths
 
     @staticmethod
     def _stack_chunk_masks(mask_paths: list[str], h: int, w: int) -> np.ndarray:
@@ -415,8 +487,10 @@ class BaseStreaming:
             src = "duplicated" if num_chunks == 1 else "copied from the previous chunk"
             print(f"  Last chunk padded at its start with {pad} {src} images")
 
-        # Built after the padding splice so duplicates map to the same mask.
+        # Built after the padding splice so duplicates map to the same
+        # mask / depth file.
         self._load_mask_paths()
+        self._load_depth_paths()
 
         # Per-time-step metadata: (stem, chunk_idx, intr_Kx3x3)
         frame_meta: list[tuple[str, int, np.ndarray]] = []
@@ -427,8 +501,10 @@ class BaseStreaming:
         out_dirs = [
             os.path.join(self.output_dir, f"depth_{Path(d).name}") for d in self.input_dirs
         ]
-        for d in out_dirs:
-            os.makedirs(d, exist_ok=True)
+        depth_shape = None  # (H, W) of the depth maps, captured at first save
+        slots = self._out_view_slots()
+        for v in slots:
+            os.makedirs(out_dirs[v], exist_ok=True)
 
         # Per-chunk inference (model forward) timings; the total covers the
         # whole run() including alignment and file I/O.
@@ -454,24 +530,26 @@ class BaseStreaming:
 
             # Save depth per view using the source image stem; leading padding
             # images are discarded here (but were used for alignment below).
-            # Depth is stored packed-RGB under the same "depth" key (encoded
-            # log depth, see utils.depth_utils) — ~2x smaller in the
-            # compressed npz than float32 — and decoded back on load
-            # (load_npz_data checks the channel count).
-            for local_t in range(pad_imgs, n_imgs, self.num_cams):
-                stem = Path(self.img_list[ch_start + local_t]).stem
-                for v in range(self.num_cams):
-                    depth_path = os.path.join(out_dirs[v], f"{stem}.npz")
-                    np.savez_compressed(
-                        depth_path,
-                        depth=encode_log_depth_to_packed_rgb(
-                            data["depth"][local_t + v]
-                        ),
-                    )
+            # Depth is stored as raw uint16 mm .lz4 (see save_depth_m_lz4);
+            # the aligned pass below rewrites it with the SIM3 scale and adds
+            # the warped pose as a separate .npz per frame.  pad_imgs counts
+            # images; each time step has self.num_cams images and len(slots)
+            # outputs, so the loop iterates steps and maps step -> img_list
+            # position and step -> data offset separately (for the default
+            # slots == num_cams these coincide).
+            pad_steps = pad_imgs // self.num_cams
+            for local_step in range(pad_steps, n_imgs // len(slots)):
+                base = local_step * len(slots)
+                stem = Path(self.img_list[ch_start + local_step * self.num_cams]).stem
+                if depth_shape is None:
+                    depth_shape = tuple(data["depth"].shape[1:])
+                for v in slots:
+                    depth_path = os.path.join(out_dirs[v], f"{stem}.lz4")
+                    save_depth_m_lz4(data["depth"][base + v], depth_path)
 
-                all_extrinsics.append(data["extrinsics"][local_t : local_t + self.num_cams].copy())
+                all_extrinsics.append(data["extrinsics"][base : base + len(slots)].copy())
                 frame_meta.append(
-                    (stem, ci, data["intrinsics"][local_t : local_t + self.num_cams].copy())
+                    (stem, ci, data["intrinsics"][base : base + len(slots)].copy())
                 )
 
             # Align with previous chunk (full chunk vs full chunk)
@@ -498,16 +576,19 @@ class BaseStreaming:
 
             ext_warped = _warp_extrinsics(ext, s, R, t)
 
-            for v in range(self.num_cams):
-                depth_path = os.path.join(out_dirs[v], f"{stem}.npz")
-                depth_raw = decode_packed_rgb_to_log_depth(
-                    np.load(depth_path)["depth"]
+            for v in slots:
+                depth_path = os.path.join(out_dirs[v], f"{stem}.lz4")
+                depth_mm = load_depth_lz4(Path(depth_path), depth_shape)
+                # SIM3 scale applied in mm
+                save_depth_lz4(
+                    np.clip(np.round(depth_mm * s), 0, 65535).astype(np.uint16),
+                    depth_path,
                 )
                 np.savez_compressed(
-                    depth_path,
-                    depth=encode_log_depth_to_packed_rgb(depth_raw * s),
+                    os.path.join(out_dirs[v], f"{stem}.npz"),
                     extrinsics=ext_warped[v],
                     intrinsics=intr[v],
+                    shape=np.array(depth_shape),
                 )
 
         total_s = time.perf_counter() - t_run0

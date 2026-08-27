@@ -174,6 +174,7 @@ def align_anyview_with_metric(
     anyview_intrinsics: torch.Tensor,
     metric_depth: torch.Tensor,
     metric_sky: torch.Tensor,
+    apply_metric_scaling_step: bool = True,
 ) -> dict[str, torch.Tensor]:
     """Replicate ``NestedDepthAnything3Net`` alignment logic in standalone Python.
 
@@ -198,6 +199,10 @@ def align_anyview_with_metric(
         Raw metric-model depth (monocular, unscaled).
     metric_sky : ``(B, N, H, W)`` or ``(N, H, W)``
         Metric-model sky logits (0 = non-sky, 1 = sky).
+    apply_metric_scaling_step : bool, default ``True``
+        When False, step 1 is skipped: the metric depth is already metric
+        metres (e.g. Any2Full's affine-fit output) and the ``focal / 300``
+        rescale would corrupt its scale.
 
     Returns
     -------
@@ -207,7 +212,8 @@ def align_anyview_with_metric(
 
 
     # ---- step 1: metric scaling --------------------------------------------
-    metric_depth = apply_metric_scaling(metric_depth, anyview_intrinsics)
+    if apply_metric_scaling_step:
+        metric_depth = apply_metric_scaling(metric_depth, anyview_intrinsics)
 
     # ---- step 2: least-squares scale alignment -----------------------------
     non_sky_mask = compute_sky_mask(metric_sky, threshold=0.3)

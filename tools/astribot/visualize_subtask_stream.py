@@ -42,7 +42,7 @@ from tqdm import tqdm
 
 from tools.astribot.extract_frames import DataExtract
 from tools.general_test.visualize_stream import render_stream_video
-from utils.streaming_utils import load_npz_data
+from utils.streaming_utils import load_stream_data
 from utils.visualize_mask import to_pil
 
 
@@ -81,6 +81,44 @@ def parse_args(argv: list[str] | None = None):
     parser.add_argument("--max-points", type=int, default=100_000,
                         help="max point-cloud points rendered per video frame "
                              "(default: 100000)")
+    parser.add_argument(
+        "--view-distance", type=float, default=0.3,
+        help="eye distance behind the first camera, in scene-extent units "
+             "(default: 0.3)",
+    )
+    parser.add_argument(
+        "--views", type=int, choices=[1, 4], default=4,
+        help="viewpoints per frame: 1 (center only) or 4 (2x2 grid of "
+             "center/down/left/right) (default: 4)",
+    )
+    parser.add_argument(
+        "--view-angle", type=float, default=45.0,
+        help="side-view swing for the left/right viewpoints, in degrees off "
+             "the center view around the scene's vertical axis (clamped to "
+             "85; default: 45)",
+    )
+    parser.add_argument(
+        "--view-lower", type=float, default=0.1,
+        help="downward shift of the left/right viewpoints below the center "
+             "eye, in scene-extent units (default: 0.1)",
+    )
+    parser.add_argument(
+        "--view-raise", type=float, default=0.1,
+        help="elevation of the down viewpoint, in scene-extent units "
+             "(default: 0.1)",
+    )
+    parser.add_argument(
+        "--view-back", type=float, default=0.3,
+        help="backward pull of the down viewpoint, in scene-extent units — "
+             "the camera pose falls outside the auto-fitted viewport when "
+             "the eye is straight above it, so the eye is pulled back to "
+             "bring the frustums/path into view (default: 0.3)",
+    )
+    parser.add_argument(
+        "--view-fov", type=float, default=None,
+        help="override the auto-fitted vertical field of view in degrees "
+             "(default: auto-fit each viewport to the scene)",
+    )
     return parser.parse_args(argv)
 
 
@@ -98,7 +136,7 @@ class SubtaskStreamVisualize(DataExtract):
             keys = LeRobotDatasetMetadata(repo_id=args.repo_id,
                                           root=args.data_root).camera_keys
             args.camera_idxes = [i for i, key in enumerate(keys) if "depth" not in key][:1]
-        args.mode = "video"  # DataExtract needs one of its modes; only the
+        args.mode = "videos"  # DataExtract needs one of its modes; only the
                              # output-dir/camera/episode machinery is reused
         super().__init__(args)
         self.pipeline_dir = os.path.join(self.out_dir, "pipeline")
@@ -161,7 +199,7 @@ class SubtaskStreamVisualize(DataExtract):
             print(f"  [subtask {k:02d}] skip: no npz results in {npz_dir}")
             return
         out_path = os.path.join(seg_dir, "trajectory.mp4")
-        depth0, _, _ = load_npz_data(self.input_dirs[0], seg_dir, stems[0])
+        depth0, _, _ = load_stream_data(self.input_dirs[0], seg_dir, stems[0])
         h, w = depth0.shape
         print(f"  [subtask {k:02d}] frames [{lo}, {hi}) -> {len(stems)} steps "
               f"({npz_dir}) -> {out_path}")
@@ -175,6 +213,13 @@ class SubtaskStreamVisualize(DataExtract):
             size=(w_vid, h_vid),
             max_points_per_frame=self.args.max_points,
             stride=self.args.stride,
+            view_distance=self.args.view_distance,
+            views=self.args.views,
+            view_angle=self.args.view_angle,
+            view_lower=self.args.view_lower,
+            view_raise=self.args.view_raise,
+            view_back=self.args.view_back,
+            view_fov=self.args.view_fov,
             frame_loader=self._frame_loader(h, w),
         )
 
