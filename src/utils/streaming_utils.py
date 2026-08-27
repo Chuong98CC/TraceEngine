@@ -8,6 +8,8 @@ import torch
 from typing import Tuple
 from pathlib import Path
 
+from utils.depth_utils import decode_packed_rgb_to_log_depth
+
 def resize_depth_bilinear(depth: np.ndarray, new_shape: Tuple[int, int]) -> np.ndarray:
     is_valid = (depth > 0).astype(np.float32)
     depth_resized = cv2.resize(depth, new_shape, interpolation=cv2.INTER_LINEAR)
@@ -56,13 +58,22 @@ def scan_image_folder(image_dir, start_frame=0, fps=1, max_frames=None):
 
 
 def load_npz_data(img_dir: str, result_dir: str, stem: str):
-    """Load ``(depth, extrinsics, intrinsics)`` from one view's result NPZ."""
+    """Load ``(depth, extrinsics, intrinsics)`` from one view's result NPZ.
+
+    ``depth`` is stored as packed-RGB ``(H, W, 3)`` uint8 (encoded log
+    depth — see ``utils.depth_utils.encode_log_depth_to_packed_rgb``) and
+    decoded back to float32 metres here when it has 3 channels; raw 2D
+    float32 depth (older NPZs) passes through unchanged.
+    """
     npz_path = Path(result_dir) / f"depth_{Path(img_dir).name}/{stem}.npz"
     if not npz_path.exists():
         raise FileNotFoundError(f"Result file not found: {npz_path}")
     data = np.load(npz_path)
+    depth = data["depth"]
+    if depth.ndim == 3:  # packed-RGB (H, W, 3) -> decode; 2D float32 passes through
+        depth = decode_packed_rgb_to_log_depth(depth)
     return (
-        data["depth"].astype(np.float32),  # (H, W)
+        depth.astype(np.float32),  # (H, W)
         data["extrinsics"].astype(np.float32),  # (3, 4)
         data["intrinsics"].astype(np.float32),  # (3, 3)
     )

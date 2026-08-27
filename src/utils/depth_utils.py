@@ -2,7 +2,12 @@ import sys
 import numpy as np
 from typing import Optional
 import cv2
+import numpy as np
+import torch
 
+MAX_DEPTH = 2.001  # Maximum depth in meters for encoding/decoding
+MIN_DEPTH = 0.001  # Minimum depth in meters for encoding/decoding
+QUANT_MAX = 65535
 def unproject_depth_map_to_point_map(
     depth_map: np.ndarray, extrinsic: np.ndarray, intrinsic: np.ndarray
 ) -> np.ndarray:
@@ -154,3 +159,98 @@ def draw_measurement(
         cv2.imwrite(save_path, out)
 
     return out
+
+
+# ---------------------------------------------------------------------------
+# ENCODE: float32 depth (meters) -> Log-Transformed uint16 -> Packed RGB (H, W, 3)
+# ---------------------------------------------------------------------------
+def encode_log_depth_to_packed_rgb(
+    depth_m: np.ndarray | torch.Tensor,
+    depth_min: float = MIN_DEPTH,
+    depth_max: float = MAX_DEPTH,
+    shift: float = 0.001,
+    use_log: bool = True,
+    quant_max: int = QUANT_MAX,  # 16-bit full range (use 4095 for 12-bit)
+) -> np.ndarray:
+    """
+    Applies log transformation and packs the resulting 16-bit integer across R and G channels.
+    """
+    if isinstance(depth_m, torch.Tensor):
+        depth_m = depth_m.detach().cpu().numpy()
+
+    depth = depth_m.astype(np.float32)
+    valid_mask = (depth > 0) & np.isfinite(depth)
+
+    # 1. Log / Linear Domain Mapping
+    if use_log:
+        z = np.log(depth + shift)
+        z_min = np.log(depth_min + shift)
+        z_max = np.log(depth_max + shift)
+    else:
+        z = depth
+        z_min = depth_min
+        z_max = depth_max
+
+    # 2. Normalize to [0.0, 1.0] and scale to integer quantization range
+    norm = np.clip((z - z_min) / (z_max - z_min), 0.0, 1.0)
+    pixel_int = norm * float(quant_max)
+
+    # 3. Mask invalid pixels to 0
+    depth_uint16 = np.where(valid_mask, pixel_int, 0.0).astype(np.uint16)
+
+    # Squeeze channel dim if (H, W, 1)
+    if depth_uint16.ndim == 3 and depth_uint16.shape[-1] == 1:
+        depth_uint16 = depth_uint16.squeeze(-1)
+
+    # 4. Pack into 8-bit R (MSB) and G (LSB) channels
+    r_msb = (depth_uint16 >> 8).astype(np.uint8)
+    g_lsb = (depth_uint16 & 0xFF).astype(np.uint8)
+    b_empty = np.zeros_like(r_msb)
+
+    return np.stack([r_msb, g_lsb, b_empty], axis=-1)
+
+
+# ---------------------------------------------------------------------------
+# DECODE: Packed RGB (H, W, 3) -> Reconstructed float32 depth (meters)
+# ---------------------------------------------------------------------------
+def decode_packed_rgb_to_log_depth(
+    frame_rgb: np.ndarray | torch.Tensor,
+    depth_min: float = MIN_DEPTH,
+    depth_max: float = MAX_DEPTH,
+    shift: float = 0.001,
+    use_log: bool = True,
+    quant_max: int = QUANT_MAX,
+) -> np.ndarray:
+    """
+    Unpacks R/G channels and inverts the log transform back to metric float32 (meters).
+    """
+    if isinstance(frame_rgb, torch.Tensor):
+        frame_rgb = frame_rgb.detach().cpu().numpy()
+
+    # Reorder channels if (3, H, W) -> (H, W, 3)
+    if frame_rgb.shape[0] == 3 and frame_rgb.ndim == 3:
+        frame_rgb = np.transpose(frame_rgb, (1, 2, 0))
+
+    # 1. Unpack 16-bit integer from R and G
+    r_msb = frame_rgb[..., 0].astype(np.uint16)
+    g_lsb = frame_rgb[..., 1].astype(np.uint16)
+    depth_uint16 = (r_msb << 8) | g_lsb
+
+    valid_mask = depth_uint16 > 0
+
+    # 2. Normalize back to [0.0, 1.0]
+    norm = depth_uint16.astype(np.float32) / float(quant_max)
+
+    # 3. Invert Log / Linear transformation
+    if use_log:
+        z_min = np.log(depth_min + shift)
+        z_max = np.log(depth_max + shift)
+        z = z_min + norm * (z_max - z_min)
+        depth_m = np.exp(z) - shift
+    else:
+        depth_m = depth_min + norm * (depth_max - depth_min)
+
+    # Zero out invalid pixels and negative values caused by shift
+    depth_m = np.where(valid_mask, np.maximum(depth_m, 0.0), 0.0)
+
+    return depth_m.astype(np.float32)

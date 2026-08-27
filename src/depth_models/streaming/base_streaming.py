@@ -43,6 +43,10 @@ from depth_models.streaming.loop_utils.sim3utils import (
     accumulate_sim3_transforms,
     weighted_align_point_maps,
 )
+from utils.depth_utils import (
+    decode_packed_rgb_to_log_depth,
+    encode_log_depth_to_packed_rgb,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -450,11 +454,20 @@ class BaseStreaming:
 
             # Save depth per view using the source image stem; leading padding
             # images are discarded here (but were used for alignment below).
+            # Depth is stored packed-RGB under the same "depth" key (encoded
+            # log depth, see utils.depth_utils) — ~2x smaller in the
+            # compressed npz than float32 — and decoded back on load
+            # (load_npz_data checks the channel count).
             for local_t in range(pad_imgs, n_imgs, self.num_cams):
                 stem = Path(self.img_list[ch_start + local_t]).stem
                 for v in range(self.num_cams):
                     depth_path = os.path.join(out_dirs[v], f"{stem}.npz")
-                    np.savez_compressed(depth_path, depth=data["depth"][local_t + v])
+                    np.savez_compressed(
+                        depth_path,
+                        depth=encode_log_depth_to_packed_rgb(
+                            data["depth"][local_t + v]
+                        ),
+                    )
 
                 all_extrinsics.append(data["extrinsics"][local_t : local_t + self.num_cams].copy())
                 frame_meta.append(
@@ -487,10 +500,12 @@ class BaseStreaming:
 
             for v in range(self.num_cams):
                 depth_path = os.path.join(out_dirs[v], f"{stem}.npz")
-                depth_raw = np.load(depth_path)["depth"]
+                depth_raw = decode_packed_rgb_to_log_depth(
+                    np.load(depth_path)["depth"]
+                )
                 np.savez_compressed(
                     depth_path,
-                    depth=depth_raw * s,
+                    depth=encode_log_depth_to_packed_rgb(depth_raw * s),
                     extrinsics=ext_warped[v],
                     intrinsics=intr[v],
                 )
