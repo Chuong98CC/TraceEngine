@@ -31,19 +31,23 @@ flowchart LR
    thresholds the flow magnitude into per-pixel motion masks. The masks mark
    moving pixels; the next step uses them to **select static points for aligning
    the cameras over a long trajectory**.
-3. **Camera pose + depth** — `scripts/infer_stream.sh` runs the streaming
-   multi-camera model (VGGT-Omega or DA3) over the frames in sliding chunks and
-   aligns the chunks into one consistent world frame, producing per-frame metric
-   depth and camera poses for every view. `scripts/visualize_stream.sh` renders
-   the depth and camera motion as a video.
+3. **Camera pose + depth** — `scripts/general_test/infer_stream_stereo.sh` runs
+   the streaming multi-camera model (VGGT-Omega or DA3) over the frames in
+   sliding chunks and aligns the chunks into one consistent world frame,
+   producing per-frame metric depth and camera poses for every view.
+   `scripts/general_test/infer_stream_rgbd.sh` is the RGB-D variant (`a2f`
+   backend): a camera's raw sensor depth (`.lz4` uint16 mm, via `--depth-dirs`)
+   is densified by Any2Full and used as the metric anchor for the any-view
+   alignment. `scripts/visualize_stream.sh` renders the depth and camera motion
+   as a video.
 4. **3D traces** — `scripts/infer_tapip3d.sh` runs TAPIP3D on top of the pose +
    depth output and tracks the object over time. You need to provide the
    **bounding box** of the tracked object (e.g. derived from a segmentation
    mask).
 
 Each step is detailed below with its reference script and key flags.
-Any2Full (single-frame RGB-D densification) is a separate capability, described
-in its [own section](#rgb-d-depth-densification-any2full).
+Any2Full (single-frame RGB-D densification, and the RGB-D `a2f` streaming
+backend) is documented in [`docs/general_test.md`](docs/general_test.md).
 
 ## Installation
 
@@ -76,15 +80,16 @@ src/
 tools/
 ├── export_trt.py     # ONNX → TensorRT via trtexec
 ├── general_test/     # inference + visualization entry points
-│   ├── run_stream.py # streaming (--backend da3|vggt_omega)
+│   ├── run_stream.py # streaming (--backend da3|vggt_omega|a2f)
 │   ├── infer_waft.py / infer_tapip3d.py
 │   ├── test_any2full.py / test_sam3.py
 │   └── visualize_stream.py / visualize_rgbd.py
 ├── astribot/         # Astribot dataset preprocessing (extract_frames: sub-task
-│                     #   splits, key frames, per-subtask videos)
+│                     #   splits, key frames, per-subtask videos + frames/depth)
 └── hifi-umi/         # HiFi-UMI dataset preprocessing (extract_frames, generate_masks)
-scripts/              # ready-to-run pipeline scripts (infer_waft, infer_stream,
-                      # visualize_stream, infer_tapip3d, export_trt_docker, ...)
+scripts/              # ready-to-run pipeline scripts (infer_waft,
+                      # infer_stream_stereo/rgbd, visualize_stream,
+                      # infer_tapip3d, export_trt_docker, ...)
 weights/              # model weights (ONNX / TRT / TorchScript / .pt2)
 ```
 
@@ -127,7 +132,8 @@ weights
   [`docs/general_test.md`](docs/general_test.md).
 - **Astribot data extraction** — splitting LeRobot Astribot episodes into
   sub-task segments (ground-truth `subtask_index` preferred, gripper-based
-  inference fallback), key-frame jpgs and per-subtask videos is documented in
+  inference fallback), key-frame jpgs, per-subtask videos and sampled
+  per-subtask frames (+ uint16 depth `.lz4`) is documented in
   [`docs/astribot_extract_frames.md`](docs/astribot_extract_frames.md).
 - **Astribot per-sub-task streaming** — streaming depth + pose per sub-task
   segment directly from the dataset (online frames, optional per-chunk WAFT

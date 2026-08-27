@@ -13,11 +13,11 @@ scripts under `scripts/` are thin wrappers around these entry points.
 
 | # | Script | Model / capability | Runtime |
 |---|---|---|---|
-| 1 | `visualize_rgbd.py` | RGB-D visualization (image / depth-npz folders) | — (rendering) |
+| 1 | `visualize_rgbd.py` | RGB-D visualization (image / depth-lz4 + pose-npz folder pair) | — (rendering) |
 | 2 | `infer_waft.py` | dense optical flow | WAFT (ONNX / TensorRT) |
 | 3 | `test_sam3.py` | promptable segmentation (box + text) | SAM3 (`.pt2`) |
 | 4 | `test_any2full.py` | RGB-D depth densification | Any2Full (`.pt2`) |
-| 5 | `run_stream.py` / `visualize_stream.py` | streaming multi-camera depth + pose, trajectory video | DA3 / VGGT-Omega (`.pt2`) |
+| 5 | `run_stream.py` / `visualize_stream.py` | streaming multi-camera depth + pose (incl. RGB-D `a2f`), trajectory video | DA3 / VGGT-Omega / Any2Full (`.pt2`) |
 | 6 | `infer_tapip3d.py` | 3D point tracking over long videos | TAPIP3D (ONNX) |
 
 Model weights are expected under `weights/` (see the repo README for the
@@ -35,17 +35,18 @@ Visualizes RGB-D data from **one of two mutually exclusive sources**:
    recovered from the greyscale depth image (clip at `--max_depth_m`).
    Sample data are in `assets/astribot_test_imgs`.
 2. **Folder mode** (`--rgb_dir` + `--depth_npz_dir`) — pairs RGB images
-   (`<stem>.jpg/.jpeg/.png`) with depth NPZ files (`<stem>.npz`) by stem. The
-   NPZ must contain `depth` (metres; uint16 = millimetres is auto-detected),
-   `extrinsics` (3×4/4×4) and `intrinsics` (3×3). `--frame_index` selects the
-   pair at that position in the sorted matching stems.
+   (`<stem>.jpg/.jpeg/.png`) by stem with a depth `<stem>.lz4` (raw uint16 mm,
+   see `utils.astribot_dataloader.load_depth_lz4`, reshaped to the RGB frame
+   size) and a pose `<stem>.npz` (`extrinsics` 3×4/4×4, `intrinsics` 3×3) —
+   the format written by `run_stream.py`. `--frame_index` selects the pair at
+   that position in the sorted matching stems.
 
 ```bash
 # Astribot camera frame
 python tools/general_test/visualize_rgbd.py --camera_name head_rgbd \
     --frame_index 0 --save_viz --save_glb
 
-# RGB + depth-npz folder pair (e.g. a run_stream.py output)
+# RGB + depth-lz4 folder pair (e.g. a run_stream.py output)
 python tools/general_test/visualize_rgbd.py \
     --rgb_dir path/to/rgb --depth_npz_dir path/to/depth \
     --save_viz --save_glb
@@ -54,7 +55,7 @@ python tools/general_test/visualize_rgbd.py \
 | Argument | Default | Description |
 |---|---|---|
 | `--camera_name` | — | Astribot camera (mutually exclusive with the folder pair) |
-| `--rgb_dir` / `--depth_npz_dir` | — | Folder pair (mutually exclusive with `--camera_name`) |
+| `--rgb_dir` / `--depth_npz_dir` | — | Folder pair: RGB images + depth `.lz4` / pose `.npz` (mutually exclusive with `--camera_name`) |
 | `--frame_index` | `0` | Frame to process (camera mode: index; folder mode: position in sorted stems) |
 | `--max_depth_m` | `5.0` | Far-plane clip for recovering metric depth from the greyscale image |
 | `--output`, `-o` | `output/rgbd` | Output directory |
@@ -182,7 +183,7 @@ camera intrinsics), `frame_<idx>.npy` (metric depth), `<stem>.png`
 ### run_stream.py
 
 Multi-camera depth + camera pose over a long trajectory, in sliding chunks
-aligned into one world frame. Unified entry point for two backends:
+aligned into one world frame. Unified entry point for three backends:
 
 - `da3` — two pre-exported DA3 `torch.export` programs: the any-view graph
   (fixed `num_views`) + the metric-depth graph, composed by `DA3NestedPT2`.
@@ -190,6 +191,16 @@ aligned into one world frame. Unified entry point for two backends:
   `--metric-model-path`.
 - `vggt_omega` — a single pre-exported VGGT-Omega `torch.export` program
   (fixed `num_views`), overridden with `--model-path`.
+- `a2f` — RGB-D: the DA3 any-view graph + Any2Full (RGB + raw sensor depth →
+  densified depth, `A2F_NestedPT2`). `--input-dirs` are the RGB camera
+  folders; each has a parallel raw-depth folder in `--depth-dirs` (`.lz4`
+  uint16 mm maps, loaded via `load_depth_lz4`, scaled to metres by
+  `--depth-scale`, 0 = invalid). Any2Full densifies the sparse sensor depth
+  and the any-view depth is aligned to it. Only the RGB folders emit output
+  (`depth_<name>/`) — the depth folders are inputs only. Default weights are
+  overridden with `--anyview-model-path` / `--a2f-model-path`; with
+  `--no-depth-enhance` Any2Full is not loaded and the raw sensor depth feeds
+  the alignment directly.
 
 `chunk_size` is derived from the model's fixed `num_views` (read from the
 export itself) and must be divisible by the number of input folders. A short
@@ -197,6 +208,7 @@ final chunk is padded at its start with images from the previous chunk; the
 padded outputs are discarded.
 
 ```bash
+# Stereo (VGGT-Omega or DA3)
 python tools/general_test/run_stream.py \
     --backend vggt_omega \                 # or "da3"
     --input-dirs <left_frames_dir> <right_frames_dir> \
@@ -205,36 +217,52 @@ python tools/general_test/run_stream.py \
     --model-path weights/vggt_omg/vggt_omg_64x640x480_bf16.pt2 \
     --output-dir output/stream_stereo_vggt_omega \
     --video                                # render trajectory video after the run
+
+# RGB-D (Any2Full): RGB folder + raw-depth folder pair
+python tools/general_test/run_stream.py \
+    --backend a2f \
+    --input-dirs <rgb_frames_dir> \
+    --depth-dirs <raw_depth_dir> \
+    --start-frame 0 --max-frames 160 --interval 1 \
+    --output-dir output/stream_rgbd_a2f
 ```
 
 | Argument | Default | Description |
 |---|---|---|
-| `--backend` | **required** | `da3` or `vggt_omega` |
-| `--input-dirs` | **required** | Can be 1 or several Image folders, one per camera; all must contain the same synchronized frame stems |
+| `--backend` | **required** | `da3`, `vggt_omega`, or `a2f` (RGB-D) |
+| `--input-dirs` | **required** | Can be 1 or several Image folders, one per camera; all must contain the same synchronized frame stems. For `a2f`, the RGB camera folders — the raw depth goes in `--depth-dirs` |
 | `--mask-dirs` | — | Optional binary motion-mask folders (one per `--input-dirs`, same order). Pixels above 127 are moving; their confidence is zeroed **during chunk alignment only** — depth outputs are unaffected |
+| `--depth-dirs` | — | `a2f` only: raw-depth folders (one per `--input-dirs`, same order and frame stems; `.lz4` uint16 mm maps, 0 = invalid), loaded via `load_depth_lz4` |
+| `--depth-scale` | `0.001` | `a2f` only: metres per unit of the raw depth (uint16 mm → metres) |
 | `--start-frame` | `0` | First frame to process |
 | `--max-frames` | all | Max frames per camera to process |
 | `--interval` | `1` | Subsample the sequence (every N-th frame) |
 | `--model-path` | backend default | VGGT-Omega artifact (`.pt` / `.pt2`) override |
 | `--anyview-model-path` / `--metric-model-path` | backend default | DA3 any-view / metric-depth `.pt2` overrides |
-| `--no-compile` | off | DA3 only: run the exported programs without `torch.compile` (slower, but useful for debugging numeric differences) |
+| `--a2f-model-path` | backend default | `a2f` only: Any2Full `.pt2` override |
+| `--no-depth-enhance` | off | `a2f` only: skip the Any2Full depth-enhance model and feed the raw sensor depth directly to the alignment |
+| `--no-compile` | off | DA3/a2f only: run the exported programs without `torch.compile` (slower, but useful for debugging numeric differences) |
 | `--config` | `src/depth_models/streaming/configs/base_config.yaml` | Alignment library / method, loop-closure settings |
 | `--output-dir` | `./exps/<backend>_stream_<timestamp>` | Output directory |
 | `--device` | auto | `cuda` or `cpu` |
 | `--video` / `--video-out` / `--video-fps` / `--video-size` / `--video-max-points` | off | Render a trajectory mp4 after the run (default `<output-dir>/trajectory.mp4`, 10 fps, 960x540, ≤100k points/frame) |
 
-**Output** — per camera: `<output-dir>/depth_<camera_name>/frame_<idx>.npz`
-with `depth` (H, W, metric metres), `extrinsics` (3×4, world→camera),
-`intrinsics` (3×3), plus `timings.json`. The run finishes with a
-timing/memory summary: total time, per-chunk mean/min/max, chunks/s, peak GPU
-memory (inference only) and peak CPU RSS (process lifetime).
+**Output** — per camera: `<output-dir>/depth_<camera_name>/frame_<idx>.lz4`
+(depth, raw uint16 mm) + `frame_<idx>.npz` (pose: `extrinsics` 3×4
+world→camera, `intrinsics` 3×3, plus `shape` — the depth shape the lz4 buffer
+is reshaped to), plus `timings.json`. For `--backend a2f` only the RGB
+folders emit `depth_<name>/` — the depth folders are inputs only. The run
+finishes with a timing/memory summary: total time, per-chunk mean/min/max,
+chunks/s, peak GPU memory (inference only) and peak CPU RSS (process
+lifetime).
 
-Wrapper: `scripts/infer_stream.sh` (DA3 demo).
+Wrappers: `scripts/general_test/infer_stream_stereo.sh` (stereo, DA3 /
+VGGT-Omega) and `scripts/general_test/infer_stream_rgbd.sh` (RGB-D, a2f).
 
 ### visualize_stream.py
 
 Renders the streaming output as a trajectory mp4 **without re-running
-inference** (reads the saved NPZ outputs). Each frame shows that time step's
+inference** (reads the saved `.lz4` depth + `.npz` pose outputs). Each frame shows that time step's
 coloured point cloud with its camera frustums, plus the growing camera path
 from the first frame to the current one. The view is fixed for the whole
 video (aligned to the first camera, fitted to the union of all frame clouds).
@@ -270,8 +298,10 @@ Wrapper: `scripts/visualize_stream.sh`.
 Streaming long-video 3D point tracking on the TAPIP3D ONNX models — the
 encoder/updater/corr_forward run as ONNX sessions in sliding windows of
 `seq_len` frames. Image size and query count are auto-detected from the ONNX
-graphs. The geometry (`--npz_dir`) is the per-frame `depth` + `extrinsics` +
-`intrinsics` output of `run_stream.py` (world→camera 4×4 extrinsics).
+graphs. The geometry (`--npz_dir`) is a `run_stream.py`-style output folder:
+per frame a `frame_<idx>.lz4` (depth, raw uint16 mm) plus a `frame_<idx>.npz`
+pose file (`extrinsic` 4×4 world→camera, `intrinsic` 3×3, `shape` — the depth
+shape the lz4 buffer is reshaped to).
 
 ```bash
 python tools/general_test/infer_tapip3d.py \
@@ -290,7 +320,7 @@ python tools/general_test/infer_tapip3d.py \
 | Argument | Default | Description |
 |---|---|---|
 | `--image_dir` | **required** | Folder of frames to track in |
-| `--npz_dir` | **required** | Geometry folder: per-frame `frame_<idx>.npz` with `depth`, `extrinsic` (4×4, world→camera), `intrinsic` (3×3) |
+| `--npz_dir` | **required** | Geometry folder: per-frame `frame_<idx>.lz4` (depth, raw uint16 mm) + `frame_<idx>.npz` with `extrinsic` (4×4, world→camera), `intrinsic` (3×3), `shape` |
 | `--output_dir`, `-o` | `output/stream_tracks_onnx` | Output directory |
 | `--encoder` / `--updater` / `--corr_forward` | `weights/tapip3d/*.onnx` | ONNX model paths |
 | `--start_frame` / `--max_frames` / `--fps` | `0` / all / `1` | Sequence subsampling (e.g. `--fps 4` tracks at 4 Hz on 30 Hz data) |

@@ -10,7 +10,7 @@ masks then streaming depth + pose — without ever writing frames to disk:
   `astribot_extract_frames.md`) for dataset introspection, episode/camera
   selection and sub-task split-frame inference.
 - Frames are **decoded online** from the dataset (`LeRobotDataset` with
-  `download_videos=False`), one chunk at a time — no `extract_frames` jpgs,
+  `download_videos=False`), one chunk at a time — no `key_frames` jpgs,
   no per-subtask mp4s, nothing stored on disk.
 - The streaming backend (`VGGT_OMG_Streaming` / `DA3_Streaming`, the same
   models as `run_stream.py`) runs per segment; each segment's output lands in
@@ -25,9 +25,10 @@ segment bounds are `[from_idx] + split_frames + [to_idx]`; every segment is
 streamed independently (alignment restarts per sub-task).
 
 **Online frames.** `OnlineStreaming` (mixed into the concrete backend) keeps
-`img_list` as virtual `frame_%06d.jpg` stems — output npz files are named
+`img_list` as virtual `frame_%06d.jpg` stems — output files are named
 after them, so saved frames keep their **absolute dataset indices** (e.g.
-`frame_000004.npz`). Before each chunk's forward, the chunk's image arrays are
+`frame_000004.lz4` + `frame_000004.npz`). Before each chunk's forward, the
+chunk's image arrays are
 decoded from the dataset and slice-swapped into `img_list`; they are restored
 right after. Peak memory is one chunk of frames + masks.
 
@@ -43,8 +44,8 @@ frames_per_chunk` images with `frames_per_chunk = chunk_size // num_cams`, so:
 
 Selecting the stereo pair (`--camera-idxes 4 5`) is the equivalent of feeding
 `LEFT_DIR RIGHT_DIR` to `run_stream.py --input-dirs` (see
-`scripts/infer_stream.sh`): both cameras run jointly through the same forward,
-and each camera contributes half of every chunk.
+`scripts/general_test/infer_stream_stereo.sh`): both cameras run jointly
+through the same forward, and each camera contributes half of every chunk.
 
 **WAFT motion masks (optional, off by default).** The chunk alignment uses
 full confidence unless `--with-optical-flow` is passed. When enabled, masks
@@ -106,19 +107,20 @@ python tools/astribot/run_subtask_stream.py \
 └── ep000000/
     ├── subtask_00/
     │   ├── depth_cam_head/             # or depth_cam_head_stereo_left/ + _right/ …
-    │   │   ├── frame_000000.npz        # absolute dataset indices, stride-subsampled
-    │   │   ├── frame_000004.npz
+    │   │   ├── frame_000000.lz4        # absolute dataset indices, stride-subsampled
+    │   │   ├── frame_000000.npz        # depth in .lz4 (raw uint16 mm), pose in .npz
     │   │   └── …
     │   └── timings.json
     ├── subtask_01/
     └── …
 ```
 
-Each `frame_<idx>.npz` carries `depth` (H, W, metric), `extrinsics`
-(3×4, world→camera), `intrinsics` (3×3) — the same contract as
-`run_stream.py`'s output, consumable by `visualize_stream.py` and
-`infer_tapip3d.py`. `timings.json` holds `total_s`, `num_chunks` and
-`chunk_times_s`.
+Each `frame_<idx>.lz4` carries `depth` (raw uint16 mm, see
+`utils.astribot_dataloader.load_depth_lz4`) and the paired `frame_<idx>.npz`
+the `extrinsics` (3×4, world→camera), `intrinsics` (3×3) and the depth
+`shape` — the same contract as `run_stream.py`'s output, consumable by
+`visualize_stream.py` and `infer_tapip3d.py`. `timings.json` holds
+`total_s`, `num_chunks` and `chunk_times_s`.
 
 ## Arguments
 
@@ -162,19 +164,19 @@ python tools/astribot/visualize_subtask_stream.py \
 - Selection flags (`-id`, `-d`, `-c`, `-e`, `--one-per-task`, `-x`, `-o`)
   match `run_subtask_stream.py`; cameras must match the ones used for
   streaming. `--stride` only affects the view fitting (the rendered steps are
-  the npz stems actually saved).
+  the saved file stems).
 - Per segment: `--fps` (10), `--size` (960x540), `--max-points` (100000);
   output `<seg_dir>/trajectory.mp4` — each frame shows that step's coloured
   point cloud, camera frustums and the growing camera path, with the view
   fixed per segment (aligned to the first camera, fitted to the union of the
   segment's clouds).
-- Segments without npz results are skipped with a message.
+- Segments without saved results are skipped with a message.
 
 ## Notes
 
 - **Verified on `astri_making_coffee` (ep000000, 6 sub-tasks, 1744 frames,**
   **stride 4, VGGT-Omega):** 82–105 steps per segment, 2–4 chunks each, all
-  npz + timings.json written. Stereo (cameras 4+5) produces identical stem
+  lz4/npz + timings.json written. Stereo (cameras 4+5) produces identical stem
   sets in both camera folders with distinct extrinsics (right camera offset
   by the ~0.088 m stereo baseline) and distinct depth maps.
 - **Mask effect on alignment:** full-confidence alignment uses all

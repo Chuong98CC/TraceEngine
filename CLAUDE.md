@@ -156,8 +156,9 @@ per-view `depth` + warped `extrinsics` + `intrinsics` per frame.
   [[vggt-stream-alignment-nondeterminism]].
 - Optional loop closure (`loop_enable`): a SALAD global-descriptor matcher
   detects revisited scenes and re-aligns via a loop SIM3 optimizer.
-- Entry point: `tools/general_test/run_stream.py --backend da3|vggt_omega`
-  (wrappers: `scripts/infer_stream.sh`, `scripts/visualize_stream.sh`).
+- Entry point: `tools/general_test/run_stream.py --backend da3|vggt_omega|a2f`
+  (wrappers: `scripts/general_test/infer_stream_stereo.sh` /
+  `infer_stream_rgbd.sh`, `scripts/visualize_stream.sh`).
 
 ## Any2Full (RGB-D depth densification)
 
@@ -199,9 +200,10 @@ python tools/general_test/run_stream.py --backend vggt_omega \
     --input-dirs <left_dir> <right_dir> \
     --start-frame 210 --max-frames 160 --interval 4 \
     --output-dir output/stream_stereo_vggt_omega
-# or the DA3 backend (two .pt2 checkpoints, see scripts/infer_stream.sh);
+# or the DA3 backend (two .pt2 checkpoints, see
+# scripts/general_test/infer_stream_stereo.sh);
 # or via the wrapper script:
-bash scripts/infer_stream.sh
+bash scripts/general_test/infer_stream_stereo.sh
 
 # --- Any2Full RGB-D densification (single frame -> .glb point cloud) ---
 python tools/general_test/test_any2full.py \

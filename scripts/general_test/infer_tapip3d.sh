@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # TAPIP3D streaming long-video inference on the ONNX models (16-frame windows,
-# Tapip3D_ONNX + StreamONNX). Mirror of infer_stream.sh: image size and query
+# Tapip3D_ONNX + StreamONNX). Mirror of infer_stream_stereo.sh: image size and query
 # count are auto-detected from the ONNX graphs. The shipped updater was
 # exported for N = 1088 queries: 8x8 bbox grid (64) + 32x32 support (1024),
 # hence --grid_x 8 --grid_y 8 (the PyTorch script uses 4x4).
