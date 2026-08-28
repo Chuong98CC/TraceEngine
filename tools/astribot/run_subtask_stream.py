@@ -56,13 +56,13 @@ Examples
 """
 
 import argparse
-import json
 import os
 import time
 from pathlib import Path
 
 import cv2
 import numpy as np
+import torch
 from lerobot.datasets import LeRobotDatasetMetadata
 from tqdm import tqdm
 
@@ -72,6 +72,7 @@ from depth_models.streaming.loop_utils.config_utils import load_config
 from depth_models.streaming.vggt_omg_streaming import VGGT_OMG_Streaming
 from tools.astribot.extract_frames import DataExtract
 from tools.general_test.infer_waft import _compute_motion_mask_gray
+from tools.general_test.run_stream import _report_run_stats
 from utils.visualize_mask import to_pil
 
 DEFAULT_WAFT_CKPT = "weights/waftv2/waftv2_dinov3_i5_640x480_tf32.engine"
@@ -407,6 +408,7 @@ class SubtaskStreamExtract(DataExtract):
         if ckpt.endswith(".engine"):
             from flow_models.waft import WAFT
             print(f"Loading TensorRT engine: {ckpt}")
+            assert os.path.exists(ckpt), f"Checkpoint not found: {ckpt}, please compile the TRT engine first or change to ONNX model, or drop the flag --with-optical-flow . To compile the TRT engine, use command: ./scripts/general_test/export_trt_docker.sh <abs/path/to>/weights/waftv2/waftv2_dinov3_i5_640x480.onnx. "
             self.waft_model = WAFT(ckpt, bgr_input=True)
         else:
             from flow_models.waft import WAFTOnnx
@@ -506,19 +508,15 @@ class SubtaskStreamExtract(DataExtract):
               f"(stride {self.args.stride}) -> {seg_dir}")
         stream = self._ensure_stream()
         stream.prepare(steps=steps, seg_lo=lo, seg_hi=hi, output_dir=seg_dir)
+        # peak GPU stats reset per segment, so the report reflects this
+        # segment's inference only (weights load before that point)
+        if torch.cuda.is_available():
+            torch.cuda.reset_peak_memory_stats()
         t0 = time.perf_counter()
         stats = stream.run()
-        self._save_timings(seg_dir, stats)
+        # same timing/memory summary + timings.json schema as run_stream.py
+        _report_run_stats(self.args.backend, seg_dir, stats)
         print(f"  [subtask {k:02d}] done in {time.perf_counter() - t0:.1f}s")
-
-    def _save_timings(self, seg_dir: str, stats: dict) -> None:
-        report = {
-            "total_s": round(stats["total_s"], 3),
-            "num_chunks": len(stats["chunk_times"]),
-            "chunk_times_s": [round(t, 3) for t in stats["chunk_times"]],
-        }
-        with open(os.path.join(seg_dir, "timings.json"), "w") as f:
-            json.dump(report, f, indent=2)
 
 
 def main():
