@@ -80,21 +80,19 @@ the sample dataset is
 on Hugging Face:
 
 ```bash
-python tools/astribot/extract_frames.py \
-    --repo-id Kronze157/astri_making_coffee_vlva \
-    --data-root <dataset_dir> \
-    --mode frames --camera-idxes 0 1 --interval 4 --max-frames 50
+export DATA_DIR=/data/astribot_coffee_making_vlva
+hf download Kronze157/astribot_coffee_making_vlva --local-dir $DATA_DIR
 ```
 
-The extracted per-sub-task jpg folders (each camera paired with its raw
-uint16 depth `.lz4`) are then passed as `--input-dirs` to the general_test
-tools, e.g.:
+then extract frames
 
 ```bash
-python tools/general_test/run_stream.py --backend vggt_omega \
-    --input-dirs <subtask_XX>/<cam0> <subtask_XX>/<cam1> \
-    --output-dir output/stream_vggt_omega
+python tools/astribot/extract_frames.py \
+    --repo-id Kronze157/astri_making_coffee_vlva \
+    --data-root $DATA_DIR \
+    --mode frames --camera-idxes 0 1 --interval 4 --max-frames 50
 ```
+It will extract frames from cameras 0 and 1, you can select other camera indexes from the table printed in terminal. Then continue to follow the [`docs/general_test/general_test.md`](docs/general_test/general_test.md) to finish the steps.
 
 ### Case 2 — Large datasets: online / streaming from the dataset (`tools/astribot`)
 

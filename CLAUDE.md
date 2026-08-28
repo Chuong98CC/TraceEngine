@@ -246,7 +246,7 @@ python tools/astribot/run_subtask_stream.py \
 # --- Export ONNX → TRT engine ---
 python tools/export_trt.py weights/waftv2/waftv2_dinov3_i5_640x480.onnx
 # or inside the NVIDIA TensorRT container (avoids local env setup):
-bash scripts/general_test/export_trt_docker.sh /abs/path/to/model.onnx fp16
+bash scripts/general_test/export_trt_docker.sh /abs/path/to/model.onnx tf32
 ```
 
 ## Dataset loading
@@ -275,10 +275,8 @@ TensorRT version via `scripts/general_test/export_trt_docker.sh`. Pinned runtime
 are strongly typed by the ONNX's own dtypes); `tools/export_trt.py` builds
 with `--decomposableAttentions='*'` — required for the fused opset-25
 Attention nodes in the DA3 ONNX exports (see [[trt11-export-attention-fix]]).
-`--precision fp16` pre-casts the ONNX via `cast_onnx_fp16.cast_to_fp16`
-(onnxconverter-common, LayerNorm kept fp32); the docker script does the cast
-host-side since the tensorrt container has no onnx tooling. fp16 metric
-engine: ~6.9 ms vs ~36.9 ms tf32 on an RTX 5090, 644 MB vs 1310 MB.
+Only `tf32` (default, fp32 data with TF32 tensor-core math) and `fp32`
+(`--noTF32`) precisions are supported.
 
 ## Model input/output conventions
 

@@ -6,7 +6,7 @@ def get_args_parser():
     parser = argparse.ArgumentParser()
     parser.add_argument('onnx_path', type=str)
     parser.add_argument('--trt_path', type=str, default=None)
-    parser.add_argument('--precision', type=str, choices=['fp16', 'tf32', 'fp32'], default='tf32')
+    parser.add_argument('--precision', type=str, choices=['tf32', 'fp32'], default='tf32')
     return parser
 
 def main(args):
@@ -20,20 +20,6 @@ def main(args):
         trt_file_path = args.trt_path
         trt_path = os.path.dirname(trt_file_path)
         os.makedirs(trt_path, exist_ok=True)
-
-    # TensorRT 11 removed --fp16 / --precisionConstraints / --layerPrecisions:
-    # builds are strongly typed by the ONNX's own dtypes.  fp16 engines therefore
-    # need a pre-cast fp16 ONNX (see cast_onnx_fp16.py).
-    if args.precision == 'fp16' and not args.onnx_path.endswith('_fp16.onnx'):
-        # scripts/export_trt_docker.sh pre-casts host-side and passes the casted
-        # file; this branch covers running this script directly.
-        from cast_onnx_fp16 import cast_to_fp16  # needs onnx + onnxconverter-common
-
-        fp16_path = os.path.splitext(args.onnx_path)[0] + '_fp16.onnx'
-        if not os.path.exists(fp16_path):
-            print(f'Casting to fp16: {args.onnx_path} -> {fp16_path}')
-            cast_to_fp16(args.onnx_path, fp16_path)
-        args.onnx_path = fp16_path
 
     command = f'trtexec --onnx={args.onnx_path} --saveEngine={trt_file_path}'
 
