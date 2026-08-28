@@ -8,7 +8,10 @@ composed with Any2Full, which densifies the sparse depth).  The RGB folders
 are the ``input_dirs``; the parallel raw-depth folders (one per RGB folder,
 ``.lz4`` uint16 mm maps with matching frame stems, e.g. ``cam_head`` →
 ``depth_cam_head``) are passed as ``depth_dirs`` and loaded via
-``load_depth_lz4`` (metres = mm x ``depth_scale``, 0 = invalid).
+``load_depth_lz4`` (metres = mm x ``depth_scale``, 0 = invalid).  The
+online streamer (``tools/astribot/run_subtask_stream.py --backend a2f``)
+supplies the depth as raw uint16 ndarrays instead — ``_process_chunk`` and
+``_load_depth`` accept both.
 
 ``chunk_size`` is the any-view export's fixed ``num_views``: every chunk
 carries ``num_views`` RGB images and ``num_views`` raw-depth maps (the
@@ -41,7 +44,7 @@ from utils.astribot_dataloader import load_depth_lz4
 # ---------------------------------------------------------------------------
 # Default model paths (any-view fixed num_views = 64, no extrinsics input)
 # ---------------------------------------------------------------------------
-_DEFAULT_ANYVIEW = "weights/da3/da3_anyview_64x644x490_giant-large-1.1.pt2"
+_DEFAULT_ANYVIEW = "weights/da3/da3_anyview_64x644x490_giant-large-1.1_bf16.pt2"
 _DEFAULT_A2F = "weights/any2full/Any2Full_vitl_bf16.pt2"
 
 
@@ -141,9 +144,16 @@ class A2F_Streaming(BaseStreaming):
         # parallel raw-depth list built by _load_depth_paths.
         rgb_paths = self.img_list[start:end]
         if self._depth_shape is None:
-            img = cv2.imread(rgb_paths[0], cv2.IMREAD_UNCHANGED)
-            if img is None:
-                raise RuntimeError(f"Could not read {rgb_paths[0]} to derive the depth shape")
+            # Online mode swaps BGR arrays into img_list (see
+            # tools/astribot/run_subtask_stream.py), so the reference frame
+            # may be an array instead of a path.
+            first = rgb_paths[0]
+            if isinstance(first, str):
+                img = cv2.imread(first, cv2.IMREAD_UNCHANGED)
+                if img is None:
+                    raise RuntimeError(f"Could not read {first} to derive the depth shape")
+            else:
+                img = first
             self._depth_shape = tuple(img.shape[:2])
         depths = [
             self._load_depth(p, self._depth_shape, self.depth_scale)
@@ -164,8 +174,16 @@ class A2F_Streaming(BaseStreaming):
         return [0]
 
     @staticmethod
-    def _load_depth(path: str, shape: tuple[int, int], scale: float) -> np.ndarray:
-        """Raw sensor depth: (H, W) uint16 mm .lz4 -> (H, W) float32 metres."""
-        depth = load_depth_lz4(Path(path), shape).astype(np.float32) * scale
+    def _load_depth(path_or_arr, shape: tuple[int, int], scale: float) -> np.ndarray:
+        """Raw sensor depth -> (H, W) float32 metres.
+
+        Accepts an .lz4 uint16 mm path (disk flow) or a raw uint16 ndarray
+        (online mode; see tools/astribot/run_subtask_stream.py); 0 = invalid
+        -> 0.0 metres."""
+        if isinstance(path_or_arr, (str, Path)):
+            depth = load_depth_lz4(Path(path_or_arr), shape).astype(np.float32)
+        else:
+            depth = np.asarray(path_or_arr).astype(np.float32)
+        depth *= scale
         depth[depth <= 0.0] = 0.0
         return depth

@@ -21,11 +21,18 @@ overlapping chunks reuse the previous chunk's result instead of re-running
 WAFT; only the new frames of a chunk run through the model.
 
 The streaming backend runs through an ``OnlineStreaming`` subclass of the
-concrete backend (``VGGT_OMG_Streaming`` / ``DA3_Streaming``): ``img_list``
-holds virtual ``frame_%06d.jpg`` stems (output files are named after
-them, so saved frames keep their absolute dataset indices), and the chunk's
-image arrays are slice-swapped in for the model forward only.  Peak memory
-is one chunk of frames + masks.
+concrete backend (``VGGT_OMG_Streaming`` / ``DA3_Streaming`` /
+``A2F_Streaming``): ``img_list`` holds virtual ``frame_%06d.jpg`` stems
+(output files are named after them, so saved frames keep their absolute
+dataset indices), and the chunk's image arrays are slice-swapped in for the
+model forward only.  Peak memory is one chunk of frames + masks.
+
+Three backends (``--backend``): RGB-only cameras run ``da3`` or
+``vggt_omega``; cameras with a paired raw-depth feature
+(``observation.depth.<name>``, uint16 mm) can run ``a2f``, which densifies
+the sensor depth with Any2Full.  For ``a2f`` the raw depth is decoded from
+the dataset alongside the RGB frames and slice-swapped into
+``depth_paths`` the same way — nothing is written to disk.
 
 Examples
 --------
@@ -39,6 +46,13 @@ Examples
         --repo-id Kronze157/astri_making_coffee_vlva \
         --data-root /data/astri_making_coffee --episode-idxes 0 \
         --camera-idxes 4 5 --backend da3 --with-optical-flow
+
+    # RGB-D camera, a2f backend (Any2Full densifies the sensor depth;
+    # defaults to the first camera with a paired raw-depth feature)
+    python tools/astribot/run_subtask_stream.py \
+        --repo-id Kronze157/astri_making_coffee_vlva \
+        --data-root /data/astri_making_coffee --episode-idxes 0 \
+        --backend a2f
 """
 
 import argparse
@@ -52,6 +66,7 @@ import numpy as np
 from lerobot.datasets import LeRobotDatasetMetadata
 from tqdm import tqdm
 
+from depth_models.streaming.a2f_streaming import A2F_Streaming
 from depth_models.streaming.da3_streaming import DA3_Streaming
 from depth_models.streaming.loop_utils.config_utils import load_config
 from depth_models.streaming.vggt_omg_streaming import VGGT_OMG_Streaming
@@ -75,9 +90,10 @@ def parse_args(argv: list[str] | None = None):
                              "full chunk path, e.g. /data/x/chunk-0000/part-0000")
     parser.add_argument("--camera-idxes", "-c", nargs="+", type=int, default=None,
                         help="indices into the dataset's camera_keys to stream "
-                             "(default: the first camera whose key does not contain "
-                             "'depth'; note the backend's num_views must be divisible "
-                             "by the number of cameras, e.g. 64 % n == 0 for VGGT-Omega)")
+                             "(default: the first RGB camera — for --backend a2f the "
+                             "first camera with a paired raw-depth feature; note the "
+                             "backend's num_views must be divisible by the number of "
+                             "cameras, e.g. 64 %% n == 0 for VGGT-Omega)")
     select = parser.add_mutually_exclusive_group()
     select.add_argument("--episode-idxes", "-e", nargs="*", type=int, default=None,
                         help="only process these episode indices (default: all)")
@@ -88,9 +104,12 @@ def parse_args(argv: list[str] | None = None):
     parser.add_argument("--out-dir", "-o", default=None,
                         help="output root (default: <data-root>/eps_data); per-sub-task "
                              "results land under <out-dir>/pipeline/<episode>/subtask_XX/")
-    parser.add_argument("--backend", choices=("vggt_omega", "da3"),
+    parser.add_argument("--backend", choices=("vggt_omega", "da3", "a2f"),
                         default="vggt_omega",
-                        help="streaming backend (default: %(default)s)")
+                        help="streaming backend: RGB-only cameras run da3 or "
+                             "vggt_omega; a2f is for RGB-D cameras with a paired "
+                             "raw-depth feature (Any2Full densifies the sensor "
+                             "depth) (default: %(default)s)")
     parser.add_argument("--stride", type=int, default=4,
                         help="subsample the sequence (every N-th frame); with WAFT "
                              "enabled this is also the optical-flow pair gap, and the "
@@ -112,6 +131,16 @@ def parse_args(argv: list[str] | None = None):
                         help="DA3 any-view .pt2 override")
     parser.add_argument("--metric-model-path", default=None,
                         help="DA3 metric-depth .pt2 override")
+    parser.add_argument("--a2f-model-path", default=None,
+                        help="Any2Full model artifact path (.pt2); overrides the "
+                             "a2f backend's default")
+    parser.add_argument("--no-depth-enhance", action="store_true",
+                        help="a2f backend only: skip the Any2Full depth-enhance "
+                             "model and feed the raw sensor depth directly into "
+                             "the alignment step")
+    parser.add_argument("--depth-scale", type=float, default=0.001,
+                        help="a2f backend only: metres per unit of the raw depth "
+                             "(default 0.001 = uint16 mm -> metres)")
     parser.add_argument("--config",
                         default="src/depth_models/streaming/configs/base_config.yaml",
                         help="alignment library/method, loop-closure settings")
@@ -125,15 +154,18 @@ def parse_args(argv: list[str] | None = None):
 class OnlineStreaming:
     """In-memory frames + optional WAFT masks for the BaseStreaming chunk loop.
 
-    Mixed into a concrete backend (``VGGT_OMG_Streaming`` / ``DA3_Streaming``)
-    to replace the disk-folder image/mask loading: ``img_list`` holds virtual
-    ``frame_%06d.jpg`` stems (the base run() names output files after
-    them, and padding copies keep their stems so duplicates map to the same
-    mask), and the chunk's image arrays are slice-swapped in for the model
-    forward only.  Frames are decoded from the dataset online, one chunk at a
-    time; WAFT masks are computed per step and cached by absolute step index,
-    so frames shared between overlapping chunks reuse the previous chunk's
-    masks instead of re-running optical flow.
+    Mixed into a concrete backend (``VGGT_OMG_Streaming`` /
+    ``DA3_Streaming`` / ``A2F_Streaming``) to replace the disk-folder
+    image/mask/depth loading: ``img_list`` holds virtual ``frame_%06d.jpg``
+    stems (the base run() names output files after them, and padding copies
+    keep their stems so duplicates map to the same mask), and the chunk's
+    image arrays are slice-swapped in for the model forward only.  For the
+    ``a2f`` backend the raw depth arrays are swapped into ``depth_paths``
+    in parallel (placeholder stems from ``_load_depth_paths``).  Frames are
+    decoded from the dataset online, one chunk at a time; WAFT masks are
+    computed per step and cached by absolute step index, so frames shared
+    between overlapping chunks reuse the previous chunk's masks instead of
+    re-running optical flow.
     """
 
     #: frames are stored BGR (dataset PIL RGB flipped once at fetch); models
@@ -175,6 +207,15 @@ class OnlineStreaming:
         else:
             self.mask_paths = list(self.img_list)
 
+    def _load_depth_paths(self) -> None:
+        """Placeholder stems parallel to the (padded) img_list; the actual
+        raw-depth arrays are swapped in per chunk in _process_chunk (the
+        a2f backend only)."""
+        if self.depth_dirs is None:
+            self.depth_paths = None
+        else:
+            self.depth_paths = list(self.img_list)
+
     def _process_chunk(self, start: int, end: int) -> dict:
         """Fetch this chunk's frames online, slice-swap them into img_list
         for the model forward, then restore the virtual stems."""
@@ -199,12 +240,32 @@ class OnlineStreaming:
             if self._rgb_input:
                 arr = arr[:, :, ::-1]
             frames.append(arr)
+
+        # a2f backend: swap the chunk's raw depth arrays into depth_paths in
+        # parallel with the RGB frames (placeholder stems built by
+        # _load_depth_paths).  The pipeline expects depth at the frame
+        # resolution, so resize when the dataset stores it differently.
+        saved_depth = None
+        if self.depth_paths is not None:
+            depth_keys = self.wrapper.depth_keys
+            depths = []
+            for i, t in enumerate(steps):
+                depth = self._frame_cache[t][depth_keys[i % self.num_cams]]
+                if depth.shape[:2] != frames[i].shape[:2]:
+                    depth = cv2.resize(depth, (frames[i].shape[1], frames[i].shape[0]),
+                                       interpolation=cv2.INTER_NEAREST)
+                depths.append(depth)
+            saved_depth = self.depth_paths[start:end]
+            self.depth_paths[start:end] = depths
+
         saved = self.img_list[start:end]
         self.img_list[start:end] = frames
         try:
             return super()._process_chunk(start, end)
         finally:
             self.img_list[start:end] = saved
+            if saved_depth is not None:
+                self.depth_paths[start:end] = saved_depth
 
     def _stack_chunk_masks(self, mask_stems: list[str], h: int, w: int) -> np.ndarray:
         """WAFT masks of one chunk: computed per step and cached by absolute
@@ -256,6 +317,33 @@ class OnlineDA3Streaming(OnlineStreaming, DA3_Streaming):
     _rgb_input = False
 
 
+class OnlineA2FStreaming(OnlineStreaming, A2F_Streaming):
+    """Any2Full RGB-D streaming with online frames; the preprocess expects
+    BGR arrays and the raw depth comes from the dataset (the a2f backend's
+    depth_dirs are virtual — see SubtaskStreamExtract._ensure_stream)."""
+
+    _rgb_input = False
+
+
+def _paired_depth_key(cam_key: str, features: dict) -> str | None:
+    """Raw-depth feature key paired with ``cam_key``, or None when the camera
+    has no usable depth.
+
+    Mirrors ``DataExtract._depth_key_for`` plus the uint16-dtype check of
+    ``_save_subtask_frames``, but works from the dataset metadata before the
+    extractor is constructed (camera selection happens pre-``__init__``)."""
+    name = DataExtract._camera_subdir(cam_key)
+    raw = f"observation.depth.{name}"
+    if raw in features and features[raw].get("dtype") == "uint16":
+        return raw
+    video = f"{cam_key}_depth"
+    if video in features:
+        info = features[video].get("info") or {}
+        if info.get("video.is_depth_map"):
+            return video
+    return None
+
+
 class SubtaskStreamExtract(DataExtract):
     """Per-sub-task online streaming with optional WAFT motion masks.
 
@@ -266,9 +354,18 @@ class SubtaskStreamExtract(DataExtract):
 
     def __init__(self, args):
         if args.camera_idxes is None:
-            keys = LeRobotDatasetMetadata(repo_id=args.repo_id,
-                                          root=args.data_root).camera_keys
-            args.camera_idxes = [i for i, key in enumerate(keys) if "depth" not in key][:1]
+            meta = LeRobotDatasetMetadata(repo_id=args.repo_id,
+                                          root=args.data_root)
+            keys = meta.camera_keys
+            features = getattr(meta.info, "features", None)
+            if features is None:
+                features = getattr(meta, "features", {})
+            if args.backend == "a2f":
+                # first camera with a paired uint16 mm raw-depth feature
+                args.camera_idxes = [i for i, key in enumerate(keys)
+                                     if _paired_depth_key(key, features)][:1]
+            else:
+                args.camera_idxes = [i for i, key in enumerate(keys) if "depth" not in key][:1]
         args.mode = "videos"  # DataExtract needs one of its modes; only the
                              # output-dir/camera/episode machinery is reused
         super().__init__(args)
@@ -276,10 +373,32 @@ class SubtaskStreamExtract(DataExtract):
         os.makedirs(self.pipeline_dir, exist_ok=True)
         self.waft_model = None
         self.stream = None
+        # per-camera raw-depth feature keys (None for RGB-only cameras),
+        # resolved once via DataExtract._depth_key_for
+        self.depth_keys: list[str | None] = [self._depth_key_for(k)
+                                             for k in self.cam_keys.values()]
+        if args.backend == "a2f":
+            self._validate_depth_cameras()
         if args.with_optical_flow:
             self._ensure_waft()
 
     # --- model setup --------------------------------------------------------
+
+    def _validate_depth_cameras(self) -> None:
+        """a2f backend: every selected camera must have a paired raw-depth
+        feature (uint16 mm, see _depth_key_for)."""
+        if not self.cam_keys:
+            raise ValueError(
+                "--backend a2f found no camera with a paired raw-depth feature "
+                "in this dataset; pass --camera-idxes explicitly, or use "
+                "--backend da3/vggt_omega for RGB-only cameras")
+        missing = [k for k, dk in zip(self.cam_keys.values(), self.depth_keys)
+                   if dk is None or self._feature(dk).get("dtype") != "uint16"]
+        if missing:
+            raise ValueError(
+                f"--backend a2f needs one paired raw-depth feature (uint16 mm) "
+                f"per camera; missing for: {missing}. Use --backend da3 or "
+                f"vggt_omega for RGB-only cameras.")
 
     def _ensure_waft(self) -> None:
         """Load the WAFT model (backend inferred from the checkpoint
@@ -306,24 +425,42 @@ class SubtaskStreamExtract(DataExtract):
                     input_dirs=input_dirs, save_dir=self.pipeline_dir,
                     config=config, device=self.args.device,
                     model_path=self.args.model_path)
-            else:
+            elif self.args.backend == "da3":
                 self.stream = OnlineDA3Streaming(
                     input_dirs=input_dirs, save_dir=self.pipeline_dir,
                     config=config, device=self.args.device,
                     anyview_model_path=self.args.anyview_model_path,
                     metric_model_path=self.args.metric_model_path)
+            else:
+                # virtual depth folders: the raw depth is decoded from the
+                # dataset per chunk (OnlineStreaming._load_depth_paths), the
+                # folders only satisfy the a2f input contract
+                self.stream = OnlineA2FStreaming(
+                    input_dirs=input_dirs, save_dir=self.pipeline_dir,
+                    config=config, device=self.args.device,
+                    anyview_model_path=self.args.anyview_model_path,
+                    a2f_model_path=self.args.a2f_model_path,
+                    depth_dirs=[f"depth_{d}" for d in input_dirs],
+                    depth_scale=self.args.depth_scale,
+                    use_depth_enhance=not self.args.no_depth_enhance)
             self.stream.attach(self)
         return self.stream
 
     # --- frame access ---------------------------------------------------------
 
     def _dataset_step(self, t: int) -> dict:
-        """Online decode of dataset frame t for all selected cameras, as BGR
-        uint8 arrays (the dataset stores PIL RGB; flipped once here — WAFT
-        and DA3 take BGR, VGGT flips back in the stream)."""
+        """Online decode of dataset frame t for all selected cameras: RGB
+        frames as BGR uint8 arrays (the dataset stores PIL RGB; flipped once
+        here — WAFT, DA3 and a2f take BGR, VGGT flips back in the stream)
+        plus the raw uint16 mm depth of each camera that has a paired depth
+        feature, keyed by the feature key (the a2f prompt)."""
         frame = self._ensure_dataset()[t]
-        return {key: np.asarray(to_pil(frame[key]), dtype=np.uint8)[:, :, ::-1]
+        step = {key: np.asarray(to_pil(frame[key]), dtype=np.uint8)[:, :, ::-1]
                 for key in self.cam_keys.values()}
+        for key, dkey in zip(self.cam_keys.values(), self.depth_keys):
+            if dkey is not None:
+                step[dkey] = np.asarray(frame[dkey]).astype(np.uint16)
+        return step
 
     # --- orchestration ---------------------------------------------------------
 

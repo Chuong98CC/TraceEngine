@@ -30,8 +30,8 @@ from depth_models.da3.model.da3nested import DA3NestedPT2
 # ---------------------------------------------------------------------------
 # Default model paths (any-view fixed num_views = 64, no extrinsics input)
 # ---------------------------------------------------------------------------
-_DEFAULT_ANYVIEW = "weights/da3/da3_anyview_64x644x490_giant-large-1.1.pt2"
-_DEFAULT_METRIC = "weights/da3/da3_metric_644x490_giant-large-1.1.pt2"
+_DEFAULT_ANYVIEW = "weights/da3/da3_anyview_64x644x490_giant-large-1.1_bf16.pt2"
+_DEFAULT_METRIC = "weights/da3/da3_metric_644x490_giant-large-1.1_bf16.pt2"
 
 # ===========================================================================
 # Backend
