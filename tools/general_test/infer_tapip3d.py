@@ -13,7 +13,7 @@ depth holes in the bbox drop bbox points, or different
 --grid_x/--grid_y/--support_grid_size values).
 
 Usage:
-    python infer_tapip3d.py --image_dir data/.../frames --npz_dir data/.../geometry \
+    python infer_tapip3d.py --image_dir data/.../frames --depth_dir data/.../depth \
         --bbox 70 357 133 396 --grid_x 8 --grid_y 8 --support_grid_size 32
 """
 
@@ -29,24 +29,25 @@ from rich import print
 
 from utils.streaming_utils import (scan_image_folder, load_resized_batch,
                          compute_global_depth_roi, unproject_bbox_queries)
-from flow_models.pt2_inference import Tapip3D_PT2, Tapip3DStreamPT2
-from flow_models.pt2_inference._grid_utils import get_grid_queries
+from flow_models.tapip3d.utils import (Tapip3D_PT2, Tapip3DStreamPT2,
+                             _DEFAULT_ENCODER, _DEFAULT_ITERATION)
+from flow_models.tapip3d.utils._grid_utils import get_grid_queries
 
 
 def parse_args():
     p = argparse.ArgumentParser(description="Streaming TAPIP3D torch.export inference")
     p.add_argument("--image_dir", type=str, required=True)
-    p.add_argument("--npz_dir", type=str, required=True)
+    p.add_argument("--depth_dir", type=str, required=True,
+                   help="Directory with per-frame depth (.lz4) + camera pose (.npz)")
     p.add_argument("--output_dir", "-o", type=str, default="output/stream_tracks_pt2")
-    p.add_argument("--encoder", type=str,
-                   default="weights/tapip3d/tapip3d_encoder_480x640_bf16.pt2",
+    p.add_argument("--encoder", type=str, default=_DEFAULT_ENCODER,
                    help="Encoder .pt2 path (image size asserted against --image_size)")
-    p.add_argument("--iteration", type=str,
-                   default="weights/tapip3d/tapip3d_iteration_1088_bf16.pt2",
+    p.add_argument("--iteration", type=str, default=_DEFAULT_ITERATION,
                    help="Iteration .pt2 path (query count auto-detected from the graph)")
     p.add_argument("--image_size", type=int, nargs=2, default=[480, 640],
                    help="Inference resolution (H W), must match the encoder graph")
-    p.add_argument("--fps", type=int, default=1)
+    p.add_argument("--interval", type=int, default=1,
+                   help="Process every Nth frame (frame sampling interval)")
     p.add_argument("--start_frame", type=int, default=0)
     p.add_argument("--max_frames", type=int, default=None)
     p.add_argument("--bbox", type=int, nargs=4, default=None,
@@ -73,7 +74,7 @@ def main():
 
     print(f"[bold]Scanning {args.image_dir}...[/bold]")
     file_list, frame_H, frame_W = scan_image_folder(
-        args.image_dir, args.start_frame, args.fps, args.max_frames)
+        args.image_dir, args.start_frame, args.interval, args.max_frames)
     total_frames = len(file_list)
     frame_indices = [idx for idx, _ in file_list]
     print(f"  {total_frames} frames, {frame_H}x{frame_W}")
@@ -94,10 +95,10 @@ def main():
 
     # --- depth ROI pre-scan (global, matches the original inference()) ------
     print("[bold]Computing global depth ROI...[/bold]")
-    depth_roi = compute_global_depth_roi(args.npz_dir, file_list, inf_h, inf_w)
+    depth_roi = compute_global_depth_roi(args.depth_dir, file_list, inf_h, inf_w)
 
     # --- first batch: queries anchored at global frame 0 ---------------------
-    batch0 = load_resized_batch(file_list, args.npz_dir, 0,
+    batch0 = load_resized_batch(file_list, args.depth_dir, 0,
                                 min(pt2_model.seq_len, total_frames),
                                 inf_h, inf_w)
     x0, y0, x1, y1 = args.bbox if args.bbox else (0, 0, frame_W - 1, frame_H - 1)
@@ -129,7 +130,7 @@ def main():
     # --- streamed inference --------------------------------------------------
     def batches():
         for s in range(0, total_frames, pt2_model.seq_len):
-            yield load_resized_batch(file_list, args.npz_dir, s,
+            yield load_resized_batch(file_list, args.depth_dir, s,
                                      min(s + pt2_model.seq_len, total_frames),
                                      inf_h, inf_w)
 
@@ -152,7 +153,7 @@ def main():
 
     meta = {
         "image_dir": str(Path(args.image_dir).absolute()),
-        "npz_dir": str(Path(args.npz_dir).absolute()),
+        "depth_dir": str(Path(args.depth_dir).absolute()),
         "total_frames": total_frames,
         "num_queries": int(num_queries),
         "inference_resolution": [inf_h, inf_w],

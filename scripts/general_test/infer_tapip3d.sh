@@ -8,34 +8,26 @@
 # Left stereo: --bbox 200 265 260 300
 set -e
 
-IMG_DIR="${IMG_DIR:-demo_data/astribot_stereo_lrb/extract_frames/stereo_left}"
-GEO_DIR="${GEO_DIR:-demo_data/astribot_stereo_lrb/geometry/stereo_left}"
-OUTPUT_DIR="${OUTPUT_DIR:-output/tapip3d_stereo_left_onnx}"
-ENCODER="${ENCODER:-weights/tapip3d/tapip3d_encoder_480x640.onnx}"
-UPDATER="${UPDATER:-weights/tapip3d/tapip3d_updater.onnx}"
-CORR_FORWARD="${CORR_FORWARD:-weights/tapip3d/tapip3d_corr_forward.onnx}"
+IMG_DIR="${IMG_DIR:-/data/astri_making_coffee_v1/eps_data/subtask_frames/ep000000/subtask_00/cam_head}"
+DEPTH_DIR="${DEPTH_DIR:-/data/astri_making_coffee_v1/experiments/rgbd_a2f/depth_cam_head}"
+OUTPUT_DIR="${OUTPUT_DIR:-/data/astri_making_coffee_v1/experiments/tapip3d}"
+
 
 echo "============================================"
-echo "TAPIP3D Streaming ONNX Inference"
+echo "TAPIP3D Streaming PT2 Inference"
 echo "============================================"
 echo "Image dir:   $IMG_DIR"
-echo "Geo dir:     $GEO_DIR"
+echo "Depth dir:   $DEPTH_DIR"
 echo "Output dir:  $OUTPUT_DIR"
-echo "Encoder:     $ENCODER"
-echo "Updater:     $UPDATER"
-echo "Corr forward: $CORR_FORWARD"
 echo "============================================"
 
 python tools/general_test/infer_tapip3d.py \
-    --encoder "$ENCODER" \
-    --updater "$UPDATER" \
-    --corr_forward "$CORR_FORWARD" \
     --image_dir "$IMG_DIR" \
-    --npz_dir "$GEO_DIR" \
+    --depth_dir "$DEPTH_DIR" \
     --output_dir "$OUTPUT_DIR" \
-    --start_frame 210 \
-    --fps 4 \
-    --bbox 200 265 260 300 \
+    --start_frame 0 \
+    --interval 1 \
+    --bbox 1 240 100 340 \
     --grid_x 8 \
     --grid_y 8 \
     --support_grid_size 32 \

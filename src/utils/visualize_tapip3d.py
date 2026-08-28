@@ -14,12 +14,13 @@ import sys
 from pathlib import Path
 
 import cv2
+import imageio
 import numpy as np
 import torch
 from einops import repeat
 from tqdm import tqdm
 
-from flow_models.tapip3d.utils.common_utils import batch_project
+from flow_models.tapip3d.utils._common import batch_project
 
 
 def parse_args():
@@ -109,7 +110,9 @@ def render_tracks(output_dir, fps=10, output=None, trail_len=30,
         meta = json.load(f)
 
     image_dir = meta["image_dir"]
-    npz_dir = meta["npz_dir"]
+    # metadata key is "depth_dir" (depth .lz4 + pose .npz folder) since the
+    # infer tool rename; accept the legacy "npz_dir" key for older outputs
+    depth_dir = meta.get("depth_dir", meta.get("npz_dir"))
 
     # Resolve relative paths: try as-is, then relative to output dir, then cwd
     def _resolve_dir(path_str, output_dir):
@@ -127,12 +130,12 @@ def render_tracks(output_dir, fps=10, output=None, trail_len=30,
         return path_str
 
     image_dir = _resolve_dir(image_dir, output_dir)
-    npz_dir = _resolve_dir(npz_dir, output_dir)
+    depth_dir = _resolve_dir(depth_dir, output_dir)
     if not Path(image_dir).is_dir():
         print(f"ERROR: image_dir not found: {image_dir}")
         sys.exit(1)
-    if not Path(npz_dir).is_dir():
-        print(f"ERROR: npz_dir not found: {npz_dir}")
+    if not Path(depth_dir).is_dir():
+        print(f"ERROR: depth_dir not found: {depth_dir}")
         sys.exit(1)
 
     inf_h, inf_w = meta["inference_resolution"]
@@ -162,8 +165,17 @@ def render_tracks(output_dir, fps=10, output=None, trail_len=30,
     else:
         out_path = str(output_dir / "tracks.mp4")
 
-    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-    out = cv2.VideoWriter(out_path, fourcc, fps, (orig_w, orig_h))
+    # libx264/yuv420p requires even dimensions (the old mp4v writer accepted
+    # odd sizes) — pad odd sizes by 1 with a black bar, like
+    # visualize_stream.py does.  H.264 is used instead of mp4v because
+    # Chromium-based viewers (e.g. VSCode's preview) cannot decode
+    # MPEG-4 Part 2 in an mp4 container.
+    out_w, out_h = orig_w - orig_w % 2, orig_h - orig_h % 2
+    odd_pad = (out_w, out_h) != (orig_w, orig_h)
+    # imageio expects RGB (cv2's writer took BGR); convert per frame.
+    writer = imageio.get_writer(
+        out_path, fps=fps, codec="libx264", quality=8, macro_block_size=1
+    )
 
     trail_len = trail_len if not no_trail else 0
     trail_coords = []  # list of (N, 2) arrays
@@ -181,7 +193,7 @@ def render_tracks(output_dir, fps=10, output=None, trail_len=30,
             continue
 
         # Load geometry from NPZ
-        npz_path = Path(npz_dir) / f"frame_{frame_idx:06d}.npz"
+        npz_path = Path(depth_dir) / f"frame_{frame_idx:06d}.npz"
         if not npz_path.is_file():
             continue
         data = dict(np.load(str(npz_path), allow_pickle=True))
@@ -226,13 +238,17 @@ def render_tracks(output_dir, fps=10, output=None, trail_len=30,
             point_size=point_size,
         )
 
-        out.write(frame_out)
+        if odd_pad:
+            canvas = np.zeros((out_h, out_w, 3), dtype=np.uint8)
+            canvas[:orig_h, :orig_w] = frame_out
+            frame_out = canvas
+        writer.append_data(cv2.cvtColor(frame_out, cv2.COLOR_BGR2RGB))
 
         # Update trails
         trail_coords.append(points_2d)
         trail_visibs.append(vis_t)
 
-    out.release()
+    writer.close()
     return out_path
 
 

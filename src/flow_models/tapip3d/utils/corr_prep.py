@@ -1,3 +1,12 @@
+# Vendored from <repo>/export_onnx/corr_prep.py @ 5dbd504 (verbatim). Import
+# rewiring only: ensure_float32 <- ._common, bilinear_sampler <- ._sampling,
+# and pointops2 is imported from site-packages instead of the repo's
+# third_party/ package. The repo's third_party/pointops2 setup.py installs a
+# FLAT site-packages layout (package_dir={"pointops2": "functions"} ->
+# pointops2/pointops.py), so the import below is the flat form; installs that
+# keep the functions/ subpackage (upstream Pointcept) would need
+# `from pointops2.functions import pointops` instead. Both load the same
+# compiled pointops2_cuda extension (numerically identical).
 # Copyright (c) TAPIP3D team(https://tapip3d.github.io/)
 """Correlation prep phases and pointops2 KNN for the ONNX wrapper.
 
@@ -17,10 +26,10 @@ import torch
 from einops import rearrange, repeat
 import torch.nn as nn
 
-from .common_utils import ensure_float32
-from .cotracker_utils import bilinear_sampler
+from ._common import ensure_float32
+from ._sampling import bilinear_sampler
 
-import third_party.pointops2.functions.pointops as pointops
+import pointops2.pointops as pointops
 
 
 def _get_index_offset_for_knnquery(batch_indices, dtype=torch.long):

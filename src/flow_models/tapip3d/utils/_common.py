@@ -1,4 +1,11 @@
-
+# Vendored from <repo>/utils/common_utils.py @ fc8db95 (verbatim subset:
+# convert_tensor, convert_tensor_struct, ensure_float32, batch_unproject,
+# batch_project).
+# Sanctioned deviation (plan Constraint 7): the Box/process_input branch of
+# convert_tensor_struct is dropped — the PT2 runtime never passes Box objects
+# and that branch dragged in repo utils (from box import Box); the `box` import
+# and the file's other helpers are not vendored.
+# Copyright (c) TAPIP3D team(https://tapip3d.github.io/)
 import torch
 from dataclasses import fields, is_dataclass
 from functools import wraps

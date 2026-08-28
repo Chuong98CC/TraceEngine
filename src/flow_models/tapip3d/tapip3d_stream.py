@@ -1,20 +1,27 @@
 # Copyright (c) TAPIP3D team(https://tapip3d.github.io/)
-"""Streaming inference over a Tapip3D_ONNX model.
+"""Streaming inference over a Tapip3D_PT2 model.
 
-Mirrors stream_inference.StreamInference.run() exactly — same window
-scheduling (plan_windows), same carry/frame0 state machine — while the
-low-level forwards (one batch of frames per encoder call, one window per
-forward_window call) run on the ONNX model. Unlike StreamInference there is
-NO full-video buffer: that allocation exists only for cudnn-bf16
-view-sensitivity of the PyTorch encoder, which the fp32 ORT encoder does not
-have.
+Mirrors tapip3d_stream.Tapip3DStreamONNX exactly — same window scheduling
+(plan_windows), same carry/frame0 state machine, same 17-frame window
+stacks [frame0] + [16 window frames] — while the low-level forwards run on
+the torch.export programs. Tapip3D_PT2.forward_window takes a full video
+with absolute window bounds, so each 17-frame window stack is passed with
+local bounds (1, seq_len+1), reproducing the ONNX stream's window semantics
+(window-only normalization stats, corr context over the stack, time-sliced
+to the window). Like the ONNX stream there is NO full-video buffer.
+
+Deviation from the ONNX stream: the PT2 encoder program is static at
+exactly seq_len frames (the ONNX encoder accepted T <= seq_len), so a
+short batch is padded to seq_len for the encode_batch call and the
+returned features are sliced back to the batch's real length.
 """
 
 from typing import Optional, Tuple
 import torch
 from einops import repeat
 from dataclasses import dataclass
-from .utils.common_utils import batch_unproject
+
+from .utils._common import batch_unproject
 
 def plan_windows(total_frames: int, seq_len: int) -> tuple[list[tuple[int, int]], int]:
     """Return (windows, pad): every window (start, end) in execution order.
@@ -58,23 +65,23 @@ class Prediction:
             confs=self.confs[:, :, s] if self.confs is not None else None,
         )
 
-class Tapip3DStreamONNX:
-    def __init__(self, onnx_model, queries: torch.Tensor,
+class Tapip3DStreamPT2:
+    def __init__(self, pt2_model, queries: torch.Tensor,
                  depth_roi: Optional[torch.Tensor] = None,
                  device: str = "cuda"):
-        self.onnx_model = onnx_model
+        self.pt2_model = pt2_model
         self.queries = queries.to(device)
-        assert self.queries.shape[0] == onnx_model.num_queries, (
+        assert self.queries.shape[0] == pt2_model.num_queries, (
             f"exact-N contract: queries ({self.queries.shape[0]}) must match "
-            f"the ONNX model's num_queries ({onnx_model.num_queries})")
-        assert (self.queries[..., 0] < self.onnx_model.seq_len).all(), (
-            "StreamONNX requires all query frames < seq_len "
-            f"({self.onnx_model.seq_len}) — the static updater graph cannot "
+            f"the iteration graph's num_queries ({pt2_model.num_queries})")
+        assert (self.queries[..., 0] < pt2_model.seq_len).all(), (
+            "StreamPT2 requires all query frames < seq_len "
+            f"({pt2_model.seq_len}) — the static iteration graph cannot "
             "mask late-frame queries")
         self.depth_roi = None if depth_roi is None else depth_roi.to(device)
         self.device = device
-        self.seq_len = onnx_model.seq_len
-        self.stride = onnx_model.seq_len // 2
+        self.seq_len = pt2_model.seq_len
+        self.stride = pt2_model.seq_len // 2
 
     @torch.inference_mode()
     def run(self, batches, total_frames: int) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -82,7 +89,7 @@ class Tapip3DStreamONNX:
         (video (T,3,H,W) in [0,1], depths, intrs, extrs). Returns
         (coords (total_frames, N, 3), visibs (total_frames, N) logits).
         All query frames must be < seq_len (asserted in __init__);
-        late-frame queries would be window-masked, which the static updater
+        late-frame queries would be window-masked, which the static iteration
         graph cannot represent."""
         windows, pad = plan_windows(total_frames, self.seq_len)
         T = total_frames + pad
@@ -120,14 +127,22 @@ class Tapip3DStreamONNX:
                     intrs_b = torch.cat([intrs_b, intrs_b[-1:].expand(pad_n, -1, -1)], 0)
                     extrs_b = torch.cat([extrs_b, extrs_b[-1:].expand(pad_n, -1, -1)], 0)
 
-            # ONE batch through the encoder (no full-video buffer)
-            feats_b = self.onnx_model.encode_batch(video_b).to(dtype=torch.float32)
+            # ONE batch through the encoder (no full-video buffer). Deviation
+            # from the ONNX stream: the PT2 encoder program is static at
+            # exactly seq_len frames, so a short batch is padded to seq_len
+            # for the graph and the features sliced back to its real length.
+            video_enc = video_b
+            if video_b.shape[0] < self.seq_len:
+                video_enc = torch.cat(
+                    [video_b, video_b[-1:].expand(self.seq_len - video_b.shape[0],
+                                                  -1, -1, -1)], 0)
+            feats_b = self.pt2_model.encode_batch(video_enc)[:, :video_b.shape[0]]
 
             if k == 0:
                 frame0 = (feats_b[:, :1], depths_b[:1], intrs_b[:1], extrs_b[:1])
                 pcds_f0 = batch_unproject(
                     frame0[1][None], frame0[2][None], frame0[3][None])
-                shared_corr_ctx = self.onnx_model.corr_processor.prepare_shared(
+                shared_corr_ctx = self.pt2_model.corr_processor.prepare_shared(
                     pcds=pcds_f0, feats=frame0[0], queries=query_point)
 
             # window A: global [seq_len*k - stride, seq_len*k + stride) —
@@ -166,8 +181,11 @@ class Tapip3DStreamONNX:
 
     def _run_window(self, feats_w, depths_w, intrs_w, extrs_w, ws, we, pred,
                     query_point, query_coords, query_frames, shared_corr_ctx):
-        """Mirror StreamInference._run_window's init logic and call
-        onnx_model.forward_window with the 17-frame stack (local bounds 1..17)."""
+        """Mirror Tapip3DStreamONNX._run_window's init logic and call
+        pt2_model.forward_window with the 17-frame stack and local bounds
+        (1, seq_len+1): the PT2 signature is full-video + absolute bounds, so
+        the window stack [frame0] + [16 window frames] with bounds (1, 17)
+        reproduces the ONNX stream's window semantics exactly."""
         seq_len, stride = self.seq_len, self.stride
 
         coords_init = pred.coords[:, ws:ws + stride]
@@ -192,12 +210,14 @@ class Tapip3DStreamONNX:
         mask = track_mask[0]
         if not mask.any():
             return
-        out_coords, out_visibs = self.onnx_model.forward_window(
+        out_coords, out_visibs = self.pt2_model.forward_window(
             feats=feats_w,
             depths=depths_w[None],
             intrs=intrs_w[None],
             extrs=extrs_w[None],
             queries=query_point[:, mask, :],
+            window_start=1,
+            window_end=seq_len + 1,
             coords_init=coords_init[:, :, mask],
             visibs_init=visibs_init[:, :, mask],
             shared_corr_ctx=shared_corr_ctx.select_queries(mask),
