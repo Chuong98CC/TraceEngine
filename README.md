@@ -1,9 +1,7 @@
 # 3D Trace Estimation Engine
 
 This repo provides an end-to-end pipeline that extract the **3D trace of a
-moving object**, along with object segmentation mask, camera poses and metric depth for the whole
-sequence. It combines several models, each deployed with the runtime it fits
-best (ONNX Runtime, TensorRT, or `torch.export` programs):
+moving object**, given its initial bounding box and optional text-promt. It will aslo predict the object segmentation mask using SAM3, motion mask Optical Flow using WAFT model, Camera poses and metric depth for the whole sequence (support different Monocular, Stereo, RGBD backend input video). It combines the following models:
 
 - **Any2Full** — RGB-D depth densification: grounds a Depth Anything prediction
   with the RGB-D sensor's sparse metric depth as a prompt, producing a densified
@@ -14,7 +12,7 @@ best (ONNX Runtime, TensorRT, or `torch.export` programs):
 - **TAPIP3D** — 3D point tracking (traces).
 - **SAM3** — promptable segmentation.
 
-## Installation
+## 1. Installation
 
 Install the environment simply by:
 
@@ -26,9 +24,9 @@ with pinned inference runtimes: `torch==2.11.0+cu128`,
 `onnxruntime-gpu==1.28.0`, `tensorrt-cu12==11.1.0.106`.
 
 
-## Model weights
+## 2. Model weights
 
-The model weights are hosted on Hugging Face at
+To avoid environment conflicting when using different models within the same repo, the model checkpoints are already converted to Torch.Export or ONNX. The converted model weights are hosted on Hugging Face at
 [`Chuong98vt/TraceEngine`](https://huggingface.co/Chuong98vt/TraceEngine).
 Download them and point `weights/` at the download folder:
 
@@ -62,15 +60,14 @@ weights
     └── tapip3d_iteration_1088_bf16.pt2   # fixed 1088-query iteration model
 ```
 
-## How the code works
+## 3. Run Inference
 
 The `tools/` folder is the working entry point. Depending on the dataset
 size, use one of two tool sets:
 
 ### Case 1 — General purpose: test each component individually (`tools/general_test`)
 
-The `tools/general_test` scripts run **one model at a time** end-to-end (load
-weights → preprocess → infer → postprocess → save outputs/visualization) on a
+The `tools/general_test` scripts run **one model at a time** on a
 **folder of input images** (or a single example image), independent of any
 dataset. This is where each individual component is tested and verified:
 WAFT optical flow, SAM3 segmentation, Any2Full depth densification,

@@ -143,5 +143,6 @@ exact requested size (even dimensions), `fps` frames per second.
   (a second or two of startup overhead).
 - Outputs written by older pipeline versions (depth stored inside the
   NPZ, no `.lz4` / `shape`) are not readable by the current loaders.
-- Related docs: `general_test.md` (the `run_stream.py` inference side),
-  `astribot_visualize_subtask_stream.md` (online per-sub-task variant).
+- Related docs: [`streaming.md`](streaming.md) (the `run_stream.py`
+  inference side), [`astribot_visualize_subtask_stream.md`](../astribot/astribot_visualize_subtask_stream.md)
+  (online per-sub-task variant).

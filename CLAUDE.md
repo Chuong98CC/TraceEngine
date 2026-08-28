@@ -5,7 +5,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Project overview
 
 Multi-model 3D-vision inference, each model deployed on the runtime that fits
-it best (ONNX Runtime, TensorRT, TorchScript, or `torch.export` programs):
+it best (ONNX Runtime, TensorRT, or `torch.export` programs):
 
 - **DA3 (Depth Anything 3)** — any-view depth + camera pose. Runs as two
   torch.export checkpoints (any-view + metric depth, fixed `num_views`,
@@ -19,7 +19,7 @@ it best (ONNX Runtime, TensorRT, TorchScript, or `torch.export` programs):
 - **Streaming** — chunked multi-camera depth+pose over long trajectories with
   SIM3 chunk alignment and optional loop closure.
 - **WAFT** — dense optical flow (ONNX + TRT), used to build motion masks.
-- **TAPIP3D** — 3D point tracking (ONNX), fixed query count.
+- **TAPIP3D** — 3D point tracking (`torch.export` / `.pt2`), fixed query count.
 - **SAM3** — promptable segmentation (`torch.export` / `.pt2`).
 
 Backend-agnostic engine/session wrappers and camera types live in `src/base`;
@@ -73,7 +73,7 @@ src/
 │   └── sam3/                   # SAM3 promptable segmentation (.pt2 runtime)
 ├── flow_models/
 │   ├── waft/                   # WAFT optical flow — WAFTOnnx (ONNX) / WAFT (TRT)
-│   └── tapip3d/                # TAPIP3D 3D tracking (ONNX encoder/updater/corr_forward)
+│   └── tapip3d/                # TAPIP3D 3D tracking (Tapip3D_PT2: .pt2 encoder + fused corr/updater)
 └── utils/
     ├── astribot_dataloader.py  # Astribot dataset: load_rgbd, CAMERA_SETS, depth configs
     ├── image_io.py             # ImageInput, to_image_tensor
@@ -81,18 +81,33 @@ src/
     └── visualize_*.py          # depth / flow / mask / tapip3d visualizers + export_glb
 tools/
 ├── export_trt.py               # ONNX → TensorRT engine via trtexec
-├── general_test/               # inference + visualization entry points
-│   ├── run_stream.py           # streaming CLI (--backend da3|vggt_omega)
+├── general_test/               # Case 1 (README): general-purpose inference + viz entry points
+│   ├── run_stream.py           # streaming CLI (--backend da3|vggt_omega|a2f)
 │   ├── infer_waft.py, infer_tapip3d.py
 │   ├── test_any2full.py, test_sam3.py
 │   └── visualize_stream.py, visualize_rgbd.py
+├── astribot/                   # Case 2 (README): online streaming, no frame extraction
+│   ├── extract_frames.py       # sub-task splits, key-frame jpgs, per-subtask videos/frames (+ depth .lz4)
+│   ├── run_subtask_stream.py   # online per-sub-task depth+pose streaming (da3/vggt_omega/a2f)
+│   ├── run_subtask_a3f.py      # online per-sub-task Any2Full RGB-D densification
+│   └── visualize_subtask_stream.py  # per-sub-task trajectory videos, online (no re-inference)
+├── push_ckpt_2HF.py            # upload weights/ to Hugging Face (Chuong98vt/TraceEngine)
 └── hifi-umi/                   # HiFi-UMI dataset preprocessing (extract_frames, generate_masks)
-scripts/                        # ready-to-run pipeline scripts (infer_*.sh,
-                                # visualize_stream.sh, export_trt_docker.sh)
+scripts/                        # ready-to-run pipeline scripts
+├── general_test/               # wrappers: infer_waft.sh, infer_stream_stereo/rgbd.sh,
+│                               #   infer_tapip3d.sh, visualize_stream.sh, export_trt_docker.sh
+└── astribot/                   # extract_frames.sh, run_subtask_stream.sh (+ visualize helper)
+docs/
+├── general_test/               # general_test.md master index (mermaid pipeline diagram) +
+│                               #   per-model pages (waft, sam3, any2full, streaming, tapip3d, visualize_rgbd)
+└── astribot/                   # extract_frames / subtask-streaming / visualization guides
 ```
 
 Model weights are expected under `weights/` (git-ignored): `any2full/`, `da3/`,
-`vggt_omg/`, `sam3/`, `waftv2/`, `tapip3d/`.
+`vggt_omg/`, `sam3/`, `waftv2/`, `tapip3d/`. They are hosted on Hugging Face
+(`Chuong98vt/TraceEngine`): download and symlink with
+`hf download Chuong98vt/TraceEngine --local-dir <dir> && ln -s <dir> weights`
+(README §2 has the expected layout; `tools/push_ckpt_2HF.py` re-uploads).
 
 ## Class hierarchy
 
@@ -132,9 +147,10 @@ Model-specific wrappers:
   `preprocess` / `infer` / `postprocess`; see the Any2Full section below.
 - `WAFTOnnx(WAFTBase, ONNXModel)` / `WAFT(WAFTBase, TRTModel)` — optical flow
   (BGR in, flow out); `infer_waft.py --backend trt|onnx`.
-- TAPIP3D — ONNX encoder/updater/corr_forward stream runtime under
-  `flow_models/tapip3d/`; SAM3 — standalone `torch.export` image runtime
-  (fixed 1008 resolution, fixed box-prompt slot count).
+- `Tapip3D_PT2` / `Tapip3DStreamPT2` (`flow_models/tapip3d/`) — TAPIP3D
+  torch.export stream runtime: encoder + fused corr/updater iteration
+  programs, sliding-window orchestration. SAM3 — standalone `torch.export`
+  image runtime (fixed 1008 resolution, fixed box-prompt slot count).
 
 ## Streaming pipeline (DA3 / VGGT-Omega)
 
@@ -158,7 +174,10 @@ per-view `depth` + warped `extrinsics` + `intrinsics` per frame.
   detects revisited scenes and re-aligns via a loop SIM3 optimizer.
 - Entry point: `tools/general_test/run_stream.py --backend da3|vggt_omega|a2f`
   (wrappers: `scripts/general_test/infer_stream_stereo.sh` /
-  `infer_stream_rgbd.sh`, `scripts/visualize_stream.sh`).
+  `infer_stream_rgbd.sh` / `visualize_stream.sh`). The online per-sub-task
+  variant that streams straight from the dataset (no frames on disk) is
+  `tools/astribot/run_subtask_stream.py` (see
+  `docs/astribot/astribot_subtask_stream.md`).
 
 ## Any2Full (RGB-D depth densification)
 
@@ -210,13 +229,24 @@ python tools/general_test/test_any2full.py \
     --pt2 weights/any2full/Any2Full_vitl_bf16.pt2 --frame_idx 0 --out_dir ./output/a2f
 
 # --- WAFT motion masks / TAPIP3D traces ---
-bash scripts/infer_waft.sh
-bash scripts/infer_tapip3d.sh
+bash scripts/general_test/infer_waft.sh
+bash scripts/general_test/infer_tapip3d.sh
+
+# --- Extract sample frames from a LeRobotDataset (feeds the general_test tools) ---
+python tools/astribot/extract_frames.py \
+    --repo-id Kronze157/astri_making_coffee_vlva \
+    --data-root /data/astri_making_coffee_v1 --mode frames \
+    --camera-idxes 0 1 --interval 4 --max-frames 50
+
+# --- Online per-sub-task streaming straight from the dataset (no frame extraction) ---
+python tools/astribot/run_subtask_stream.py \
+    --repo-id Kronze157/astri_making_coffee_vlva \
+    --data-root /data/astri_making_coffee_v1 --episode-idxes 0 --backend vggt_omega
 
 # --- Export ONNX → TRT engine ---
 python tools/export_trt.py weights/waftv2/waftv2_dinov3_i5_640x480.onnx
 # or inside the NVIDIA TensorRT container (avoids local env setup):
-bash scripts/export_trt_docker.sh /abs/path/to/model.onnx fp16
+bash scripts/general_test/export_trt_docker.sh /abs/path/to/model.onnx fp16
 ```
 
 ## Dataset loading
@@ -238,7 +268,7 @@ symlink points here): `astribot_test_imgs/` (per-camera RGB-D frames) +
 
 TensorRT code uses the 10.3+ `set_tensor_address` API. Engine files are
 version-locked — on a deserialization failure, rebuild with the matching
-TensorRT version via `scripts/export_trt_docker.sh`. Pinned runtimes
+TensorRT version via `scripts/general_test/export_trt_docker.sh`. Pinned runtimes
 (pyproject): `torch==2.11.0+cu128`, `torchvision==0.26.0+cu128`,
 `tensorrt-cu12==11.1.0.106`, `onnxruntime-gpu==1.28.0`. TRT 11 removed the
 `--fp16`/`--precisionConstraints`/`--layerPrecisions` trtexec flags (builds
@@ -266,8 +296,10 @@ engine: ~6.9 ms vs ~36.9 ms tf32 on an RTX 5090, 644 MB vs 1310 MB.
   is the sparse metric depth in metres; output is metric depth (fp32).
 - **WAFT**: BGR input by default; motion masks from flow-magnitude threshold
   (pixels >127 are moving).
-- **TAPIP3D**: the ONNX updater is exported for a **fixed query count (1088)** —
-  an 8×8 bbox grid (64) + 32×32 support grid (1024) matches it exactly.
+- **TAPIP3D**: the `.pt2` iteration program is exported for a **fixed query
+  count (1088)** — an 8×8 bbox grid (64) + 32×32 support grid (1024) matches
+  it exactly (SAM3 mask-sampled queries fall back to the grid when the mask
+  is too small).
 - **SAM3**: fixed 1008 resolution and a fixed number of box-prompt slots in
   the exported graph (callers right-pad prompts).
 - All models use NCHW and GPU tensors; the wrappers handle HWC→CHW, batch dim,
