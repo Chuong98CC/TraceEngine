@@ -75,7 +75,7 @@ def draw_box_on_image(
     """
     Draws a rectangle on a given image using the provided box coordinates in xywh format.
     :param image: PIL.Image, numpy.ndarray or torch.Tensor - The image on which to draw the rectangle.
-    :param box: tuple - A tuple (x, y, w, h) representing the top-left corner, width, and height of the rectangle.
+    :param box: tuple - A tuple (x, y, x2, y2) representing the top-left and bottom-right corners of the rectangle.
     :param color: tuple - A tuple (R, G, B) representing the color of the rectangle. Default is green.
     :return: PIL.Image - The image with the rectangle drawn on it.
     """
@@ -83,26 +83,26 @@ def draw_box_on_image(
     # Ensure the image is in RGB mode
     image = image.convert("RGB")
     # Unpack the box coordinates
-    x, y, w, h = box
-    x, y, w, h = int(x), int(y), int(w), int(h)
+    x, y, x2, y2 = box
+    x, y, x2, y2 = int(x), int(y), int(x2), int(y2)
     # Get the pixel data
     pixels = image.load()
     # Draw the top and bottom edges
-    for i in range(x, x + w):
+    for i in range(x, x2):
         pixels[i, y] = color
-        pixels[i, y + h - 1] = color
+        pixels[i, y2 - 1] = color
         pixels[i, y + 1] = color
-        pixels[i, y + h] = color
+        pixels[i, y2] = color
         pixels[i, y - 1] = color
-        pixels[i, y + h - 2] = color
+        pixels[i, y2 - 2] = color
     # Draw the left and right edges
-    for j in range(y, y + h):
+    for j in range(y, y2):
         pixels[x, j] = color
         pixels[x + 1, j] = color
         pixels[x - 1, j] = color
-        pixels[x + w - 1, j] = color
-        pixels[x + w, j] = color
-        pixels[x + w - 2, j] = color
+        pixels[x2 - 1, j] = color
+        pixels[x2, j] = color
+        pixels[x2 - 2, j] = color
     return image
 
 

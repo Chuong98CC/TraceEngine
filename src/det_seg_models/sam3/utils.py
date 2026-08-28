@@ -22,10 +22,17 @@ def box_xywh_to_cxcywh(x):
     b = [(x + 0.5 * w), (y + 0.5 * h), (w), (h)]
     return torch.stack(b, dim=-1)
 
+def box_xyxy_to_cxcywh(x):
+    x1, y1, x2, y2 = x.unbind(-1)
+    b = [(x1 + x2) * 0.5, (y1 + y2) * 0.5, (x2 - x1), (y2 - y1)]
+    return torch.stack(b, dim=-1)
+
+def box_xyxy_to_xywh(x):
+    x1, y1, x2, y2 = x.unbind(-1)
+    b = [x1, y1, x2 - x1, y2 - y1]
+    return torch.stack(b, dim=-1)
 
 # --- Vendored from sam3/model/data_misc.py ---
-
-
 def interpolate(
     input, size=None, scale_factor=None, mode="nearest", align_corners=None
 ):

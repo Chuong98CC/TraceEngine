@@ -27,7 +27,7 @@ python tools/general_test/infer_tapip3d.py \
     --output_dir "$OUTPUT_DIR" \
     --start_frame 0 \
     --interval 1 \
-    --bbox 1 240 100 340 \
+    --bbox 1 240 100 340 --text_prompt "brown coffee cup" \
     --grid_x 8 \
     --grid_y 8 \
     --support_grid_size 32 \

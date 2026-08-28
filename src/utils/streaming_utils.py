@@ -189,27 +189,24 @@ def mask_points_by_frame(points_2d, frame_H, frame_W, margin=10):
     return (x >= -margin) & (x < frame_W + margin) & (y >= -margin) & (y < frame_H + margin)
 
 
-def unproject_bbox_queries(x0, y0, x1, y1, grid_x, grid_y, depth0, intr0, extr0,
-                           frame_H, frame_W, device="cpu"):
-    """Sample a grid inside a bbox and unproject to 3D world-coordinate queries.
+def unproject_xy_queries(xy, depth0, intr0, extr0, device="cpu"):
+    """Unproject a set of 2D pixel coordinates to 3D world-coordinate queries.
 
     Args:
-        x0, y0, x1, y1: bbox in pixel coordinates
-        grid_x, grid_y: number of grid points in each dimension
+        xy: (N, 2) pixel coordinates (x, y) at the query frame (numpy or
+            torch; int or float — rounded to pixels for the depth lookup)
         depth0: (H, W) depth map at the query frame (numpy or torch)
         intr0: (3, 3) intrinsics at the query frame
         extr0: (4, 4) extrinsics (world→camera) at the query frame
-        frame_H, frame_W: image dimensions
 
     Returns:
-        queries: (N, 4) tensor with (frame_idx=0, x, y, z) in world coords,
-                 or None if no valid points
+        queries: (M, 4) tensor with (frame_idx=0, x, y, z) in world coords,
+                 or None if no valid points (points with depth == 0 are dropped)
     """
-    # Sample 2D grid in bbox
-    xy = sample_grid_in_bbox(x0, y0, x1, y1, grid_x, grid_y,
-                              frame_H, frame_W, device=device)  # (1, N, 2)
-    xy = xy.squeeze(0)  # (N, 2)
-
+    if isinstance(xy, np.ndarray):
+        xy = torch.from_numpy(xy).float()
+    else:
+        xy = xy.float()
     if isinstance(depth0, np.ndarray):
         depth0 = torch.from_numpy(depth0).float().to(device)
     if isinstance(intr0, np.ndarray):
@@ -217,7 +214,7 @@ def unproject_bbox_queries(x0, y0, x1, y1, grid_x, grid_y, depth0, intr0, extr0,
     if isinstance(extr0, np.ndarray):
         extr0 = torch.from_numpy(extr0).float().to(device)
 
-    # Look up depth at each grid point
+    # Look up depth at each point (float coords rounded to pixels)
     ji = torch.round(xy).to(torch.int32)
     ji[:, 0] = ji[:, 0].clamp(0, depth0.shape[1] - 1)
     ji[:, 1] = ji[:, 1].clamp(0, depth0.shape[0] - 1)
@@ -246,6 +243,29 @@ def unproject_bbox_queries(x0, y0, x1, y1, grid_x, grid_y, depth0, intr0, extr0,
     queries = torch.cat(
         [torch.zeros_like(xy[:, :1]), world_coords], dim=-1)  # (N, 4)
     return queries
+
+
+def unproject_bbox_queries(x0, y0, x1, y1, grid_x, grid_y, depth0, intr0, extr0,
+                           frame_H, frame_W, device="cpu"):
+    """Sample a grid inside a bbox and unproject to 3D world-coordinate queries.
+
+    Args:
+        x0, y0, x1, y1: bbox in pixel coordinates
+        grid_x, grid_y: number of grid points in each dimension
+        depth0: (H, W) depth map at the query frame (numpy or torch)
+        intr0: (3, 3) intrinsics at the query frame
+        extr0: (4, 4) extrinsics (world→camera) at the query frame
+        frame_H, frame_W: image dimensions
+
+    Returns:
+        queries: (N, 4) tensor with (frame_idx=0, x, y, z) in world coords,
+                 or None if no valid points
+    """
+    # Sample 2D grid in bbox
+    xy = sample_grid_in_bbox(x0, y0, x1, y1, grid_x, grid_y,
+                              frame_H, frame_W, device=device)  # (1, N, 2)
+    xy = xy.squeeze(0)  # (N, 2)
+    return unproject_xy_queries(xy, depth0, intr0, extr0, device=device)
 
 
 def load_resized_batch(file_list, npz_dir, start, end, inference_h, inference_w):

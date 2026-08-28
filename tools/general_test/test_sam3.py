@@ -33,32 +33,32 @@ from det_seg_models.sam3 import (
     plot_results,
 )
 
-from det_seg_models.sam3.utils import box_xywh_to_cxcywh
+from det_seg_models.sam3.utils import box_xyxy_to_cxcywh
 
 model = Sam3Image("../../weights/sam3/sam3_image_exported_bf16.pt2")
 
 #%%
 # infer image path
-image_path = f"../../demo_data/astribot_stereo_lrb/extract_frames/stereo_left/frame_000148.jpg"
+image_path = "/data/astri_making_coffee_v1/eps_data/key_frames/ep000000/cam_head/frame_000000.jpg"
 image = Image.open(image_path)
 width, height = image.size
 
 #%%
 # infer box
-box_input_xywh = [[423.0, 217.0, 120.0, 104.0],[180,50,195,250] ]
-box_input_cxcywh = box_xywh_to_cxcywh(torch.tensor(box_input_xywh).view(-1,4))
+box_input_xyxy = [[1, 240, 100.0, 340.0]]
+box_input_cxcywh = box_xyxy_to_cxcywh(torch.tensor(box_input_xyxy).view(-1,4))
 norm_boxes_cxcywh = normalize_bbox(box_input_cxcywh, width, height)
 
-box_labels = [True, True]
+box_labels = [True]
 
 img0 = Image.open(image_path)
 image_with_box = img0
-for i in range(len(box_input_xywh)):
+for i in range(len(box_input_xyxy)):
     if box_labels[i] == 1:
         color = (0, 255, 0)
     else:
         color = (255, 0, 0)
-    image_with_box = draw_box_on_image(image_with_box, box_input_xywh[i], color)
+    image_with_box = draw_box_on_image(image_with_box, box_input_xyxy[i], color)
 plt.imshow(image_with_box)
 plt.axis("off")  # Hide the axis
 plt.show()
@@ -69,7 +69,7 @@ plt.show()
 # inference and post-processing end-to-end.
 inference_state = model.predict(
     image,
-    text_prompt="visual",
+    text_prompt="brown cup",
     boxes=norm_boxes_cxcywh,
     labels=box_labels,
 )
