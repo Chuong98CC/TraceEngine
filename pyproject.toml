@@ -68,6 +68,8 @@ pointops2 = { path = "third_party/pointops2" }
 
 
 [tool.uv]
+# pointops2's setup.py imports torch at build time, so it must build inside the
+# project environment (no build isolation).
 no-build-isolation-package = ["pointops2"]
 
 
@@ -80,3 +82,4 @@ select = ["E", "F", "I", "N", "W", "UP"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/base", "src/depth_models", "src/flow_models", "src/utils", "src/det_seg_models", "tools"]
+

@@ -6,15 +6,16 @@ CAMERA_IDX=3   # cam_torso (a camera with a paired raw-depth feature)
 
 # run inference on the RGB-D stream (online, straight from the dataset;
 # a2f densifies the sensor depth with Any2Full)
-python tools/astribot/run_subtask_stream.py \
-    --repo-id $REPO_ID \
-    --data-root $DATA_ROOT \
-    --episode-idxes 0 \
-    --camera-idxes $CAMERA_IDX --backend $BACKEND --no-depth-enhance
+# python tools/astribot/run_subtask_stream.py \
+#     --repo-id $REPO_ID \
+#     --data-root $DATA_ROOT \
+#     --episode-idxes 0 \
+#     --camera-idxes $CAMERA_IDX --backend $BACKEND
+#     # --no-depth-enhance
     # --with-optical-flow
 
 # visualize
-# python tools/astribot/visualize_subtask_stream.py \
-#     --repo-id $REPO_ID \
-#     --data-root $DATA_ROOT --episode-idxes 0 \
-#     --camera-idxes $CAMERA_IDX --fps 15 --size 960x540
+python tools/astribot/visualize_subtask_stream.py \
+    --repo-id $REPO_ID \
+    --data-root $DATA_ROOT --episode-idxes 0 \
+    --camera-idxes $CAMERA_IDX --fps 15 --size 960x540

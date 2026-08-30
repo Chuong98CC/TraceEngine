@@ -23,6 +23,28 @@ uv sync
 with pinned inference runtimes: `torch==2.11.0+cu128`,
 `onnxruntime-gpu==1.28.0`, `tensorrt-cu12==11.1.0.106`.
 
+### Rex-Omni environment
+
+Rex-Omni uses a separate Python environment because its tested stack
+(`torch==2.7.0`, `transformers==4.51.3`, and `vllm==0.9.1`) conflicts with the
+main project environment. Set it up with:
+
+```bash
+bash scripts/general_test/setup_rexomni_env.sh
+PYTHONPATH="$PWD/src" .venv-rexomni/bin/python tools/general_test/test_rexomni.py
+```
+
+The Rex-Omni environment is intentionally not installed as an editable copy of
+this project: the project metadata requires Python 3.12, while Rex-Omni uses
+Python 3.10. `PYTHONPATH="$PWD/src"` exposes the repository's source packages
+without installing the main project's dependencies into `.venv-rexomni`.
+
+The setup script uses the prebuilt FlashAttention wheel when available. If that
+wheel is unavailable for your platform, choose a matching wheel from the
+[flash-attention-prebuild-wheels](https://mjunya.com/flash-attention-prebuild-wheels/?package=FA2&python=3.10&torch=2.7&cuda=12.8)
+page and replace the `flash-attn` URL in the script. Do not install these Rex-Omni
+packages into the main environment.
+
 
 ## 2. Model weights
 
