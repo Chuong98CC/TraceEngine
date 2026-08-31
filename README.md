@@ -41,6 +41,9 @@ bash scripts/general_test/setup_rexomni_env.sh
 PYTHONPATH="$PWD/src" .venv-rexomni/bin/python tools/general_test/test_rexomni.py
 ```
 
+See [`docs/general_test/rexomni.md`](docs/general_test/rexomni.md) for the
+wrapper API and its role in the pipeline (Step 3 object detection).
+
 The Rex-Omni environment is intentionally not installed as an editable copy of
 this project: the project metadata requires Python 3.12, while Rex-Omni uses
 Python 3.10. `PYTHONPATH="$PWD/src"` exposes the repository's source packages
@@ -80,6 +83,9 @@ weights
 ├── da3/
 │   ├── da3_anyview_64x644x490_giant-large-1.1_bf16.pt2   # any-view, fixed 64 views
 │   └── da3_metric_644x490_giant-large-1.1_bf16.pt2       # metric depth
+├── romav2/
+│   ├── romav2.pt2                        # multi-image keypoint matching (exported .pt2)
+│   └── romav2.json                       # export config: H_lr / W_lr
 ├── sam3/
 │   └── sam3_image_exported_bf16.pt2
 ├── waftv2/
@@ -218,7 +224,8 @@ The `tools/general_test` scripts run **one model at a time** on a
 **folder of input images** (or a single example image), independent of any
 dataset. This is where each individual component is tested and verified:
 WAFT optical flow, SAM3 segmentation, Any2Full depth densification,
-DA3 / VGGT-Omega streaming, TAPIP3D tracking. Per-tool usage is documented in
+DA3 / VGGT-Omega streaming, TAPIP3D tracking, RexOmni detection, RoMAv2
+keypoint matching. Per-tool usage is documented in
 [`docs/general_test/general_test.md`](docs/general_test/general_test.md).
 
 To get sample image folders, first extract frames from a LeRobotDataset —
