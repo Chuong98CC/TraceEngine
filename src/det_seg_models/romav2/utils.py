@@ -125,3 +125,29 @@ def filter_matches(
     if roundtrip_err is not None:
         mask = mask & (roundtrip_err < cycle_th)
     return mask
+
+
+def select_top_k(
+    overlaps: torch.Tensor,
+    k: int,
+    roundtrip_err: torch.Tensor | None = None,
+    cycle_th: float = 0.01,
+) -> torch.Tensor:
+    """Mask of the k most visible points.
+
+    overlaps: (M, N) per-point overlap confidence in each image.
+    k: number of points to keep (clamped to the number of candidates).
+    roundtrip_err: (M,) per-point cycle error, or None to skip the check.
+    Returns (M,) bool -- the k points with the highest worst-case overlap
+    (min across images). If roundtrip_err is given, round-trip-inconsistent
+    points are excluded first (cycle_th is a hard filter, not a ranking
+    criterion); when fewer than k candidates survive, all of them are kept.
+    """
+    score = overlaps.min(dim=-1).values
+    if roundtrip_err is not None:
+        score = score.masked_fill(roundtrip_err >= cycle_th, -torch.inf)
+    k = min(k, int((score > -torch.inf).sum()))
+    mask = torch.zeros_like(score, dtype=torch.bool)
+    if k > 0:
+        mask[torch.topk(score, k).indices] = True
+    return mask

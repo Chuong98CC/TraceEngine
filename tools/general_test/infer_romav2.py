@@ -12,9 +12,13 @@ Strategies:
                   with every pair's warp in both directions (round-trip
                   error below --cycle-err).
 
+Point selection is either the threshold method (--overlap-th, default) or
+the top-k method (--top-k) -- exactly one, never both.
+
 Usage:
     python multi_match.py imgA.jpg imgB.jpg [imgC.jpg ...] \
         [--strategy reference|cycle] [--num-corresp 500] \
+        [--overlap-th 0.25 | --top-k 100] \
         [--model weights/romav2/romav2.pt2] [--out cache/multi_match_matches.npz] \
         [--viz cache/multi_match_vis.jpg]
 
@@ -88,11 +92,19 @@ def main() -> None:
         default=500,
         help="candidate points sampled in image 0 before filtering (default: 500)",
     )
-    parser.add_argument(
+    sel = parser.add_mutually_exclusive_group()
+    sel.add_argument(
         "--overlap-th",
         type=float,
-        default=0.25,
-        help="minimum overlap confidence required in every image (default: 0.25)",
+        help="threshold method: minimum overlap confidence required in every "
+        "image (default: 0.25); not allowed with --top-k",
+    )
+    sel.add_argument(
+        "--top-k",
+        type=int,
+        help="top-k method: keep the K best candidates ranked by worst-case "
+        "overlap across all images instead of thresholding; not allowed with "
+        "--overlap-th",
     )
     parser.add_argument(
         "--cycle-err",
@@ -128,6 +140,7 @@ def main() -> None:
         strategy=args.strategy,
         num_corresp=args.num_corresp,
         overlap_th=args.overlap_th,
+        top_k=args.top_k,
         cycle_th=args.cycle_err,
     )
 
@@ -146,9 +159,10 @@ def main() -> None:
 
     kept = int(mask.sum().item())
     sampled = int(mask.shape[0])
+    select = f"top-k {args.top_k}" if args.top_k is not None else f"overlap-th {args.overlap_th}"
     print(
-        f"strategy={args.strategy}: kept {kept}/{sampled} points visible in all "
-        f"{len(args.images)} images"
+        f"strategy={args.strategy} select={select}: kept {kept}/{sampled} points "
+        f"visible in all {len(args.images)} images"
     )
     print(f"saved matches to {args.out}")
 

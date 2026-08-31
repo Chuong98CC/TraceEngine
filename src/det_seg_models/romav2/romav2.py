@@ -32,6 +32,7 @@ from .utils import (
     get_normalized_grid,
     kde,
     sample_overlap,
+    select_top_k,
     to_pixel,
     warp_points,
 )
@@ -145,6 +146,7 @@ class RoMaV2PT2:
         strategy: str = "reference",
         num_corresp: int = 500,
         overlap_th: float = 0.5,
+        top_k: int | None = None,
         cycle_th: float = 0.01,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Match images[0] against the rest; return surviving tracks.
@@ -168,6 +170,14 @@ class RoMaV2PT2:
         With 2 images this reduces to the plain pairwise case: one match_pair
         call, and the overlap filter is the only difference from sample()
         output.
+
+        Selection (choose one): threshold mode (default) keeps every candidate
+        whose overlap exceeds overlap_th in ALL images; pass top_k instead to
+        keep only the top_k candidates ranked by worst-case overlap across
+        images (min over images), ignoring overlap_th. In cycle mode both
+        selections first drop round-trip-inconsistent candidates (cycle_th is
+        a hard filter, not a ranking criterion). When fewer than top_k
+        candidates survive, all of them are kept.
 
         Returns (positions, mask): positions (K, N, 2) normalized coordinates
         of the surviving points in each image; mask (M,) indexing the sampled
@@ -207,12 +217,17 @@ class RoMaV2PT2:
             }
             roundtrip_err = compute_cycle_errors(positions, pair_warps)
 
-        mask = filter_matches(
-            overlaps,
-            roundtrip_err=roundtrip_err,
-            overlap_th=overlap_th,
-            cycle_th=cycle_th,
-        )
+        if top_k is not None:
+            mask = select_top_k(
+                overlaps, top_k, roundtrip_err=roundtrip_err, cycle_th=cycle_th
+            )
+        else:
+            mask = filter_matches(
+                overlaps,
+                roundtrip_err=roundtrip_err,
+                overlap_th=overlap_th,
+                cycle_th=cycle_th,
+            )
         return positions[mask], mask
 
     def sample(
