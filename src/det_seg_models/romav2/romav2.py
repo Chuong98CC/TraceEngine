@@ -36,29 +36,38 @@ from .utils import (
     warp_points,
 )
 
-DEFAULT_MODEL_PATH = "weights/romav2/romav2.pt2"
+DEFAULT_MODEL_PATH: str = "weights/romav2/romav2.pt2"
+
+# Accepted image inputs (see _load_image): file path, PIL image, HWC numpy
+# array, or CHW/NCHW tensor (uint8 or float in [0, 1]).
+ImageInput = str | Path | Image.Image | np.ndarray | torch.Tensor
 
 class RoMaV2PT2:
     """Standalone inference wrapper around an exported RoMaV2 .pt2 program."""
 
-    def __init__(self, model_path=DEFAULT_MODEL_PATH, *, device=None):
+    def __init__(
+        self,
+        model_path: str | Path = DEFAULT_MODEL_PATH,
+        *,
+        device: str | torch.device | None = None,
+    ) -> None:
         model_path = Path(model_path)
         config_path = model_path.with_suffix(".json")
-        self.cfg = json.loads(config_path.read_text()) if config_path.exists() else {}
-        self.H_lr = self.cfg["H_lr"]
-        self.W_lr = self.cfg["W_lr"]
+        self.cfg: dict = json.loads(config_path.read_text()) if config_path.exists() else {}
+        self.H_lr: int = self.cfg["H_lr"]
+        self.W_lr: int = self.cfg["W_lr"]
         # The exported program always computes both directions.
-        self.bidirectional = True
+        self.bidirectional: bool = True
         torch.set_float32_matmul_precision("highest")
         if device is None:
             device = "cuda" if torch.cuda.is_available() else "cpu"
-        self.device = torch.device(device)
+        self.device: torch.device = torch.device(device)
         # NOTE: the .pt2 stores tensors on the device it was exported from
         # (CUDA here); running on a CPU-only machine requires a CPU export.
         # ExportedProgram.module() is always inference-mode (eval() unsupported).
-        self.module = torch.export.load(model_path).module()
+        self.module: torch.nn.Module = torch.export.load(model_path).module()
 
-    def _load_image(self, img_like) -> torch.Tensor:
+    def _load_image(self, img_like: ImageInput) -> torch.Tensor:
         if isinstance(img_like, (str, Path)):
             img_pil = Image.open(img_like)
             if img_pil.mode == "I;16":
@@ -73,7 +82,7 @@ class RoMaV2PT2:
             )
             img = torch.from_numpy(img_like).permute(2, 0, 1)
         elif isinstance(img_like, torch.Tensor):
-            assert img_like.shape[1] == 3, (
+            assert img_like.shape[-3] == 3, (
                 f"Image must have 3 channels, but got shape {img_like.shape=}"
             )
             img = img_like
@@ -87,7 +96,9 @@ class RoMaV2PT2:
         return img.to(self.device)
 
     @torch.inference_mode()
-    def match_pair(self, img_A, img_B) -> dict[str, torch.Tensor]:
+    def match_pair(
+        self, img_A: ImageInput, img_B: ImageInput
+    ) -> dict[str, torch.Tensor]:
         img_A = self._load_image(img_A)
         img_B = self._load_image(img_B)
 
@@ -130,17 +141,21 @@ class RoMaV2PT2:
 
     def match(
         self,
-        image_paths: list[str],
+        images: list[ImageInput] | torch.Tensor,
         strategy: str = "reference",
         num_corresp: int = 500,
         overlap_th: float = 0.5,
         cycle_th: float = 0.01,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Match image_paths[0] against the rest; return surviving tracks.
+        """Match images[0] against the rest; return surviving tracks.
 
         Finds points visible in ALL given images. Points are anchored in the
         first image (sampled with balanced sampling from the (0, 1) pair) and
         projected into every other image through that pair's dense warp field.
+
+        images: a list of image paths, PIL images or (H, W, 3) arrays (uint8
+        or float), or a (B, 3, H, W) uint8/float tensor. Each element is
+        loaded the same way as in match_pair (see _load_image).
 
         Strategies:
             reference  -- match image 0 against every other image (N-1 calls);
@@ -158,7 +173,9 @@ class RoMaV2PT2:
         of the surviving points in each image; mask (M,) indexing the sampled
         candidates (candidates: num_corresp at most).
         """
-        N = len(image_paths)
+        if isinstance(images, torch.Tensor):
+            images = list(images.unbind())  # (B, 3, H, W) -> per-image tensors
+        N = len(images)
         if strategy == "cycle":
             pairs = list(combinations(range(N), 2))
         else:
@@ -166,7 +183,7 @@ class RoMaV2PT2:
 
         preds = {}
         for i, j in pairs:
-            preds[(i, j)] = self.match_pair(image_paths[i], image_paths[j])
+            preds[(i, j)] = self.match_pair(images[i], images[j])
 
         # Sample base points on image 0 (balanced sampling from the (0, 1) pair).
         matches, _, _, _ = self.sample(preds[(0, 1)], num_corresp)
@@ -198,7 +215,9 @@ class RoMaV2PT2:
         )
         return positions[mask], mask
 
-    def sample(self, preds: dict[str, torch.Tensor], num_corresp: int):
+    def sample(
+        self, preds: dict[str, torch.Tensor], num_corresp: int
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
         warp = preds["warp_AB"]
         confidence_AB = preds["overlap_AB"]
         precision_AB = preds["precision_AB"] if "precision_AB" in preds else None
@@ -285,7 +304,7 @@ class RoMaV2PT2:
     @classmethod
     def to_pixel_coordinates(
         cls, warp: torch.Tensor, H_A: int, W_A: int, H_B: int, W_B: int
-    ):
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         return to_pixel(warp[..., :2], H=H_A, W=W_A), to_pixel(
             warp[..., 2:], H=H_B, W=W_B
         )
