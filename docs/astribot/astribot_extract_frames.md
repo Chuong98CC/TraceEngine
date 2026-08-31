@@ -8,7 +8,7 @@ training / evaluation.
 
 ```
 detect_subtask  →  subtask_splits.json + gripper plot   (tabular only, no video)
-key_frames      →  one jpg per first/last/key frame     (decodes videos)
+key_frames      →  one jpg per first/last/key frame, per sub-task (decodes videos)
 videos          →  one mp4 per sub-task segment         (ffmpeg cut, no decode)
 frames          →  sampled per-subtask jpgs + uint16 depth lz4 (decodes videos)
 ```
@@ -20,10 +20,10 @@ The four modes are independent: `detect_subtask` only reads the tabular data
 
 ## How the split frames are decided
 
-- **Ground truth first.** The `videos` and `frames` modes prefer the
-  dataset's per-frame `subtask_index` column when it exists: the split frames
-  are simply collected at **every frame where the subtask changes** (the first
-  frame of each new sub-task segment).
+- **Ground truth first.** The `videos`, `frames` and `key_frames` modes
+  prefer the dataset's per-frame `subtask_index` column when it exists: the
+  split frames are simply collected at **every frame where the subtask
+  changes** (the first frame of each new sub-task segment).
 - **Fallback.** Only when the episode has **fewer than two sub-tasks** (no
   change anywhere, or no `subtask_index` column) are the split frames loaded
   from the `subtask_splits.json` written by the `detect_subtask` mode.
@@ -40,7 +40,9 @@ The four modes are independent: `detect_subtask` only reads the tabular data
 - **Key frames.** The `key_frames` mode saves the episode's first and last
   frame (the ground-truth subtask bounds when the dataset has
   `subtask_index`) plus the gripper-detected key frames — ground truth has
-  no key frames, so they always come from `detect_subtask`.
+  no key frames, so they always come from `detect_subtask`. Each jpg is
+  saved under the sub-task segment its frame belongs to (an episode without
+  splits lands everything in `subtask_00`).
 
 ## Requirements
 
@@ -82,8 +84,9 @@ python tools/astribot/extract_frames.py \
     --camera-idxes 0 1          # indices into the dataset's camera_keys
 ```
 
-Output: `<out_dir>/key_frames/ep000000/<camera>/frame_<idx>.jpg` of the
-episode's first, last and key frames (key frames from `detect_subtask`).
+Output: `<out_dir>/key_frames/ep000000/subtask_XX/<camera>/frame_<idx>.jpg`
+of the episode's first, last and key frames (key frames from
+`detect_subtask`), grouped by the sub-task segment each frame belongs to.
 
 ### 3. Cut one mp4 per sub-task segment
 

@@ -39,7 +39,7 @@ model = Sam3Image("../../weights/sam3/sam3_image_exported_bf16.pt2")
 
 #%%
 # infer image path
-image_path = "/data/astri_making_coffee_v1/eps_data/key_frames/ep000000/cam_head/frame_000000.jpg"
+image_path = "/data/astri_making_coffee_v1/eps_data/key_frames/ep000000/subtask_00/cam_head/frame_000000.jpg"
 image = Image.open(image_path)
 width, height = image.size
 

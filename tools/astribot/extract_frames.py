@@ -10,8 +10,9 @@ Four independent modes:
   subtask_splits.json recording the key and split frames under
   <out_dir>/subtask/<episode>/.
 - key_frames: saves one jpg per selected camera of the episode's first and
-  last frame plus the key frames detected by detect_subtask, under
-  <out_dir>/key_frames/<episode>/<camera>/.
+  last frame plus the key frames detected by detect_subtask, each under the
+  sub-task segment it belongs to:
+  <out_dir>/key_frames/<episode>/subtask_XX/<camera>/.
 - videos: cuts one mp4 per sub-task segment (the episode split at the split
   frames) per selected camera from the source videos with ffmpeg (stream
   copy by default, no per-frame Python decode; --exact re-encodes for
@@ -31,13 +32,14 @@ on the low-pass filtered signal; runs of closed state shorter than
 KEY_FRAME_MIN_CLOSE_S seconds are dropped first, so a noisy blip does not
 produce a key-frame pair. The sub-task split frames are the re-grasp
 midpoints of the combined 1 -> 0 -> 1 gripper pattern (see
-_subtask_split_idxes). The videos and frames modes prefer the dataset's
-ground-truth subtask_index column when it exists — the split frames are then
-the first frame of each new sub-task segment (see
+_subtask_split_idxes). The videos, frames and key_frames modes prefer the
+dataset's ground-truth subtask_index column when it exists — the split
+frames are then the first frame of each new sub-task segment (see
 _split_frames_from_ground_truth) — and fall back to subtask_splits.json only
 when the episode has fewer than two sub-tasks. The key_frames mode always
 uses the gripper-detected key frames of detect_subtask (ground truth has no
-key frames).
+key frames); each saved jpg lands in the sub-task segment its frame index
+belongs to.
 
 Depth pairing: a camera observation.images.cam_X is paired with the
 observation.depth.cam_X feature (uint16 mm) when present, else with the
@@ -126,7 +128,8 @@ def parse_args():
                              "sub-task split frames from observation.state only (no video "
                              "access), saving the gripper plot and subtask_splits.json; "
                              "key_frames: save one jpg per camera of the episode's first, "
-                             "last and key frames (from subtask_splits.json); "
+                             "last and key frames, each under the sub-task segment it "
+                             "belongs to (from subtask_splits.json); "
                              "videos: one mp4 per sub-task segment per camera "
                              "(from subtask_splits.json); "
                              "frames: one jpg per --interval-th frame of each sub-task "
@@ -759,18 +762,28 @@ class DataExtract:
             img = self._to_gray_pil(img)
         img.save(path)
 
-    def _save_frames(self, frame_idxes):
-        """Save one jpg per dataset index per selected camera under
-        <out_dir>/key_frames/<episode>/<camera>/."""
+    def _save_frames(self, frame_idxes, split_idxes):
+        """Save one jpg per dataset index per selected camera, each under the
+        sub-task segment the frame belongs to:
+        <out_dir>/key_frames/<episode>/subtask_XX/<camera>/ (an episode
+        without splits lands everything in subtask_00)."""
         base = self._episode_dir()
-        for ci, sub in self.cam_dirs.items():
-            os.makedirs(os.path.join(base, sub), exist_ok=True)
+        # map each key-frame dataset index to its sub-task segment folder
+        seg_of = {}
+        for k, (lo, hi) in enumerate(self._segment_bounds(split_idxes)):
+            for idx in frame_idxes:
+                if lo <= idx < hi:
+                    seg_of[idx] = f"subtask_{k:02d}"
+        for seg in set(seg_of.values()):
+            for ci, sub in self.cam_dirs.items():
+                os.makedirs(os.path.join(base, seg, sub), exist_ok=True)
         ds = self._ensure_dataset()
         for frame_idx in frame_idxes:
             frame = ds[frame_idx]
             for ci, sub in self.cam_dirs.items():
                 self._save_frame_jpg(frame, self.cam_keys[ci],
-                                     os.path.join(base, sub,
+                                     os.path.join(base, seg_of[frame_idx],
+                                                  sub,
                                                   f"frame_{frame_idx:06d}.jpg"))
 
     def _save_subtask_frames(self, split_idxes):
@@ -938,10 +951,11 @@ class DataExtract:
         elif self.args.mode == "key_frames":
             # the episode's first and last frame (the ground-truth subtask
             # bounds when the dataset has subtask_index) plus the key frames
-            # detected by detect_subtask
+            # detected by detect_subtask, each saved under the sub-task
+            # segment it belongs to (see _save_frames)
             key_idxes = sorted(set([self.from_idx, self.to_idx - 1]
                                    + self._load_key_frames()))
-            self._save_frames(key_idxes)
+            self._save_frames(key_idxes, self._load_splits()["split_frames"])
         elif self.args.mode == "videos":
             self._write_subtask_videos(self._load_splits()["split_frames"])
         elif self.args.mode == "frames":
