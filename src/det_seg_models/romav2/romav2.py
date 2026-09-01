@@ -148,6 +148,7 @@ class RoMaV2PT2:
         overlap_th: float = 0.5,
         top_k: int | None = None,
         cycle_th: float = 0.01,
+        masks: list[np.ndarray | None] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Match images[0] against the rest; return surviving tracks.
 
@@ -179,6 +180,12 @@ class RoMaV2PT2:
         a hard filter, not a ranking criterion). When fewer than top_k
         candidates survive, all of them are kept.
 
+        masks: one (H, W) bool/uint8 object mask per image (at the input-image
+        resolution; None entries allowed), passed to sample() so the base
+        points on image 0 are sampled inside masks[0] (and the (0, 1) pair's
+        candidate pool is gated by masks[0]/masks[1]). Positions in the other
+        images are still warp-derived and are not mask-filtered here.
+
         Returns (positions, mask): positions (K, N, 2) normalized coordinates
         of the surviving points in each image; mask (M,) indexing the sampled
         candidates (candidates: num_corresp at most).
@@ -186,6 +193,11 @@ class RoMaV2PT2:
         if isinstance(images, torch.Tensor):
             images = list(images.unbind())  # (B, 3, H, W) -> per-image tensors
         N = len(images)
+        if masks is not None and len(masks) != N:
+            raise ValueError(
+                f"masks must have one entry per image (got {len(masks)}, "
+                f"expected {N})"
+            )
         if strategy == "cycle":
             pairs = list(combinations(range(N), 2))
         else:
@@ -196,7 +208,10 @@ class RoMaV2PT2:
             preds[(i, j)] = self.match_pair(images[i], images[j])
 
         # Sample base points on image 0 (balanced sampling from the (0, 1) pair).
-        matches, _, _, _ = self.sample(preds[(0, 1)], num_corresp)
+        pair_masks = [masks[0], masks[1]] if masks is not None else None
+        matches, _, _, _ = self.sample(
+            preds[(0, 1)], num_corresp, masks=pair_masks
+        )
         base_pts = matches[:, :2]  # (M, 2) normalized
 
         M = base_pts.shape[0]
@@ -230,9 +245,54 @@ class RoMaV2PT2:
             )
         return positions[mask], mask
 
+    def _mask_flags(
+        self,
+        masks: list[np.ndarray | None],
+        H: int,
+        W: int,
+        device: torch.device,
+    ) -> torch.Tensor:
+        """Per-candidate in-mask flags for both anchor images, (2*H*W,) bool.
+
+        masks: [mask_A, mask_B] — one (H, W) bool/uint8 array per image of the
+        pair, at the input-image resolution (any size; nearest-resized to the
+        low-res grid), or None to leave that image unconstrained. matches_AB
+        row i corresponds to grid pixel i of image A (row-major) and matches_BA
+        row i to pixel i of image B, so the flags are the flattened resized
+        masks.
+        """
+        if len(masks) != 2:
+            raise ValueError(
+                f"masks must have one entry per image of the pair "
+                f"(got {len(masks)}, expected 2)"
+            )
+        flags = []
+        for m in masks:
+            if m is None:
+                flags.append(torch.ones(H * W, dtype=torch.bool, device=device))
+                continue
+            m = np.asarray(m)
+            if m.ndim != 2:
+                raise ValueError(f"mask must be (H, W), got {m.shape}")
+            m_t = torch.from_numpy((m > 0).astype(np.float32)).to(device)
+            m_t = F.interpolate(m_t[None, None], size=(H, W), mode="nearest")
+            flags.append(m_t[0, 0].bool().reshape(-1))
+        return torch.cat(flags)
+
     def sample(
-        self, preds: dict[str, torch.Tensor], num_corresp: int
+        self,
+        preds: dict[str, torch.Tensor],
+        num_corresp: int,
+        masks: list[np.ndarray | None] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
+        """Sample correspondences from a match_pair prediction.
+
+        masks: [mask_A, mask_B] object masks of the two images (see
+        _mask_flags) — candidates are only sampled inside the mask of their
+        anchor image; None entries leave an image unconstrained. When a mask
+        leaves no valid candidates (or fewer than requested), the returned
+        tensors are truncated or empty instead of erroring.
+        """
         warp = preds["warp_AB"]
         confidence_AB = preds["overlap_AB"]
         precision_AB = preds["precision_AB"] if "precision_AB" in preds else None
@@ -286,9 +346,21 @@ class RoMaV2PT2:
 
         expansion_factor = 4
         confidence = confidence * matches.abs().amax(dim=-1).le(1 - 1 / H_A).float()
-        corresp_inds = torch.multinomial(
-            confidence, expansion_factor * num_corresp, replacement=False
-        )
+        if masks is not None:
+            confidence = confidence * self._mask_flags(
+                masks, H_A, W_A, warp.device
+            ).float()
+        # multinomial errors when num_samples exceeds the nonzero-probability
+        # count (small or empty masks), so clamp and short-circuit on empty.
+        num_pool = min(expansion_factor * num_corresp, int((confidence > 0).sum()))
+        if num_pool == 0:
+            return (
+                matches[:0],
+                confidence[:0],
+                precision[:0][:, 0] if precision is not None else None,
+                precision[:0][:, 1] if precision is not None else None,
+            )
+        corresp_inds = torch.multinomial(confidence, num_pool, replacement=False)
         sampled_matches = matches[corresp_inds]
         sampled_confidence = confidence[corresp_inds]
         if precision is not None:

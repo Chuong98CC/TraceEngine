@@ -20,6 +20,7 @@ dependencies = [
     "numpy==2.2.6",
     "opencv-python",
     "open3d",
+    "pycocotools",
     "typer",
     "pillow",
     "omegaconf",

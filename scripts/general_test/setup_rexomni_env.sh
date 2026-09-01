@@ -16,6 +16,11 @@ uv pip install --python "$ENV_DIR/bin/python" \
   accelerate==1.10.1 \
   qwen_vl_utils==0.0.14 \
   'flash-attn @ https://github.com/mjun0812/flash-attention-prebuild-wheels/releases/download/v0.7.16/flash_attn-2.7.4+cu128torch2.7-cp310-cp310-linux_x86_64.whl'
+# Step 3a (tools/general_test/run_subtask_detections.py) runs on the
+# key-frames that Step 1 saved to disk (extract_frames.py --mode key_frames),
+# so only tqdm is needed on top of the model stack (PIL comes with
+# transformers; no lerobot — it requires Python >= 3.12)
+uv pip install --python "$ENV_DIR/bin/python" tqdm
 
 echo
 printf 'Rex-Omni environment ready: %s/bin/python\n' "$ENV_DIR"

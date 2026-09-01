@@ -41,8 +41,8 @@ bash scripts/general_test/setup_rexomni_env.sh
 PYTHONPATH="$PWD/src" .venv-rexomni/bin/python tools/general_test/test_rexomni.py
 ```
 
-See [`docs/general_test/rexomni.md`](docs/general_test/rexomni.md) for the
-wrapper API and its role in the pipeline (Step 3 object detection).
+See [`docs/general_test/module/rexomni.md`](docs/general_test/module/rexomni.md)
+for the wrapper API and its role in the pipeline (Step 3 object detection).
 
 The Rex-Omni environment is intentionally not installed as an editable copy of
 this project: the project metadata requires Python 3.12, while Rex-Omni uses

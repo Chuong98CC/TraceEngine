@@ -85,21 +85,31 @@ tools/
 │   ├── run_stream.py           # streaming CLI (--backend da3|vggt_omega|a2f)
 │   ├── infer_waft.py, infer_tapip3d.py
 │   ├── test_any2full.py, test_sam3.py
+│   ├── run_subtask_detections.py   # Step 3a: RexOmni detections on key-frames (.venv-rexomni)
+│   ├── run_subtask_init_points.py  # Step 3b: SAM3 masks + RoMAv2 init points
+│   ├── run_folder_step3.py         # Step 3 driver on a key-frame folder (3a + 3b)
+│   ├── subtask_keyframes.py        # shared key-frame discovery for the Step-3 tools
 │   └── visualize_stream.py, visualize_rgbd.py
 ├── astribot/                   # Case 2 (README): online streaming, no frame extraction
 │   ├── extract_frames.py       # sub-task splits, key-frame jpgs, per-subtask videos/frames (+ depth .lz4)
 │   ├── run_subtask_stream.py   # online per-sub-task depth+pose streaming (da3/vggt_omega/a2f)
+│   ├── run_subtask_step3.py    # Step 3 driver on episodes (extract key-frames + 3a + 3b)
 │   ├── run_subtask_a3f.py      # online per-sub-task Any2Full RGB-D densification
 │   └── visualize_subtask_stream.py  # per-sub-task trajectory videos, online (no re-inference)
 ├── push_ckpt_2HF.py            # upload weights/ to Hugging Face (Chuong98vt/TraceEngine)
 └── hifi-umi/                   # HiFi-UMI dataset preprocessing (extract_frames, generate_masks)
 scripts/                        # ready-to-run pipeline scripts
 ├── general_test/               # wrappers: infer_waft.sh, infer_stream_stereo/rgbd.sh,
-│                               #   infer_tapip3d.sh, visualize_stream.sh, export_trt_docker.sh
+│                               #   infer_tapip3d.sh, infer_step3.sh, visualize_stream.sh,
+│                               #   export_trt_docker.sh
 └── astribot/                   # extract_frames.sh, run_subtask_stream.sh (+ visualize helper)
 docs/
 ├── general_test/               # general_test.md master index (mermaid pipeline diagram) +
-│                               #   per-model pages (waft, sam3, any2full, streaming, tapip3d, visualize_rgbd)
+│   │                           #   module/ per-model pages (streaming, any2full, waft,
+│   │                           #   rexomni, sam3, romav2, tapip3d, visualize_rgbd) +
+│   │                           #   pipeline/ step tests (step2, step3)
+│   ├── module/                 # one doc per model component
+│   └── pipeline/               # end-to-end README-step tests (step2, step3)
 └── astribot/                   # extract_frames / subtask-streaming / visualization guides
 ```
 
