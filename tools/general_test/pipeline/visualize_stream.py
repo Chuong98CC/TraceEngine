@@ -9,14 +9,14 @@ camera, eye behind it along its optical axis, fitted to the union of all
 frame clouds); with ``--views 4`` each frame is a 2x2 grid of viewpoints
 (center / down / left / right), all looking at the scene centre.
 
-CLI (no ``run_stream.py`` needed — uses the already-saved NPZ outputs):
+CLI (no ``run_depth_stream.py`` needed — uses the already-saved NPZ outputs):
     python da3_streaming/visualize_stream.py \
         --input-dirs data/astribot_stereo_lrb/extract_frames/stereo_left \
                       data/astribot_stereo_lrb/extract_frames/stereo_right \
         --result-dir output/stream_stereo_pytorch \
         --output output/stream_stereo_pytorch/trajectory.mp4
 
-Also exposed as the ``--video`` flag in ``run_stream.py`` (rendered after
+Also exposed as the ``--video`` flag in ``run_depth_stream.py`` (rendered after
 the run) via :func:`render_stream_video`.  Single-step GLB export lives in
 ``visualize_glb.py``; the shared NPZ/image loaders live in
 ``stream_utils.py``.

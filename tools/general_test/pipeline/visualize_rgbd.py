@@ -23,9 +23,9 @@ Writes, per frame:
 
 Usage
 -----
-python tools/general_test/visualize_rgbd.py --camera_name head_rgbd \
+python tools/general_test/pipeline/visualize_rgbd.py --camera_name head_rgbd \
     --frame_index 0 --save_viz --save_glb
-python tools/general_test/visualize_rgbd.py --rgb_dir path/to/rgb \
+python tools/general_test/pipeline/visualize_rgbd.py --rgb_dir path/to/rgb \
     --depth_npz_dir path/to/depth --save_viz --save_glb
 """
 

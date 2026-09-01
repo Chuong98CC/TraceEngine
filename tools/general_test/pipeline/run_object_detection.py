@@ -9,7 +9,7 @@ they are persisted instead of decoding the episode videos online — unlike
 Step 2, which streams every frame and cannot save them all. Nothing else is
 written to disk except the detection results: the raw RexOmni predictions
 are saved to **one JSON per episode** so Step 3b
-(run_subtask_init_points.py) can load and reuse them for SAM3 segmentation
+(run_object_init_points.py) can load and reuse them for SAM3 segmentation
 and RoMAv2 keypoint matching.
 
 RexOmni must run in its dedicated environment (Python 3.10, torch 2.7,
@@ -17,7 +17,7 @@ transformers 4.51.3), so this script runs directly under .venv-rexomni. The
 sys.path bootstrap below exposes this project's ``tools/`` and ``src/`` to
 that environment.
 
-    .venv-rexomni/bin/python tools/general_test/run_subtask_detections.py \
+    .venv-rexomni/bin/python tools/general_test/pipeline/run_object_detection.py \
         --data-root /data/astri_making_coffee --episode-idxes 0
 
 The model checkpoint is fixed (IDEA-Research/Rex-Omni) — no overrides.
@@ -25,22 +25,22 @@ The model checkpoint is fixed (IDEA-Research/Rex-Omni) — no overrides.
 It can also run on a single folder of key-frame images (one sub-task of one
 camera) instead of the episode layout: pass ``--keyframes-dir`` — the folder
 is treated as sub-task 00 of a synthetic episode labelled ``--episode-idx``
-(default 0) and the folder name is the default camera key. run_folder_step3.py
+(default 0) and the folder name is the default camera key. run_e2e_init_points.py
 drives this mode end-to-end.
 
 Examples
 --------
     # All sub-tasks of episode 0, first RGB camera, default prompts
-    .venv-rexomni/bin/python tools/general_test/run_subtask_detections.py \
+    .venv-rexomni/bin/python tools/general_test/pipeline/run_object_detection.py \
         --data-root /data/astri_making_coffee --episode-idxes 0
 
     # Custom object prompts, explicit camera subdir
-    .venv-rexomni/bin/python tools/general_test/run_subtask_detections.py \
+    .venv-rexomni/bin/python tools/general_test/pipeline/run_object_detection.py \
         --data-root /data/astri_making_coffee --episode-idxes 0 \
         --text-prompts "red mug" "left robot gripper" --camera-keys cam_head
 
     # One sub-task's key-frame folder (sub-task 00 of episode 0)
-    .venv-rexomni/bin/python tools/general_test/run_subtask_detections.py \
+    .venv-rexomni/bin/python tools/general_test/pipeline/run_object_detection.py \
         --keyframes-dir .../subtask_00/cam_head --episode-idx 0
 """
 
@@ -54,7 +54,7 @@ from pathlib import Path
 
 # .venv-rexomni has no editable install of this project: expose the repo
 # root (tools/) and src/ the same way the main env's editable install does.
-_REPO_ROOT = Path(__file__).resolve().parents[2]
+_REPO_ROOT = Path(__file__).resolve().parents[3]
 for _p in (_REPO_ROOT, _REPO_ROOT / "src"):
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
@@ -62,7 +62,7 @@ for _p in (_REPO_ROOT, _REPO_ROOT / "src"):
 from PIL import Image
 from tqdm import tqdm
 
-from tools.general_test.subtask_keyframes import (
+from utils.keyframe_utils import (
     cap_keyframes,
     discover_episodes,
     discover_folder_frames,

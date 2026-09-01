@@ -9,8 +9,8 @@ frame. The on-disk layout is:
     <keyframes_root>/ep{ep:06d}/subtask_{k:02d}/<camera>/frame_<idx:06d>.jpg
 
 with <camera> the camera-subdir name (e.g. cam_head) and <idx> the absolute
-dataset frame index. Both Step 3a (run_subtask_detections.py) and Step 3b
-(run_subtask_init_points.py) must agree on those frames, so the discovery
+dataset frame index. Both Step 3a (run_object_detection.py) and Step 3b
+(run_object_init_points.py) must agree on those frames, so the discovery
 helpers live here; Step 3a also records the frame indices in its per-episode
 detections JSON, which Step 3b reads (the helpers only run again under
 --no-rexomni).
@@ -144,7 +144,7 @@ def discover_folder_frames(folder: str | Path) -> list[tuple[int, Path]]:
     arbitrary folder (one sub-task of one camera, e.g. a cam_head/ folder of
     the episode layout). Indices come from ``frame_<digits>.<ext>`` file
     names when every image matches; otherwise the files are enumerated
-    0..N-1 by sorted name. This is the input mode of run_folder_step3.py:
+    0..N-1 by sorted name. This is the input mode of run_e2e_init_points.py:
     the folder plays the role of <episode>/subtask_00/<camera>, and both
     Step 3a and Step 3b resolve the same indices from it."""
     folder = Path(folder)

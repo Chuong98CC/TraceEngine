@@ -3,8 +3,8 @@
 Runs pipeline Step 3 (Sampling Keypoints) end-to-end on a single folder of
 key-frame images (the key-frames of one sub-task of one camera, e.g. a
 cam_head/ folder saved by Step 1 — extract_frames.py --mode key_frames):
-first Step 3a (run_subtask_detections.py — RexOmni detections, under
-.venv-rexomni), then Step 3b (run_subtask_init_points.py — SAM3 masks +
+first Step 3a (run_object_detection.py — RexOmni detections, under
+.venv-rexomni), then Step 3b (run_object_init_points.py — SAM3 masks +
 RoMAv2 keypoints, main env). This is the folder-input variant of
 run_subtask_step3.py: instead of an episode key-frames root, the folder is
 treated as sub-task 00 of a synthetic episode labelled --episode-idx
@@ -16,7 +16,7 @@ driver launches the two standalone tools sequentially as subprocesses — the
 same commands the docs show, with the shared CLI flags passed through. Run
 it from the **main** environment:
 
-    python tools/general_test/run_folder_step3.py \
+    python tools/general_test/pipeline/run_e2e_init_points.py \
         --keyframes-dir /data/astri_making_coffee/eps_data/key_frames/ep000000/subtask_00/cam_head
 
 Outputs (default root: <keyframes-dir>/../step3_output):
@@ -31,15 +31,15 @@ separate under the same output root.
 Examples
 --------
     # Full Step 3 on one sub-task's key-frame folder
-    python tools/general_test/run_folder_step3.py \
+    python tools/general_test/pipeline/run_e2e_init_points.py \
         --keyframes-dir .../subtask_00/cam_head
 
     # Re-run only 3b with the existing detections JSON (tuned params)
-    python tools/general_test/run_folder_step3.py \
+    python tools/general_test/pipeline/run_e2e_init_points.py \
         --keyframes-dir .../subtask_00/cam_head --skip-3a --top-k 64
 
     # Skip RexOmni entirely: 3b with SAM3 text-only prompts
-    python tools/general_test/run_folder_step3.py \
+    python tools/general_test/pipeline/run_e2e_init_points.py \
         --keyframes-dir .../subtask_00/cam_head --no-rexomni
 """
 
@@ -59,8 +59,8 @@ DEFAULT_STRATEGY = "reference"
 #: default path of the RexOmni environment (relative to the repo root).
 REXOMNI_ENV_DIR = ".venv-rexomni"
 
-_STEP_3A = "tools/general_test/run_subtask_detections.py"
-_STEP_3B = "tools/general_test/run_subtask_init_points.py"
+_STEP_3A = "tools/general_test/pipeline/run_object_detection.py"
+_STEP_3B = "tools/general_test/pipeline/run_object_init_points.py"
 
 
 def parse_args(argv: list[str] | None = None):
@@ -206,7 +206,7 @@ def main() -> None:
     folder = Path(args.keyframes_dir)
     if not folder.is_dir():
         sys.exit(f"--keyframes-dir {folder} is not a directory")
-    repo_root = Path(__file__).resolve().parents[2]
+    repo_root = Path(__file__).resolve().parents[3]
     if not args.skip_3a and not args.no_rexomni:
         _run(_build_3a_cmd(args, repo_root),
              "Step 3a — RexOmni detections (key-frame folder)")

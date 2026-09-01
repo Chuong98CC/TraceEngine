@@ -16,7 +16,7 @@ short final chunk is padded with images from the previous chunk (or
 duplicated when the whole sequence is shorter than one chunk); the padded
 outputs are discarded.
 
-Run through ``tools/general_test/run_stream.py --backend da3``.
+Run through ``tools/general_test/pipeline/run_depth_stream.py --backend da3``.
 """
 
 from __future__ import annotations

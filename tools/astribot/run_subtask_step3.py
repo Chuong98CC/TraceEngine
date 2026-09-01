@@ -6,12 +6,12 @@ episodes, on the dataset: first Step 1 — extract_frames.py saves the
 sub-task key-frames to disk (--mode detect_subtask, then --mode key_frames;
 Step 3 only infers on a sparse set of frames, most commonly ~4 per sub-task,
 so they are persisted instead of decoding the episode videos online) — then
-Step 3a (run_subtask_detections.py — RexOmni detections, under
-.venv-rexomni) and Step 3b (run_subtask_init_points.py — SAM3 masks +
+Step 3a (run_object_detection.py — RexOmni detections, under
+.venv-rexomni) and Step 3b (run_object_init_points.py — SAM3 masks +
 RoMAv2 keypoints, main env).
 
 The dataset-independent tools live in tools/general_test/ and run on the
-saved key-frames alone (folder input — run_folder_step3.py is their
+saved key-frames alone (folder input — run_e2e_init_points.py is their
 standalone driver); this script is the high-level dataset layer that adds
 the extraction and drives the sub-steps, importing the shared key-frame
 helpers from general_test. The sub-steps cannot share a process (RexOmni
@@ -50,7 +50,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from tools.general_test.subtask_keyframes import (
+from utils.keyframe_utils import (
     discover_episodes,
     keyframes_root,
 )
@@ -65,8 +65,8 @@ DEFAULT_STRATEGY = "reference"
 REXOMNI_ENV_DIR = ".venv-rexomni"
 
 _STEP_1 = "tools/astribot/extract_frames.py"
-_STEP_3A = "tools/general_test/run_subtask_detections.py"
-_STEP_3B = "tools/general_test/run_subtask_init_points.py"
+_STEP_3A = "tools/general_test/pipeline/run_object_detection.py"
+_STEP_3B = "tools/general_test/pipeline/run_object_init_points.py"
 
 
 def parse_args(argv: list[str] | None = None):

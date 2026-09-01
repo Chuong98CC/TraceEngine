@@ -2,7 +2,7 @@
 
 Renders **one trajectory video per sub-task segment** of an episode, online —
 the visualization counterpart of `tools/astribot/run_subtask_stream.py` (see
-`astribot_subtask_stream.md`). It does **not** re-run inference: the geometry
+`astribot_subtask_depth_stream.md`). It does **not** re-run inference: the geometry
 (depth from the saved `.lz4` files, pose from the paired `.npz` files) is read
 from the pipeline outputs, and the colour images shown in the point clouds are
 **decoded online from the LeRobotDataset** (one frame per rendered step), so
@@ -13,11 +13,11 @@ no extracted frames or videos need to exist on disk.
   selection and sub-task split-frame inference — the selection flags are
   identical to `run_subtask_stream.py`, so the same episode/camera command
   line works for both tools.
-- Built on `tools/general_test/visualize_stream.py`'s `render_stream_video`
+- Built on `tools/general_test/pipeline/visualize_stream.py`'s `render_stream_video`
   (the same lz4-depth + npz-pose input contract), with a `frame_loader` that
   decodes the segment's dataset frames on the fly instead of reading frame
   folders. The view construction, framing and `--view-*` tuning flags are
-  shared with it — see `visualize_stream.md` for the details.
+  shared with it — see `visualize_depth_stream.md` for the details.
 - Output: `<seg_dir>/trajectory.mp4` per segment — each video frame shows that
   step's coloured point cloud with its camera frustums and the growing camera
   path; the view is fixed per segment (aligned to the first camera, fitted to

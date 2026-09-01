@@ -7,7 +7,8 @@ introspection, episode/camera selection and sub-task split-frame inference
 segment renders the streaming trajectory video from the saved pipeline
 outputs: per-frame ``depth``/``extrinsics``/``intrinsics`` npz files under
 ``<out-dir>/pipeline/<episode>/subtask_XX/`` (the same contract as
-``tools/general_test/visualize_stream.py``, which is invoked under the
+``tools/general_test/pipeline/visualize_stream.py``, which is invoked under
+the
 hood) — but the colour images are **decoded online from the dataset** (one
 frame per rendered step) instead of read from frame folders, so no extracted
 frames or videos are needed on disk.
@@ -41,7 +42,7 @@ from lerobot.datasets import LeRobotDatasetMetadata
 from tqdm import tqdm
 
 from tools.astribot.extract_frames import DataExtract
-from tools.general_test.visualize_stream import render_stream_video
+from tools.general_test.pipeline.visualize_stream import render_stream_video
 from utils.streaming_utils import load_stream_data
 from utils.visualize_mask import to_pil
 

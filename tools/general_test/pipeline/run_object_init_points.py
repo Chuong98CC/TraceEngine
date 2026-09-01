@@ -1,7 +1,7 @@
 """Step 3b — initial keypoints of the interacting objects.
 
 Continues pipeline Step 3 (Sampling Keypoints) from the Step-3a detections
-(run_subtask_detections.py): for each sub-task of each episode and each text
+(run_object_detection.py): for each sub-task of each episode and each text
 prompt, segment the object's masks on the sub-task's key-frames with SAM3
 (bounding boxes + text prompt from the 3a detections, or text-only when a
 frame has no detection), match keypoints across the key-frames with RoMAv2
@@ -30,22 +30,22 @@ overrides.
 The same pipeline can run on a single folder of key-frame images (one
 sub-task of one camera) instead of the episode layout: pass
 ``--keyframes-dir`` — the folder is sub-task 00 of a synthetic episode
-labelled ``--episode-idx`` (default 0). run_folder_step3.py drives this mode
+labelled ``--episode-idx`` (default 0). run_e2e_init_points.py drives this mode
 end-to-end.
 
 Examples
 --------
     # Uses the Step-3a detections (default prompts)
-    python tools/general_test/run_subtask_init_points.py \
+    python tools/general_test/pipeline/run_object_init_points.py \
         --data-root /data/astri_making_coffee --episode-idxes 0
 
     # SAM3 text-only (no Step-3a JSON)
-    python tools/general_test/run_subtask_init_points.py \
+    python tools/general_test/pipeline/run_object_init_points.py \
         --data-root /data/astri_making_coffee --episode-idxes 0 \
         --no-rexomni
 
     # One sub-task's key-frame folder (sub-task 00 of episode 0)
-    python tools/general_test/run_subtask_init_points.py \
+    python tools/general_test/pipeline/run_object_init_points.py \
         --keyframes-dir .../subtask_00/cam_head --episode-idx 0
 """
 
@@ -67,7 +67,7 @@ from det_seg_models.romav2.romav2 import RoMaV2PT2
 from det_seg_models.romav2.utils import to_pixel
 from det_seg_models.sam3 import Sam3Image, normalize_bbox
 from det_seg_models.sam3.utils import box_xyxy_to_cxcywh
-from tools.general_test.subtask_keyframes import (
+from utils.keyframe_utils import (
     camera_subdirs,
     cap_keyframes,
     discover_episodes,
@@ -267,7 +267,7 @@ class InitPointsExtract:
             raise FileNotFoundError(
                 f"{path} missing: run Step 3a first "
                 "(.venv-rexomni/bin/python tools/general_test/"
-                "run_subtask_detections.py ...), or pass --no-rexomni to use "
+                "run_object_detection.py ...), or pass --no-rexomni to use "
                 "SAM3 text-only prompts")
         with open(path) as f:
             return json.load(f)

@@ -76,20 +76,27 @@ src/
 │   └── tapip3d/                # TAPIP3D 3D tracking (Tapip3D_PT2: .pt2 encoder + fused corr/updater)
 └── utils/
     ├── astribot_dataloader.py  # Astribot dataset: load_rgbd, CAMERA_SETS, depth configs
+    ├── keyframe_utils.py       # Step-3 key-frame discovery (episode + folder layouts)
     ├── image_io.py             # ImageInput, to_image_tensor
     ├── depth_utils.py, streaming_utils.py, video_io.py
     └── visualize_*.py          # depth / flow / mask / tapip3d visualizers + export_glb
 tools/
 ├── export_trt.py               # ONNX → TensorRT engine via trtexec
 ├── general_test/               # Case 1 (README): general-purpose inference + viz entry points
-│   ├── run_stream.py           # streaming CLI (--backend da3|vggt_omega|a2f)
-│   ├── infer_waft.py, infer_tapip3d.py
-│   ├── test_any2full.py, test_sam3.py
-│   ├── run_subtask_detections.py   # Step 3a: RexOmni detections on key-frames (.venv-rexomni)
-│   ├── run_subtask_init_points.py  # Step 3b: SAM3 masks + RoMAv2 init points
-│   ├── run_folder_step3.py         # Step 3 driver on a key-frame folder (3a + 3b)
-│   ├── subtask_keyframes.py        # shared key-frame discovery for the Step-3 tools
-│   └── visualize_stream.py, visualize_rgbd.py
+│   ├── module/                 # one tool per model — infer_<model>.py (test each component)
+│   │   ├── infer_any2full.py   # RGB-D depth densification (single frame → .glb)
+│   │   ├── infer_waft.py       # dense optical flow → motion masks
+│   │   ├── infer_rexomni.py    # open-vocabulary detection (.venv-rexomni)
+│   │   ├── infer_sam3.py       # promptable segmentation
+│   │   ├── infer_romav2.py     # cross-image keypoint matching
+│   │   └── infer_tapip3d.py    # 3D point tracking
+│   └── pipeline/               # end-to-end README-step tools
+│       ├── run_depth_stream.py           # Step 2: streaming CLI (--backend da3|vggt_omega|a2f)
+│       ├── visualize_stream.py     # trajectory video renderer
+│       ├── visualize_rgbd.py       # RGB-D frame renderer
+│       ├── run_object_detection.py   # Step 3a: RexOmni detections on key-frames (.venv-rexomni)
+│       ├── run_object_init_points.py  # Step 3b: SAM3 masks + RoMAv2 init points
+│       └── run_e2e_init_points.py         # Step 3 driver on a key-frame folder (3a + 3b)
 ├── astribot/                   # Case 2 (README): online streaming, no frame extraction
 │   ├── extract_frames.py       # sub-task splits, key-frame jpgs, per-subtask videos/frames (+ depth .lz4)
 │   ├── run_subtask_stream.py   # online per-sub-task depth+pose streaming (da3/vggt_omega/a2f)
@@ -182,12 +189,12 @@ per-view `depth` + warped `extrinsics` + `intrinsics` per frame.
   [[vggt-stream-alignment-nondeterminism]].
 - Optional loop closure (`loop_enable`): a SALAD global-descriptor matcher
   detects revisited scenes and re-aligns via a loop SIM3 optimizer.
-- Entry point: `tools/general_test/run_stream.py --backend da3|vggt_omega|a2f`
+- Entry point: `tools/general_test/pipeline/run_depth_stream.py --backend da3|vggt_omega|a2f`
   (wrappers: `scripts/general_test/infer_stream_stereo.sh` /
   `infer_stream_rgbd.sh` / `visualize_stream.sh`). The online per-sub-task
   variant that streams straight from the dataset (no frames on disk) is
   `tools/astribot/run_subtask_stream.py` (see
-  `docs/astribot/astribot_subtask_stream.md`).
+  `docs/astribot/astribot_subtask_depth_stream.md`).
 
 ## Any2Full (RGB-D depth densification)
 
@@ -205,7 +212,7 @@ wraps it deterministically:
    → depth (`1/(d+eps)`), unresize to input resolution, clamp to
    `[min_depth, max_depth]`.
 
-Run: `tools/general_test/test_any2full.py` loads an Astribot head RGB-D frame
+Run: `tools/general_test/module/infer_any2full.py` loads an Astribot head RGB-D frame
 (`utils.astribot_dataloader.load_rgbd`), runs the model, and exports a
 coloured point cloud (`utils.visualize_depth.export_glb`).
 
@@ -225,7 +232,7 @@ coloured point cloud (`utils.visualize_depth.export_glb`).
 
 ```bash
 # --- Streaming (multi-camera depth + pose) ---
-python tools/general_test/run_stream.py --backend vggt_omega \
+python tools/general_test/pipeline/run_depth_stream.py --backend vggt_omega \
     --input-dirs <left_dir> <right_dir> \
     --start-frame 210 --max-frames 160 --interval 4 \
     --output-dir output/stream_stereo_vggt_omega
@@ -235,7 +242,7 @@ python tools/general_test/run_stream.py --backend vggt_omega \
 bash scripts/general_test/infer_stream_stereo.sh
 
 # --- Any2Full RGB-D densification (single frame -> .glb point cloud) ---
-python tools/general_test/test_any2full.py \
+python tools/general_test/module/infer_any2full.py \
     --pt2 weights/any2full/Any2Full_vitl_bf16.pt2 --frame_idx 0 --out_dir ./output/a2f
 
 # --- WAFT motion masks / TAPIP3D traces ---

@@ -71,8 +71,8 @@ from depth_models.streaming.da3_streaming import DA3_Streaming
 from depth_models.streaming.loop_utils.config_utils import load_config
 from depth_models.streaming.vggt_omg_streaming import VGGT_OMG_Streaming
 from tools.astribot.extract_frames import DataExtract
-from tools.general_test.infer_waft import _compute_motion_mask_gray
-from tools.general_test.run_stream import _report_run_stats
+from tools.general_test.module.infer_waft import _compute_motion_mask_gray
+from tools.general_test.pipeline.run_depth_stream import _report_run_stats
 from utils.visualize_mask import to_pil
 
 DEFAULT_WAFT_CKPT = "weights/waftv2/waftv2_dinov3_i5_640x480_tf32.engine"
@@ -514,7 +514,7 @@ class SubtaskStreamExtract(DataExtract):
             torch.cuda.reset_peak_memory_stats()
         t0 = time.perf_counter()
         stats = stream.run()
-        # same timing/memory summary + timings.json schema as run_stream.py
+        # same timing/memory summary + timings.json schema as run_depth_stream.py
         _report_run_stats(self.args.backend, seg_dir, stats)
         print(f"  [subtask {k:02d}] done in {time.perf_counter() - t0:.1f}s")
 

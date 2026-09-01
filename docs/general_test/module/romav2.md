@@ -1,4 +1,4 @@
-# RoMAv2 Multi-Image Keypoint Matching (`tools/general_test/infer_romav2.py`)
+# RoMAv2 Multi-Image Keypoint Matching (`tools/general_test/module/infer_romav2.py`)
 
 Finds matching keypoints **visible in all given images** with the RoMAv2
 dense-matching model, exported as a `torch.export` program
@@ -15,7 +15,7 @@ field.
 bash scripts/general_test/infer_romav2.sh
 
 # or directly — 2+ image paths
-python tools/general_test/infer_romav2.py \
+python tools/general_test/module/infer_romav2.py \
     assets/matching_points/coffee1.png assets/matching_points/coffee2.png \
     assets/matching_points/coffee3.png assets/matching_points/coffee4.png \
     --strategy reference --num-corresp 2000 --top-k 128 \

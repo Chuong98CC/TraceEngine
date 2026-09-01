@@ -21,7 +21,7 @@ echo "Depth dir:   $DEPTH_DIR"
 echo "Output dir:  $OUTPUT_DIR"
 echo "============================================"
 
-python tools/general_test/infer_tapip3d.py \
+python tools/general_test/module/infer_tapip3d.py \
     --image_dir "$IMG_DIR" \
     --depth_dir "$DEPTH_DIR" \
     --output_dir "$OUTPUT_DIR" \

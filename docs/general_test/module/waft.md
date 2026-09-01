@@ -1,4 +1,4 @@
-# Optical Flow / Motion Masks — WAFT (`tools/general_test/infer_waft.py`)
+# Optical Flow / Motion Masks — WAFT (`tools/general_test/module/infer_waft.py`)
 
 Dense optical flow on a **video file or a folder of extracted frames**, with
 ONNX or TensorRT backends. Folder input is auto-detected when `--input` is a
@@ -10,13 +10,13 @@ path has no extension.
 
 ```bash
 # Folder of extracted frames, TensorRT, motion masks (pixels > 2 px moving)
-python tools/general_test/infer_waft.py --input <frames_dir> --backend trt \
+python tools/general_test/module/infer_waft.py --input <frames_dir> --backend trt \
     --checkpoint weights/waftv2/waftv2_dinov3_i5_640x480_tf32.engine \
     --start 210 --stride 4 -thr 2 -o mask \
     --output-dir demo_data/astribot_stereo_lrb/motion_mask/
 
 # Video file, ONNX, flow colour video + raw .flo files
-python tools/general_test/infer_waft.py --input video.mp4 \
+python tools/general_test/module/infer_waft.py --input video.mp4 \
     --checkpoint weights/waftv2/waftv2_dinov3_i5_640x480.onnx \
     --output-mode all
 ```
@@ -51,5 +51,5 @@ masks on a demo frame folder).
   displacement (dx) and `[:,:,1]` = vertical displacement (dy). Raw output is
   saved in the standard `.flo` (Middlebury) format.
 - **Motion masks in streaming**: the binary masks produced here feed
-  `run_stream.py --mask-dirs` — moving pixels' confidence is zeroed during
+  `run_depth_stream.py --mask-dirs` — moving pixels' confidence is zeroed during
   chunk alignment only (see [`streaming.md`](streaming.md)).

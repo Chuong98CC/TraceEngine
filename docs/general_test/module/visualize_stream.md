@@ -1,8 +1,8 @@
-# Trajectory Video (`tools/general_test/visualize_stream.py`)
+# Trajectory Video (`tools/general_test/pipeline/visualize_stream.py`)
 
 Renders the streaming depth+pose output as a **trajectory mp4** without
 re-running inference — it only reads the saved per-frame geometry
-(`.lz4` depth + `.npz` pose, the contract written by `run_stream.py`).
+(`.lz4` depth + `.npz` pose, the contract written by `run_depth_stream.py`).
 Each video frame shows that time step's coloured point cloud with its
 camera frustums, plus the growing camera path from the first frame to the
 current one. The view is **fixed for the whole video** (aligned to the
@@ -15,10 +15,10 @@ stays put while per-frame content moves inside it.
 - Each viewport's field of view is **auto-fitted** so the scene fills the
   frame (~85% of the viewport, per-viewport).
 - Used in three places: the standalone CLI below,
-  `run_stream.py --video` (rendered after the run, lazy-imported so
+  `run_depth_stream.py --video` (rendered after the run, lazy-imported so
   streaming-only runs don't need open3d), and the online per-sub-task
   variant `tools/astribot/visualize_subtask_stream.py` (see
-  `astribot_visualize_subtask_stream.md`), which decodes the colour
+  `astribot_visualize_subtask_depth_stream.md`), which decodes the colour
   frames from the LeRobotDataset instead of reading frame folders and
   exposes the same `--view-*` tuning flags.
 
@@ -78,7 +78,7 @@ is snapped to even dimensions (x264 requirement).
 ### 1. Standalone re-render of saved outputs
 
 ```bash
-python tools/general_test/visualize_stream.py \
+python tools/general_test/pipeline/visualize_stream.py \
     --input-dirs <left_frames_dir> <right_frames_dir> \
     --result-dir output/stream_stereo_vggt_omega \
     --output output/stream_stereo_vggt_omega/trajectory.mp4 \
@@ -90,7 +90,7 @@ Wrapper: `scripts/general_test/visualize_stream.sh`.
 ### 2. Single view instead of the 2×2 grid
 
 ```bash
-python tools/general_test/visualize_stream.py \
+python tools/general_test/pipeline/visualize_stream.py \
     --input-dirs <left_frames_dir> <right_frames_dir> \
     --result-dir output/stream_stereo_vggt_omega \
     --views 1
@@ -117,7 +117,7 @@ exact requested size (even dimensions), `fps` frames per second.
 | Argument | Default | Description |
 |---|---|---|
 | `--input-dirs` | demo stereo paths | Source image folders (one per camera), same order as inference |
-| `--result-dir` | `output/stream_stereo` | Streaming output directory (the `--output-dir` of `run_stream.py`) |
+| `--result-dir` | `output/stream_stereo` | Streaming output directory (the `--output-dir` of `run_depth_stream.py`) |
 | `--output` | `<result-dir>/trajectory.mp4` | Video output path |
 | `--fps` | `10` | Video frame rate |
 | `--size` | `960x540` | Video size `WxH` (snapped to even) |
@@ -137,12 +137,12 @@ exact requested size (even dimensions), `fps` frames per second.
 
 ## Notes
 
-- Requires `open3d` + `imageio` (offscreen renderer). `run_stream.py`
+- Requires `open3d` + `imageio` (offscreen renderer). `run_depth_stream.py`
   imports the module lazily behind `--video`.
 - The tone-LUT build renders a few hundred small frames once per process
   (a second or two of startup overhead).
 - Outputs written by older pipeline versions (depth stored inside the
   NPZ, no `.lz4` / `shape`) are not readable by the current loaders.
-- Related docs: [`streaming.md`](streaming.md) (the `run_stream.py`
-  inference side), [`astribot_visualize_subtask_stream.md`](../../astribot/astribot_visualize_subtask_stream.md)
+- Related docs: [`streaming.md`](streaming.md) (the `run_depth_stream.py`
+  inference side), [`astribot_visualize_subtask_depth_stream.md`](../../astribot/astribot_visualize_subtask_depth_stream.md)
   (online per-sub-task variant).

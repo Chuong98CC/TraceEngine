@@ -30,7 +30,7 @@ inherit :class:`BaseStreaming` and implement exactly two hooks:
 - ``_process_chunk(start, end) -> dict`` — run one chunk and return
   ``{"depth", "conf", "extrinsics", "intrinsics"}`` numpy arrays.
 
-Run any backend through ``da3_streaming/run_stream.py --backend ...``.
+Run any backend through ``da3_streaming/run_depth_stream.py --backend ...``.
 """
 
 from __future__ import annotations

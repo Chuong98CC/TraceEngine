@@ -1,4 +1,4 @@
-# Promptable Segmentation — SAM3 (`tools/general_test/test_sam3.py`)
+# Promptable Segmentation — SAM3 (`tools/general_test/module/infer_sam3.py`)
 
 Runs the exported SAM3 image model (`sam3_image_exported_bf16.pt2`) on box
 and text prompts. This script is a **notebook-style example** (`#%%` cells,

@@ -38,7 +38,7 @@ main project environment. Set it up with:
 
 ```bash
 bash scripts/general_test/setup_rexomni_env.sh
-PYTHONPATH="$PWD/src" .venv-rexomni/bin/python tools/general_test/test_rexomni.py
+PYTHONPATH="$PWD/src" .venv-rexomni/bin/python tools/general_test/module/infer_rexomni.py
 ```
 
 See [`docs/general_test/module/rexomni.md`](docs/general_test/module/rexomni.md)
@@ -173,7 +173,7 @@ Each subtask has a start frame, an end frame, and several key-frames.
 
 Due to memory limits, a camera-pose estimation model can only run on a small
 batch of frames, e.g. 64 frames at most. To run inference over longer
-sequences, we provide the base class `tools/general_test/run_stream.py`, which
+sequences, we provide the base class `tools/general_test/pipeline/run_depth_stream.py`, which
 splits a long sequence into several **overlapped chunks**. The SLAM backend
 aligns the camera-pose results from each chunk together to create global
 camera poses. The user can also **down-sample** the sequence, e.g. setting
@@ -274,5 +274,5 @@ python tools/astribot/run_subtask_stream.py \
 
 The docs live in [`docs/astribot/`](docs/astribot/):
 [`astribot_extract_frames.md`](docs/astribot/astribot_extract_frames.md),
-[`astribot_subtask_stream.md`](docs/astribot/astribot_subtask_stream.md),
-[`astribot_visualize_subtask_stream.md`](docs/astribot/astribot_visualize_subtask_stream.md).
+[`astribot_subtask_depth_stream.md`](docs/astribot/astribot_subtask_depth_stream.md),
+[`astribot_visualize_subtask_depth_stream.md`](docs/astribot/astribot_visualize_subtask_depth_stream.md).

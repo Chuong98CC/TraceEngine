@@ -1,9 +1,9 @@
-# Streaming Depth + Pose (`tools/general_test/run_stream.py` & `visualize_stream.py`)
+# Streaming Depth + Pose (`tools/general_test/pipeline/run_depth_stream.py` & `visualize_stream.py`)
 
 Multi-camera depth + camera pose over a long trajectory, in sliding chunks
 aligned into one world frame.
 
-## run_stream.py
+## run_depth_stream.py
 
 Unified entry point for three backends:
 
@@ -30,7 +30,7 @@ padded outputs are discarded.
 
 ```bash
 # Stereo (VGGT-Omega or DA3)
-python tools/general_test/run_stream.py \
+python tools/general_test/pipeline/run_depth_stream.py \
     --backend vggt_omega \                 # or "da3"
     --input-dirs <left_frames_dir> <right_frames_dir> \
     --mask-dirs <left_mask_dir> <right_mask_dir> \   # optional
@@ -40,7 +40,7 @@ python tools/general_test/run_stream.py \
     --video                                # render trajectory video after the run
 
 # RGB-D (Any2Full): RGB folder + raw-depth folder pair
-python tools/general_test/run_stream.py \
+python tools/general_test/pipeline/run_depth_stream.py \
     --backend a2f \
     --input-dirs <rgb_frames_dir> \
     --depth-dirs <raw_depth_dir> \
@@ -83,7 +83,7 @@ This output contract is what `infer_tapip3d.py` consumes for 3D tracing
 
 ## visualize_stream.py
 
-> Full documentation: [`visualize_stream.md`](visualize_stream.md)
+> Full documentation: [`visualize_depth_stream.md`](visualize_depth_stream.md)
 > (viewpoints, fov auto-fit, tone-curve inversion, tuning flags).
 
 Renders the streaming output as a trajectory mp4 **without re-running
@@ -96,7 +96,7 @@ left / right), all looking at the scene centre, each viewport's field of
 view auto-fitted so the scene fills the frame.
 
 ```bash
-python tools/general_test/visualize_stream.py \
+python tools/general_test/pipeline/visualize_stream.py \
     --input-dirs <left_frames_dir> <right_frames_dir> \
     --result-dir output/stream_stereo_vggt_omega \
     --output output/stream_stereo_vggt_omega/trajectory.mp4 \
@@ -106,14 +106,14 @@ python tools/general_test/visualize_stream.py \
 | Argument | Default | Description |
 |---|---|---|
 | `--input-dirs` | stereo-left/right demo paths | Source image folders, same order as inference |
-| `--result-dir` | `output/stream_stereo` | Streaming output directory (the `--output-dir` of `run_stream.py`) |
+| `--result-dir` | `output/stream_stereo` | Streaming output directory (the `--output-dir` of `run_depth_stream.py`) |
 | `--output` | `<result-dir>/trajectory.mp4` | Video output path |
 | `--fps` | `10` | Video frame rate |
 | `--size` | `960x540` | Video size `WxH` (even dimensions required) |
 | `--max-points` | `100_000` | Max point-cloud points rendered per frame |
 
 Requires `open3d` + `imageio`; the module is also used internally by
-`run_stream.py --video` (lazy import, so streaming-only runs don't need
+`run_depth_stream.py --video` (lazy import, so streaming-only runs don't need
 open3d).
 
 ## Wrapper scripts (`scripts/general_test/`)

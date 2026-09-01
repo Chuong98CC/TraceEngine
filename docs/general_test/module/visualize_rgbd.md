@@ -1,4 +1,4 @@
-# RGB-D Visualization (`tools/general_test/visualize_rgbd.py`)
+# RGB-D Visualization (`tools/general_test/pipeline/visualize_rgbd.py`)
 
 Visualizes RGB-D data from **one of two mutually exclusive sources**:
 
@@ -10,17 +10,17 @@ Visualizes RGB-D data from **one of two mutually exclusive sources**:
    (`<stem>.jpg/.jpeg/.png`) by stem with a depth `<stem>.lz4` (raw uint16 mm,
    see `utils.astribot_dataloader.load_depth_lz4`, reshaped to the RGB frame
    size) and a pose `<stem>.npz` (`extrinsics` 3×4/4×4, `intrinsics` 3×3) —
-   the format written by `run_stream.py` ([`streaming.md`](streaming.md)).
+   the format written by `run_depth_stream.py` ([`streaming.md`](streaming.md)).
    `--frame_index` selects the pair at that position in the sorted matching
    stems.
 
 ```bash
 # Astribot camera frame
-python tools/general_test/visualize_rgbd.py --camera_name head_rgbd \
+python tools/general_test/pipeline/visualize_rgbd.py --camera_name head_rgbd \
     --frame_index 0 --save_viz --save_glb
 
-# RGB + depth-lz4 folder pair (e.g. a run_stream.py output)
-python tools/general_test/visualize_rgbd.py \
+# RGB + depth-lz4 folder pair (e.g. a run_depth_stream.py output)
+python tools/general_test/pipeline/visualize_rgbd.py \
     --rgb_dir path/to/rgb --depth_npz_dir path/to/depth \
     --save_viz --save_glb
 ```

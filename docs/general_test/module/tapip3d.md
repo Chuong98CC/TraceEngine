@@ -12,7 +12,7 @@ saved as world-space 3D traces per query.
 
 ```bash
 # Grid queries (classic): 8x8 bbox grid + 32x32 support grid
-python tools/general_test/infer_tapip3d.py \
+python tools/general_test/module/infer_tapip3d.py \
     --image_dir \
         /data/astri_making_coffee_v1/eps_data/subtask_frames/ep000000/subtask_00/cam_head \
     --depth_dir \
@@ -23,7 +23,7 @@ python tools/general_test/infer_tapip3d.py \
 
 # SAM3 mask-guided queries: sample the bbox points inside the SAM3
 # segmentation of the object instead of on a regular grid
-python tools/general_test/infer_tapip3d.py \
+python tools/general_test/module/infer_tapip3d.py \
     --image_dir <frames_dir> --depth_dir <geometry_dir> \
     --bbox 1 240 100 340 --text_prompt "brown coffee cup" \
     --grid_x 8 --grid_y 8 --support_grid_size 32 \
@@ -101,6 +101,6 @@ sampled query points).
   kernels (importing `flow_models.tapip3d` disables them globally), then
   restores both — keep this in mind if reusing `Sam3Image` in other scripts
   that import tapip3d.
-- Geometry is a `run_stream.py`-style output folder (see
+- Geometry is a `run_depth_stream.py`-style output folder (see
   [`streaming.md`](streaming.md) for the streaming pipeline that produces
   it).

@@ -8,7 +8,7 @@ ANYVIEW_MODEL_PATH="weights/da3/da3_anyview_64x644x490_giant-large-1.1.pt2"
 METRIC_MODEL_PATH="weights/da3/da3_metric_644x490_giant-large-1.1.pt2"
 
 # run inference on stereo stream
-# python tools/general_test/run_stream.py \
+# python tools/general_test/pipeline/run_depth_stream.py \
 #     --backend $BACKEND \
 #     --input-dirs $LEFT_DIR $RIGHT_DIR \
 #     --start-frame 0 --max-frames 160 --interval 1 \
@@ -18,7 +18,7 @@ METRIC_MODEL_PATH="weights/da3/da3_metric_644x490_giant-large-1.1.pt2"
 #     # --mask-dirs $LEFT_MASK_DIR $RIGHT_MASK_DIR
 
 # visualize
-python tools/general_test/visualize_stream.py \
+python tools/general_test/pipeline/visualize_stream.py \
     --input-dirs $LEFT_DIR $RIGHT_DIR \
     --result-dir $OUTPUT_DIR --output $OUTPUT_DIR/stereo_${BACKEND}_stream.mp4 \
     --fps 15 --size 960x540

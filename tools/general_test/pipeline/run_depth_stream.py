@@ -3,7 +3,7 @@
 DA3 multi-camera streaming — unified entry point for all backends.
 
 Usage:
-    python tools/run_stream.py \
+    python tools/general_test/pipeline/run_depth_stream.py \
         --backend da3|vggt_omega \
         --input-dirs /path/cam0 /path/cam1 \
         [--mask-dirs /path/masks0 /path/masks1] \
@@ -276,7 +276,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.video:
         # Lazy import: visualize_stream pulls in open3d, which is only
         # needed when a video is requested.
-        from tools.general_test.visualize_stream import load_stems, render_stream_video
+        from tools.general_test.pipeline.visualize_stream import load_stems, render_stream_video
 
         stems = load_stems(save_dir, args.input_dirs)
         w, h = (int(x) for x in args.video_size.lower().split("x"))

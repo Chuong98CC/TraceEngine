@@ -6,7 +6,7 @@ OUTPUT_DIR="output/vggt_vggt_omega_cs64_mask"
 #     --input-dirs $LEFT_DIR $RIGHT_DIR \
 #     --result-dir $OUTPUT_DIR --output $OUTPUT_DIR/frame_000211.glb
 
-python tools/general_test/visualize_stream.py \
+python tools/general_test/pipeline/visualize_stream.py \
     --input-dirs $LEFT_DIR $RIGHT_DIR \
     --result-dir $OUTPUT_DIR --output $OUTPUT_DIR/da3_stream.mp4 \
     --fps 30 --size 960x540

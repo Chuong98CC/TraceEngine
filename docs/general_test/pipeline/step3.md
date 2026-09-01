@@ -30,33 +30,33 @@ Two sub-steps, two environments — they **cannot share a process**:
 
 | Sub-step | Tool | What it runs | Environment |
 |---|---|---|---|
-| 3a | `tools/general_test/run_subtask_detections.py` | RexOmni open-vocabulary detection → one JSON per episode | `.venv-rexomni` (Python 3.10 / torch 2.7, see [`rexomni.md`](../module/rexomni.md)) |
-| 3b | `tools/general_test/run_subtask_init_points.py` | SAM3 masks + RoMAv2 keypoints → `init_points/` per prompt | main env (`.venv`, `.pt2` runtimes) |
+| 3a | `tools/general_test/pipeline/run_object_detection.py` | RexOmni open-vocabulary detection → one JSON per episode | `.venv-rexomni` (Python 3.10 / torch 2.7, see [`rexomni.md`](../module/rexomni.md)) |
+| 3b | `tools/general_test/pipeline/run_object_init_points.py` | SAM3 masks + RoMAv2 keypoints → `init_points/` per prompt | main env (`.venv`, `.pt2` runtimes) |
 
 The high-level drivers launch the two tools **sequentially as
 subprocesses**, so you run them from the **main** environment:
 
 ```
-run_folder_step3.py / run_subtask_step3.py  (drivers)
-    ├── 3a: run_subtask_detections.py  →  <out>/detections/ep{idx:06d}.json
-    └── 3b: run_subtask_init_points.py →  <out>/init_points/ep{idx:06d}/subtask_XX/<prompt_slug>/
+run_e2e_init_points.py / run_subtask_step3.py  (drivers)
+    ├── 3a: run_object_detection.py  →  <out>/detections/ep{idx:06d}.json
+    └── 3b: run_object_init_points.py →  <out>/init_points/ep{idx:06d}/subtask_XX/<prompt_slug>/
 ```
 
 ## Entry points
 
 | Entry point | Scope | What it runs |
 |---|---|---|
-| `tools/general_test/run_folder_step3.py` | **one key-frame folder** (one sub-task of one camera, dataset-independent) | 3a + 3b; the folder is sub-task 00 of a synthetic episode labelled `--episode-idx` (default 0), the folder name is the camera key |
-| `scripts/general_test/infer_step3.sh` | wrapper of `run_folder_step3.py` | `python tools/general_test/run_folder_step3.py --keyframes-dir "$1" "$@"` |
+| `tools/general_test/pipeline/run_e2e_init_points.py` | **one key-frame folder** (one sub-task of one camera, dataset-independent) | 3a + 3b; the folder is sub-task 00 of a synthetic episode labelled `--episode-idx` (default 0), the folder name is the camera key |
+| `scripts/general_test/infer_step3.sh` | wrapper of `run_e2e_init_points.py` | `python tools/general_test/pipeline/run_e2e_init_points.py --keyframes-dir "$1" "$@"` |
 | `tools/astribot/run_subtask_step3.py` | **episodes on the dataset** | Step 1 (extract the sub-task key-frames) + 3a + 3b; the dataset layer that drives the same tools (see [`docs/astribot/`](../../astribot/)) |
-| `tools/general_test/run_subtask_detections.py` | 3a alone | episode layout or `--keyframes-dir` |
-| `tools/general_test/run_subtask_init_points.py` | 3b alone | episode layout or `--keyframes-dir`; `--no-rexomni` for SAM3 text-only prompts (no 3a JSON) |
+| `tools/general_test/pipeline/run_object_detection.py` | 3a alone | episode layout or `--keyframes-dir` |
+| `tools/general_test/pipeline/run_object_init_points.py` | 3b alone | episode layout or `--keyframes-dir`; `--no-rexomni` for SAM3 text-only prompts (no 3a JSON) |
 
 ## Quickstart
 
 ```bash
 # Folder mode (Case 1): one sub-task's key-frame folder, full Step 3
-python tools/general_test/run_folder_step3.py \
+python tools/general_test/pipeline/run_e2e_init_points.py \
     --keyframes-dir astri_making_coffee_v1/eps_data/key_frames/ep000000/subtask_00/cam_head
 # or the wrapper script (extra args pass through)
 bash scripts/general_test/infer_step3.sh <key-frames-dir> [extra args...]
@@ -67,11 +67,11 @@ python tools/astribot/run_subtask_step3.py \
     --data-root /data/astri_making_coffee --episode-idxes 0
 
 # Re-run only 3b with tuned params, reusing the saved key-frames + detections
-python tools/general_test/run_folder_step3.py \
+python tools/general_test/pipeline/run_e2e_init_points.py \
     --keyframes-dir .../subtask_00/cam_head --skip-3a --top-k 64
 
 # Skip RexOmni entirely: 3b with SAM3 text-only prompts
-python tools/general_test/run_folder_step3.py \
+python tools/general_test/pipeline/run_e2e_init_points.py \
     --keyframes-dir .../subtask_00/cam_head --no-rexomni
 ```
 

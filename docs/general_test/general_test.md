@@ -31,12 +31,13 @@ entire step → run the pipeline test and use its module pointers for details.
 ```mermaid
 flowchart LR
     subgraph Step1["Step 1 · Key-Frame Extracting"]
-        DS["LeRobotDataset<br/>(Kronze157/astri_making_coffee_vlva)"] --> EF["tools/astribot/extract_frames.py<br/>--mode frames"]
-        EF --> FR["Per-camera frame folders<br/>frame_*.jpg + raw depth .lz4"]
+        DS["LeRobotDataset<br/>(Kronze157/astri_making_coffee_vlva)"] --> EF["tools/astribot/extract_frames.py<br/>--mode frames / key_frames"]
+        EF -->|"all frames"| FR["Per-camera frame folders<br/>frame_*.jpg + raw depth .lz4"]
+        EF -->|"key-frames"| KF["Key-frame folders<br/>ep…/subtask_XX/cam/frame_*.jpg"]
     end
 
     subgraph Step2["Step 2 · Camera Pose + Depth (each frame)"]
-        FR --> RS{"run_stream.py<br/>--backend"}
+        FR --> RS{"run_depth_stream.py<br/>--backend"}
         WF["infer_waft.py — motion masks<br/>(optional)"] --> RS
         RS -->|"vggt_omega / da3"| ST["Stereo / mono<br/>depth + pose"]
         RS -->|"a2f (RGB-D)"| A2F["Any2Full densified<br/>depth + pose"]
@@ -45,8 +46,9 @@ flowchart LR
     end
 
     subgraph Step3["Step 3 · Sampling Keypoints (key-frames)"]
-        TX["Text prompt per interacted object"] --> RX["run_subtask_detections.py<br/>RexOmni detection"]
-        RX --> SM["run_subtask_init_points.py<br/>SAM3 masks + RoMAv2 keypoints"]
+        TX["Text prompt per interacted object"] --> RX["run_object_detection.py<br/>RexOmni detection"]
+        KF --> RX
+        RX --> SM["run_object_init_points.py<br/>SAM3 masks + RoMAv2 keypoints"]
         SM --> TK["top-k keypoints<br/>inside the masks"]
     end
 
@@ -57,26 +59,26 @@ flowchart LR
     end
 ```
 
-1. **Key-frame extracting** — `tools/astribot/extract_frames.py` turns the
+1. **Step 1: Key-frame extracting** — `tools/astribot/extract_frames.py` turns the
    LeRobotDataset into synchronized per-camera frame folders (paired with raw
    uint16 depth `.lz4` where the camera has a depth feature); each subtask has
    a start, an end and several key-frames (ground-truth indexes, gripper-state,
    or uniform sampling — see the repo README §3).
-2. **Camera depth + pose estimation** — `run_stream.py` streams the frame
+2. **Step 2: Camera depth + pose estimation** — `run_depth_stream.py` streams the frame
    folders through a depth+pose backend in sliding chunks aligned into one
    world frame: `vggt_omega` / `da3` (mono/stereo) or `a2f` (RGB-D, Any2Full
    densification). Optional WAFT motion masks (`infer_waft.py`) zero the
    confidence of moving pixels during chunk alignment. → **[Pipeline test:
    `pipeline/step2.md`](pipeline/step2.md)**
-3. **Sampling keypoints** — for each interacted object, a text prompt from
+3. **Step 3: Sampling keypoints** — for each interacted object, a text prompt from
    the subtask description drives detection on the key-frames
-   (`run_subtask_detections.py`, Rex-Omni); the boxes + text prompt segment
-   the object masks (`run_subtask_init_points.py`, SAM3); the enlarged box
+   (`run_object_detection.py`, Rex-Omni); the boxes + text prompt segment
+   the object masks (`run_object_init_points.py`, SAM3); the enlarged box
    crops are matched across the key-frames (RoMAv2, mask-cropped so points are
    sampled inside the object only) and only the top-k keypoints inside the
    masks are kept. → **[Pipeline test:
    `pipeline/step3.md`](pipeline/step3.md)**
-4. **3D traces** — `infer_tapip3d.py` tracks the world-space positions of the
+4. **Step 4: 3D traces** — `infer_tapip3d.py` tracks the world-space positions of the
    sampled keypoints (plus a support grid) through the depth + pose output,
    from the first to the last frame of the subtask.
 
@@ -87,11 +89,11 @@ CLI, its output, and how it plugs into the pipeline. Ordered by pipeline step:
 
 | Step | Module | Tool | What it does | Runtime | Wrapper script |
 |---|---|---|---|---|---|
-| 2 | [`streaming.md`](module/streaming.md) | `run_stream.py` / `visualize_stream.py` | streaming multi-camera depth + pose (incl. RGB-D `a2f`), trajectory video | DA3 / VGGT-Omega / Any2Full (`.pt2`) | `scripts/general_test/infer_stream_stereo.sh`, `infer_stream_rgbd.sh`, `visualize_stream.sh` |
-| 2 | [`any2full.md`](module/any2full.md) | `test_any2full.py` | RGB-D depth densification (the `a2f` backend component) | Any2Full (`.pt2`) | — |
+| 2 | [`streaming.md`](module/streaming.md) | `run_depth_stream.py` / `visualize_stream.py` | streaming multi-camera depth + pose (incl. RGB-D `a2f`), trajectory video | DA3 / VGGT-Omega / Any2Full (`.pt2`) | `scripts/general_test/infer_stream_stereo.sh`, `infer_stream_rgbd.sh`, `visualize_stream.sh` |
+| 2 | [`any2full.md`](module/any2full.md) | `infer_any2full.py` | RGB-D depth densification (the `a2f` backend component) | Any2Full (`.pt2`) | — |
 | 2 (opt.) | [`waft.md`](module/waft.md) | `infer_waft.py` | dense optical flow → motion masks (zero moving pixels during chunk alignment) | WAFT (ONNX / TensorRT) | `scripts/general_test/infer_waft.sh` |
-| 3 | [`rexomni.md`](module/rexomni.md) | `test_rexomni.py` | open-vocabulary object detection from a text prompt | Rex-Omni (`.venv-rexomni`) | `scripts/general_test/setup_rexomni_env.sh` |
-| 3 | [`sam3.md`](module/sam3.md) | `test_sam3.py` | promptable segmentation (box + text) | SAM3 (`.pt2`) | — |
+| 3 | [`rexomni.md`](module/rexomni.md) | `infer_rexomni.py` | open-vocabulary object detection from a text prompt | Rex-Omni (`.venv-rexomni`) | `scripts/general_test/setup_rexomni_env.sh` |
+| 3 | [`sam3.md`](module/sam3.md) | `infer_sam3.py` | promptable segmentation (box + text) | SAM3 (`.pt2`) | — |
 | 3 | [`romav2.md`](module/romav2.md) | `infer_romav2.py` | multi-image keypoint matching (points visible in all images) | RoMAv2 (`.pt2`) | `scripts/general_test/infer_romav2.sh` |
 | 4 | [`tapip3d.md`](module/tapip3d.md) | `infer_tapip3d.py` | 3D point tracking over long videos | TAPIP3D (`.pt2`) | `scripts/general_test/infer_tapip3d.sh` |
 | — | [`visualize_rgbd.md`](module/visualize_rgbd.md) | `visualize_rgbd.py` | RGB-D visualization (image / depth-lz4 + pose-npz folder pair) | — (rendering) | — |
@@ -103,8 +105,8 @@ and verifies the output contract:
 
 | Step | Page | What it verifies | Entry points |
 |---|---|---|---|
-| 2 | [`step2.md`](pipeline/step2.md) | Camera pose + depth: chunked streaming → SIM3 alignment → per-frame `depth` + `pose` outputs | `run_stream.py`, `infer_stream_stereo.sh`, `infer_stream_rgbd.sh`, `visualize_stream.sh` |
-| 3 | [`step3.md`](pipeline/step3.md) | Sampling keypoints: RexOmni detections (3a) → SAM3 masks + RoMAv2 keypoints (3b) | `run_folder_step3.py`, `infer_step3.sh`, `run_subtask_step3.py` (dataset mode) |
+| 2 | [`step2.md`](pipeline/step2.md) | Camera pose + depth: chunked streaming → SIM3 alignment → per-frame `depth` + `pose` outputs | `run_depth_stream.py`, `infer_stream_stereo.sh`, `infer_stream_rgbd.sh`, `visualize_stream.sh` |
+| 3 | [`step3.md`](pipeline/step3.md) | Sampling keypoints: RexOmni detections (3a) → SAM3 masks + RoMAv2 keypoints (3b) | `run_e2e_init_points.py`, `infer_step3.sh`, `run_subtask_step3.py` (dataset mode) |
 
 ## Ready-to-run scripts (`scripts/general_test/`)
 
@@ -119,7 +121,7 @@ extraction:
 | `infer_tapip3d.sh` | 3D point tracking of the coffee cup (`--bbox 1 240 100 340 --text_prompt "brown coffee cup"`), env-configurable via `IMG_DIR` / `DEPTH_DIR` / `OUTPUT_DIR` |
 | `infer_romav2.sh` | RoMAv2 keypoint matching across the `assets/matching_points/coffee{1..4}.png` key-frames (`--strategy reference --num-corresp 2000 --top-k 128`) |
 | `infer_step3.sh` | Step 3 on a key-frame folder (3a + 3b, see [`pipeline/step3.md`](pipeline/step3.md)) |
-| `setup_rexomni_env.sh` | Create the `.venv-rexomni` environment (torch 2.7 / transformers 4.51.3, Python 3.10); run the tool with `PYTHONPATH="$PWD/src" .venv-rexomni/bin/python tools/general_test/run_subtask_detections.py` |
+| `setup_rexomni_env.sh` | Create the `.venv-rexomni` environment (torch 2.7 / transformers 4.51.3, Python 3.10); run the tool with `PYTHONPATH="$PWD/src" .venv-rexomni/bin/python tools/general_test/pipeline/run_object_detection.py` |
 | `visualize_stream.sh` | Trajectory video from a streaming result |
 | `export_trt_docker.sh` | Build a TensorRT engine from an ONNX checkpoint inside the NVIDIA TensorRT container (`<onnx_path> [fp16|tf32|fp32]`) |
 

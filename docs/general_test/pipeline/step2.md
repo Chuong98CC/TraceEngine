@@ -9,7 +9,7 @@ This is the **folder-mode** (Case 1) test: input is a folder of extracted
 images, dataset-independent. The dataset-mode variant that streams online
 from a LeRobotDataset without writing frames to disk is
 `tools/astribot/run_subtask_stream.py` (see
-[`docs/astribot/astribot_subtask_stream.md`](../../astribot/astribot_subtask_stream.md)).
+[`docs/astribot/astribot_subtask_depth_stream.md`](../../astribot/astribot_subtask_depth_stream.md)).
 The model-level details live in the module docs — this page is about the
 pipeline running end-to-end.
 
@@ -37,8 +37,8 @@ pixels **during chunk alignment only** — depth outputs are unaffected
 
 | Entry point | What it runs |
 |---|---|
-| `tools/general_test/run_stream.py` | The Step-2 pipeline itself (all backends, `--video` to render afterwards) |
-| `scripts/general_test/infer_stream_stereo.sh` | Stereo streaming on the sample extraction (uncomment the `run_stream.py` block), then renders the trajectory video |
+| `tools/general_test/pipeline/run_depth_stream.py` | The Step-2 pipeline itself (all backends, `--video` to render afterwards) |
+| `scripts/general_test/infer_stream_stereo.sh` | Stereo streaming on the sample extraction (uncomment the `run_depth_stream.py` block), then renders the trajectory video |
 | `scripts/general_test/infer_stream_rgbd.sh` | RGB-D streaming (`a2f`) on the sample extraction, then renders the trajectory video |
 | `scripts/general_test/visualize_stream.sh` | Trajectory video from a streaming result (no re-inference) |
 
@@ -46,14 +46,14 @@ pixels **during chunk alignment only** — depth outputs are unaffected
 
 ```bash
 # Stereo (VGGT-Omega or DA3) — frame folders from Step 1
-python tools/general_test/run_stream.py \
+python tools/general_test/pipeline/run_depth_stream.py \
     --backend vggt_omega \                 # or "da3"
     --input-dirs <left_frames_dir> <right_frames_dir> \
     --start-frame 210 --max-frames 160 --interval 4 \
     --output-dir output/stream_stereo_vggt_omega
 
 # RGB-D (Any2Full): RGB folder + raw-depth folder pair
-python tools/general_test/run_stream.py \
+python tools/general_test/pipeline/run_depth_stream.py \
     --backend a2f \
     --input-dirs <rgb_frames_dir> \
     --depth-dirs <raw_depth_dir> \
@@ -61,7 +61,7 @@ python tools/general_test/run_stream.py \
     --output-dir output/stream_rgbd_a2f
 
 # Render the trajectory video from the saved result (no re-inference)
-python tools/general_test/visualize_stream.py \
+python tools/general_test/pipeline/visualize_stream.py \
     --input-dirs <left_frames_dir> <right_frames_dir> \
     --result-dir output/stream_stereo_vggt_omega \
     --output output/stream_stereo_vggt_omega/trajectory.mp4 \
@@ -107,12 +107,12 @@ tracing and what `visualize_rgbd.py` / `visualize_stream.py` render.
 
 ## Module pointers
 
-- [`streaming.md`](../module/streaming.md) — `run_stream.py` full CLI (backends,
+- [`streaming.md`](../module/streaming.md) — `run_depth_stream.py` full CLI (backends,
   masks, alignment config, `--video`) + output contract details
 - [`any2full.md`](../module/any2full.md) — the `a2f` RGB-D depth-densification
   component
 - [`waft.md`](../module/waft.md) — WAFT motion masks (optional `--mask-dirs`)
-- [`visualize_stream.md`](../module/visualize_stream.md) — the trajectory
+- [`visualize_depth_stream.md`](../module/visualize_depth_stream.md) — the trajectory
   renderer (viewpoints, tone-curve inversion, tuning flags)
 - [`visualize_rgbd.md`](../module/visualize_rgbd.md) — RGB-D frame renderer
 - [`tapip3d.md`](../module/tapip3d.md) — Step 4 consumes this output contract

@@ -6,7 +6,7 @@ BACKEND="a2f"
 OUTPUT_DIR="${DATA_ROOT}/experiments/rgbd_${BACKEND}"
 
 # run inference on the RGB-D stream
-# python tools/general_test/run_stream.py \
+# python tools/general_test/pipeline/run_depth_stream.py \
 #     --backend $BACKEND \
 #     --input-dirs $RGB_DIR \
 #     --depth-dirs $DEPTH_DIR \
@@ -15,7 +15,7 @@ OUTPUT_DIR="${DATA_ROOT}/experiments/rgbd_${BACKEND}"
 #     # --mask-dirs $LEFT_MASK_DIR $RIGHT_MASK_DIR
 
 # visualize
-python tools/general_test/visualize_stream.py \
+python tools/general_test/pipeline/visualize_stream.py \
     --input-dirs $RGB_DIR \
     --result-dir $OUTPUT_DIR --output $OUTPUT_DIR/rgbd_${BACKEND}_stream.mp4 \
     --fps 15 --size 960x540

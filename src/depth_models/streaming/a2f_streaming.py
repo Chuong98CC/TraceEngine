@@ -21,12 +21,12 @@ intrinsics, so no camera parameters are passed.  Outputs are saved per time
 step under ``depth_<RGB folder name>/``, in the same .lz4 depth + .npz pose
 format as the other backends.
 
-With ``use_depth_enhance=False`` (``run_stream.py --no-depth-enhance``) the
+With ``use_depth_enhance=False`` (``run_depth_stream.py --no-depth-enhance``) the
 Any2Full model is not loaded and the raw sensor depth is fed directly to the
 alignment as the metric component — the input contract (RGB folders +
 ``depth_dirs``) is unchanged.
 
-Run through ``tools/general_test/run_stream.py --backend a2f``.
+Run through ``tools/general_test/pipeline/run_depth_stream.py --backend a2f``.
 """
 
 from __future__ import annotations

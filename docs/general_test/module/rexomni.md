@@ -1,4 +1,4 @@
-# Rex-Omni Open-Vocabulary Detection (`tools/general_test/test_rexomni.py`)
+# Rex-Omni Open-Vocabulary Detection (`tools/general_test/module/infer_rexomni.py`)
 
 Rex-Omni is a Qwen2.5-VL based multimodal model for **open-vocabulary object
 detection** (and pointing / keypoint / OCR tasks) from text prompts. Unlike
@@ -29,14 +29,14 @@ metadata requires Python 3.12, while Rex-Omni uses Python 3.10. Run the tool
 by exposing the repo's `src/` via `PYTHONPATH`:
 
 ```bash
-PYTHONPATH="$PWD/src" .venv-rexomni/bin/python tools/general_test/test_rexomni.py
+PYTHONPATH="$PWD/src" .venv-rexomni/bin/python tools/general_test/module/infer_rexomni.py
 ```
 
 Do not install these packages into the main environment.
 
 ## Example script
 
-`test_rexomni.py` is a **notebook-style example** rather than a configurable
+`infer_rexomni.py` is a **notebook-style example** rather than a configurable
 CLI: the image path, categories and generation parameters are hard-coded at
 the top. It detects the Astribot scene objects on the head camera frame
 (`assets/astribot_test_imgs/head_rgbd/color/img_000000.jpg`):

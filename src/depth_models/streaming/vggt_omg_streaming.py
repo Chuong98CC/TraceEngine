@@ -15,7 +15,7 @@ spatial outputs back to the content region, and already shifts the principal
 point by each frame's letterbox offset — so mapping the outputs to the base
 data contract is just key renaming (``depth_conf`` → ``conf``).
 
-Run through ``tools/run_stream.py --backend vggt_omega``.
+Run through ``tools/run_depth_stream.py --backend vggt_omega``.
 """
 
 from __future__ import annotations

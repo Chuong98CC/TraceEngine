@@ -12,7 +12,7 @@ Inputs are resized to the exported (fixed) 480x640, so any RGB/depth size is
 accepted; output depth (and the point cloud) is at the exported resolution.
 
 Examples:
-  python tools/general_test/test_any2full.py \
+  python tools/general_test/module/infer_any2full.py \
     --pt2 weights/any2full/Any2Full_vitl_bf16.pt2 \
     --frame_idx 0 \
     --out_dir ./outputs

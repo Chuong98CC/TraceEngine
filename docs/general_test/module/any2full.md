@@ -1,4 +1,4 @@
-# RGB-D Depth Densification — Any2Full (`tools/general_test/test_any2full.py`)
+# RGB-D Depth Densification — Any2Full (`tools/general_test/module/infer_any2full.py`)
 
 Single-frame RGB-D densification on an Astribot frame: uses the RGB-D
 sensor's sparse metric depth as a *prompt* to ground a Depth Anything
@@ -9,7 +9,7 @@ the exported fixed 480×640, so any RGB/depth size is accepted; output depth
 and the point cloud are at the exported resolution.
 
 ```bash
-python tools/general_test/test_any2full.py \
+python tools/general_test/module/infer_any2full.py \
     --pt2 weights/any2full/Any2Full_vitl_bf16.pt2 \
     --frame_idx 0 \
     --out_dir ./output/a2f
@@ -31,7 +31,7 @@ camera intrinsics), `frame_<idx>.npy` (metric depth), `<stem>.png`
 
 ## Usage in the pipeline
 
-Any2Full is the **`a2f` streaming backend**: `run_stream.py --backend a2f`
+Any2Full is the **`a2f` streaming backend**: `run_depth_stream.py --backend a2f`
 feeds the raw sensor depth (`.lz4`, uint16 mm) of each RGB camera as the
 prompt and outputs densified metric depth + pose (see
 [`streaming.md`](streaming.md)).
