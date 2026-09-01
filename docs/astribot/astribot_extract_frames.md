@@ -99,10 +99,11 @@ python tools/astribot/extract_frames.py \
 ```
 
 Output: `<out_dir>/subtask_videos/ep000000/<camera>/subtask_00.mp4`,
-`subtask_01.mp4`, … — the episode cut at the split frames. By default ffmpeg
-**stream-copies** (`-c copy`, fast, boundaries snap to the nearest keyframes);
-pass `--exact` to re-encode with x264 for frame-accurate boundaries (depth
-cameras are written as monochrome streams).
+`subtask_01.mp4`, … — the episode cut at the split frames. The cuts are
+**always frame-accurate**: each segment is re-encoded with x264 at its
+exact split frames (a decode+encode pass is unavoidable for exact H.264
+cuts — stream copy can only snap to keyframes). Depth cameras are written
+as monochrome streams.
 
 ### 4. Sample frames of every sub-task
 
@@ -160,7 +161,6 @@ directly).
 | `--max-frames` | all | `frames` mode: cap the sampled frames per sub-task |
 | `--out-dir`, `-o` | `<data-root>/eps_data` | output root holding `subtask/`, `key_frames/`, `subtask_videos/`, `subtask_frames/` |
 | `--dedup-tasks` | off | skip episodes whose task already produced output (useful across runs) |
-| `--exact` | off | x264 re-encode instead of `-c copy` in the video mode |
 | `--min-close-seconds` | `1.5` | closed-gripper runs shorter than this are sensor noise (key-frame detection) |
 
 ## Notes

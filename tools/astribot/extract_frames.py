@@ -10,14 +10,15 @@ Four independent modes:
   subtask_splits.json recording the key and split frames under
   <out_dir>/subtask/<episode>/.
 - key_frames: saves one jpg per selected camera of the episode's first and
-  last frame plus the key frames detected by detect_subtask, each under the
-  sub-task segment it belongs to:
+  last frame, the key frames detected by detect_subtask, and the start and
+  end frame of every sub-task segment, each under the sub-task segment it
+  belongs to:
   <out_dir>/key_frames/<episode>/subtask_XX/<camera>/.
 - videos: cuts one mp4 per sub-task segment (the episode split at the split
-  frames) per selected camera from the source videos with ffmpeg (stream
-  copy by default, no per-frame Python decode; --exact re-encodes for
-  frame-accurate boundaries), under
-  <out_dir>/subtask_videos/<episode>/<camera>/.
+  frames) per selected camera from the source videos with ffmpeg: each
+  segment is re-encoded with x264 at its exact split frames (no per-frame
+  Python decode; a decode+encode pass is unavoidable for frame-accurate
+  H.264 cuts), under <out_dir>/subtask_videos/<episode>/<camera>/.
 - frames: saves one jpg per selected camera of every --interval-th frame of
   each sub-task segment (capped at --max-frames per sub-task), under
   <out_dir>/subtask_frames/<episode>/subtask_XX/<camera>/. When a camera has
@@ -36,10 +37,13 @@ _subtask_split_idxes). The videos, frames and key_frames modes prefer the
 dataset's ground-truth subtask_index column when it exists — the split
 frames are then the first frame of each new sub-task segment (see
 _split_frames_from_ground_truth) — and fall back to subtask_splits.json only
-when the episode has fewer than two sub-tasks. The key_frames mode always
-uses the gripper-detected key frames of detect_subtask (ground truth has no
-key frames); each saved jpg lands in the sub-task segment its frame index
-belongs to.
+when the episode has fewer than two sub-tasks. The ground-truth labels are
+sometimes wrong; pass --use-inferred-splits to always prefer the split
+frames inferred by detect_subtask instead. The key_frames mode always uses
+the gripper-detected key frames of detect_subtask (ground truth has no key
+frames) and additionally saves the start and end frame of every sub-task
+segment (its boundaries under the chosen split source); each saved jpg
+lands in the sub-task segment its frame index belongs to.
 
 Depth pairing: a camera observation.images.cam_X is paired with the
 observation.depth.cam_X feature (uint16 mm) when present, else with the
@@ -128,10 +132,11 @@ def parse_args():
                              "sub-task split frames from observation.state only (no video "
                              "access), saving the gripper plot and subtask_splits.json; "
                              "key_frames: save one jpg per camera of the episode's first, "
-                             "last and key frames, each under the sub-task segment it "
+                             "last and key frames plus the start/end frame of every "
+                             "sub-task segment, each under the sub-task segment it "
                              "belongs to (from subtask_splits.json); "
-                             "videos: one mp4 per sub-task segment per camera "
-                             "(from subtask_splits.json); "
+                             "videos: one mp4 per sub-task segment per camera, "
+                             "always frame-accurate (from subtask_splits.json); "
                              "frames: one jpg per --interval-th frame of each sub-task "
                              "(capped at --max-frames), plus a uint16 depth .lz4 per "
                              "frame for cameras with a paired uint16 depth feature")
@@ -154,11 +159,11 @@ def parse_args():
                              "sub-folders)")
     parser.add_argument("--dedup-tasks", action="store_true",
                         help="skip episodes whose task already produced output")
-    parser.add_argument("--exact", action="store_true",
-                        help="cut with an x264 re-encode instead of the "
-                             "default ffmpeg -c copy: frame-accurate at the "
-                             "split frames (stream copy is much faster but "
-                             "boundaries snap to the nearest keyframes)")
+    parser.add_argument("--use-inferred-splits", action="store_true",
+                        help="prefer the sub-task split frames inferred by "
+                             "detect_subtask (subtask_splits.json) over the "
+                             "dataset's ground-truth subtask_index column "
+                             "when both exist")
     parser.add_argument("--min-close-seconds", type=float,
                         default=KEY_FRAME_MIN_CLOSE_S,
                         help="runs of closed gripper state shorter than this "
@@ -667,10 +672,13 @@ class DataExtract:
         collected at every frame where the subtask changes (see
         _split_frames_from_ground_truth). An episode must have at least two
         sub-tasks; otherwise the split frames are loaded from the
-        subtask_splits.json written by the detect_subtask mode."""
-        splits = self._split_frames_from_ground_truth()
-        if splits is not None:
-            return {"split_frames": splits}
+        subtask_splits.json written by the detect_subtask mode. With
+        --use-inferred-splits the detect_subtask split frames always win —
+        the ground-truth subtask_index labels are sometimes wrong."""
+        if not self.args.use_inferred_splits:
+            splits = self._split_frames_from_ground_truth()
+            if splits is not None:
+                return {"split_frames": splits}
         return self._load_splits_json()
 
     def _plot_gripper_state(self, frames, vals, subtask_idxes, smooth,
@@ -862,17 +870,15 @@ class DataExtract:
 
     def _write_subtask_videos(self, split_idxes):
         """One mp4 per sub-task segment per selected camera, cut straight
-        from the episode's source videos with ffmpeg (fast input seek)
-        instead of decoding and re-encoding every frame in Python. Saved
-        under <out_dir>/subtask_videos/<episode>/<camera>/; the dataset
-        videos must be on disk (see _ensure_dataset).
+        from the episode's source videos with ffmpeg (no per-frame Python
+        decode). Saved under <out_dir>/subtask_videos/<episode>/<camera>/;
+        the dataset videos must be on disk (see _ensure_dataset).
 
-        Default: ffmpeg -c copy, zero re-encode (fast; segment boundaries
-        snap to the nearest keyframes; the source depth videos are already
-        monochrome, so they stay gray).
-        With --exact: x264 re-encode, frame-accurate at the split frames;
-        depth cameras are written as monochrome streams (the same grayscale
-        convention as the jpg outputs).
+        Always frame-accurate: each segment is cut with its own x264
+        re-encode at the exact split frames — a decode+encode pass is
+        unavoidable for exact H.264 cuts (stream copy can only snap to
+        keyframes). Depth cameras are written as monochrome streams (the
+        same grayscale convention as the jpg outputs).
         """
         vdir = self._episode_dir()
         eps = self.ds_meta.episodes
@@ -889,21 +895,20 @@ class DataExtract:
                 raise FileNotFoundError(
                     f"source video {src} missing "
                     "(download the dataset videos first)")
-            if self.args.exact:
-                vf = ["-vf", "format=gray"] if "depth" in cam else []
-                vcodec = ["-c:v", "libx264", "-preset", "fast", "-crf", "18"]
-            else:
-                vf, vcodec = [], ["-c", "copy", "-avoid_negative_ts", "make_zero"]
+            vf = ["-vf", "format=gray"] if "depth" in cam else []
             for seg_i, (lo, hi) in enumerate(self._segment_bounds(split_idxes)):
                 # frame i of the episode sits at from_timestamp + i/fps
-                # (the source videos are CFR at the dataset fps)
+                # (the source videos are CFR at the dataset fps); the input
+                # seek decodes from the keyframe before the cut and discards
+                # up to the exact frame
                 start = t0 + (lo - self.from_idx) / self.fps
                 dur = (hi - lo) / self.fps
                 out = os.path.join(vdir, sub, f"subtask_{seg_i:02d}.mp4")
                 r = subprocess.run(
                     ["ffmpeg", "-y", "-loglevel", "error",
                      "-ss", f"{start:.6f}", "-i", src,
-                     "-t", f"{dur:.6f}", *vf, *vcodec, "-an", out],
+                     "-t", f"{dur:.6f}", *vf, "-c:v", "libx264",
+                     "-preset", "fast", "-crf", "18", "-an", out],
                     capture_output=True, text=True)
                 if r.returncode != 0:
                     raise RuntimeError(
@@ -949,13 +954,16 @@ class DataExtract:
                                          key_idxes, split_idxes)
             self._save_splits(key_idxes, split_idxes)
         elif self.args.mode == "key_frames":
-            # the episode's first and last frame (the ground-truth subtask
-            # bounds when the dataset has subtask_index) plus the key frames
-            # detected by detect_subtask, each saved under the sub-task
-            # segment it belongs to (see _save_frames)
-            key_idxes = sorted(set([self.from_idx, self.to_idx - 1]
-                                   + self._load_key_frames()))
-            self._save_frames(key_idxes, self._load_splits()["split_frames"])
+            # the start and end frame of every sub-task segment (the
+            # boundaries under the chosen split source, ground-truth unless
+            # --use-inferred-splits) plus the key frames detected by
+            # detect_subtask, each saved under the sub-task segment it
+            # belongs to (see _save_frames)
+            splits = self._load_splits()["split_frames"]
+            bounds = self._segment_bounds(splits)
+            seg_frames = [lo for lo, _ in bounds] + [hi - 1 for _, hi in bounds]
+            frame_idxes = sorted(set(seg_frames + self._load_key_frames()))
+            self._save_frames(frame_idxes, splits)
         elif self.args.mode == "videos":
             self._write_subtask_videos(self._load_splits()["split_frames"])
         elif self.args.mode == "frames":
