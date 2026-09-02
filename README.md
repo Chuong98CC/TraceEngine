@@ -41,15 +41,10 @@ bash scripts/general_test/setup_rexomni_env.sh
 PYTHONPATH="$PWD/src" .venv-rexomni/bin/python tools/general_test/module/infer_rexomni.py
 ```
 
-See [`docs/general_test/module/rexomni.md`](docs/general_test/module/rexomni.md)
+- See [`docs/general_test/module/rexomni.md`](docs/general_test/module/rexomni.md)
 for the wrapper API and its role in the pipeline (Step 3 object detection).
 
-The Rex-Omni environment is intentionally not installed as an editable copy of
-this project: the project metadata requires Python 3.12, while Rex-Omni uses
-Python 3.10. `PYTHONPATH="$PWD/src"` exposes the repository's source packages
-without installing the main project's dependencies into `.venv-rexomni`.
-
-The setup script uses the prebuilt FlashAttention wheel when available. If that
+- The setup script uses the prebuilt FlashAttention wheel when available. If that
 wheel is unavailable for your platform, choose a matching wheel from the
 [flash-attention-prebuild-wheels](https://mjunya.com/flash-attention-prebuild-wheels/?package=FA2&python=3.10&torch=2.7&cuda=12.8)
 page and replace the `flash-attn` URL in the script. Do not install these Rex-Omni
@@ -58,7 +53,7 @@ packages into the main environment.
 
 ## 2. Model weights
 
-To avoid environment conflicting when using different models within the same repo, the model checkpoints are already converted to Torch.Export or ONNX. The converted model weights are hosted on Hugging Face at
+To avoid environment conflicting when using different models within the same repo, the model checkpoints are already converted to Torch.Exportd. The converted model weights are hosted on Hugging Face at
 [`Chuong98vt/TraceEngine`](https://huggingface.co/Chuong98vt/TraceEngine).
 Download them and point `weights/` at the download folder:
 
@@ -72,7 +67,7 @@ ln -s <download_weight_folder> weights
 > it first — `ln -s <download_weight_folder> weights` would otherwise create
 > the symlink *inside* the existing directory.
 
-Expected layout (mirrors the repo layout):
+Expected layout :
 
 ```
 weights
@@ -83,6 +78,9 @@ weights
 ├── da3/
 │   ├── da3_anyview_64x644x490_giant-large-1.1_bf16.pt2   # any-view, fixed 64 views
 │   └── da3_metric_644x490_giant-large-1.1_bf16.pt2       # metric depth
+├── moge3/
+│   ├── moge3_l.pt2                    # MoGe v3 geometry, large (torch.export .pt2)
+│   └── moge3_l_refiner.pt             # MoGe v3 sparse-refiner weights (state dict)
 ├── romav2/
 │   ├── romav2.pt2                        # multi-image keypoint matching (exported .pt2)
 │   └── romav2.json                       # export config: H_lr / W_lr
@@ -111,7 +109,7 @@ performed **for each subtask**:
    track the keypoints across frames and save the output.
 
 ```mermaid
-flowchart LR
+flowchart TB
     subgraph Step1["Step 1 · Key-Frame Extracting"]
         V["Synchronized videos<br/>(multi-camera episode)"] --> Q1{"Subtask labels<br/>in the dataset?"}
         Q1 -->|"Yes"| L1["Ground-truth<br/>start / end frames"]
@@ -194,7 +192,7 @@ The video below shows the depth stream of an episode — estimated per-view
 metric depth and camera poses rendered along the trajectory:
 
 <p align="center">
-  <video src="docs/assets/step2_depth_stream.mp4" alt="Depth stream: camera pose and depth per frame" width="800" controls></video>
+  <img src="docs/assets/step2_depth_streaming.png" alt="Depth stream: camera pose and depth per frame" width="800"/>
 </p>
 
 ### Step 3 — Sampling Keypoints
@@ -238,7 +236,7 @@ output.
 The video below shows the 3D traces of the tracked keypoints across the frames:
 
 <p align="center">
-  <video src="docs/assets/step4_tapip.mp4" alt="3D traces of the tracked keypoints (TAPIP3D)" width="800" controls></video>
+  <img src="docs/assets/step4_tapip.png" alt="3D traces of the tracked keypoints (TAPIP3D)" width="800"/>
 </p>
 
 ## 4. Run Inference
