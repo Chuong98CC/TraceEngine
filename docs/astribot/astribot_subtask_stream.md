@@ -74,7 +74,8 @@ python tools/astribot/run_step2_depth_stream.py \
 
 Default camera is the first non-depth camera key (`cam_head` on this
 dataset). WAFT is **off by default**; add `--with-optical-flow` to run it
-(`weights/waftv2/waftv2_dinov3_i5_640x480_tf32.engine`).
+(WAFTv2 `.pt2`:
+`weights/waftv2/waftv2_dinov3_i5_640x480_bf16.pt2`).
 
 ### 2. Stereo pair with WAFT motion masks
 
@@ -137,7 +138,7 @@ the `extrinsics` (3×4, world→camera), `intrinsics` (3×3) and the depth
 | `--stride` | 4 | subsample every N-th frame; with WAFT also the flow pair gap |
 | `--with-optical-flow` | off | enable WAFT optical-flow motion masks (default: off — full-confidence alignment) |
 | `--motion-threshold`, `-thr` | 2.0 | flow-magnitude (pixel displacement) above which a pixel counts as moving |
-| `--waft-checkpoint` | `weights/waftv2/…tf32.engine` | WAFT checkpoint; backend inferred from `.engine`/`.onnx` |
+| `--waft-checkpoint` | `weights/waftv2/waftv2_dinov3_i5_640x480_bf16.pt2` | WAFTv2 `.pt2` artifact; a `.pt2` path is used as-is, otherwise `.pt2` is appended (legacy `.onnx` / `.engine` rejected) |
 | `--model-path` | backend default | VGGT-Omega artifact override (`.pt2`) |
 | `--anyview-model-path` / `--metric-model-path` | backend default | DA3 any-view / metric-depth `.pt2` overrides |
 | `--config` | `src/depth_models/streaming/configs/base_config.yaml` | alignment library/method, loop-closure settings |

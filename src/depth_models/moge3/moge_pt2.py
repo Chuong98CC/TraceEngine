@@ -6,6 +6,12 @@ run inference, and post-process to camera-space outputs. No export code,
 no visualization, no mesh/ply saving -- preprocessing, inference and
 post-processing only.
 
+Image entry follows the repo-wide contract (``utils.image_io``): ``infer``
+accepts any ``ImageInput`` (path / PIL image / RGB HWC numpy / CHW tensor),
+decoded to a CHW uint8 RGB tensor via :func:`to_image_tensor`, then stretched
+to the fixed graph size and fed to the fp16 graph in [0, 1] (divide by 255,
+no ImageNet normalization).
+
 The exported graph (`weights/moge3/moge3_l.pt2`) contains the dense network
 (DINOv2-L encoder + neck + heads + scale head) compiled for a fixed input
 size (default 640x480) in fp16 with a dynamic batch dimension. The sparse
@@ -18,11 +24,12 @@ intrinsics, depth, metric scale, masking) is done in fp32 exactly like
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from .refiner import Sparse3DUNet
 
-from .utils.preprocess import load_image_bgr, resize_to_fixed, to_input_tensor
 from .utils.postprocess import refine_logz, remap_points_exp, resize_channel_last, affine_to_camera
+from utils.image_io import ImageInput, to_image_tensor, to_pixel_uint8
 
 # Order of the exported graph's outputs; keep in sync with `ExportWrapper.forward`
 # in the (repo-side) export script. Only `moge_pt2` consumes them here.
@@ -40,7 +47,8 @@ class MoGev3_PT2:
 
     Usage:
         model = MoGev3_PT2('weights/moge3/moge3_l.pt2')
-        out = model.infer(image_bgr)   # -> {points, depth, mask, intrinsics, normal}
+        out = model.infer('frame.jpg')  # any ImageInput
+        # -> {points, depth, mask, intrinsics, normal}
     """
 
     def __init__(
@@ -96,21 +104,52 @@ class MoGev3_PT2:
             if got != exp:
                 raise RuntimeError(f'Graph output {name} has shape {got}, expected {exp}')
 
-    def preprocess(self, image_bgr) -> torch.Tensor:
-        """BGR uint8 image -> fp16 CUDA tensor (1, 3, H, W) at the fixed size."""
-        image_bgr = resize_to_fixed(image_bgr, self.width, self.height)
-        return to_input_tensor(image_bgr, self.width, self.height, self.device)
+    # ------------------------------------------------------------------
+    # Image entry (shared repo-wide decode + fixed-size stretch)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _load_image(image: ImageInput) -> torch.Tensor:
+        """Decode any ImageInput into a CHW uint8 RGB tensor (CPU)."""
+        return to_pixel_uint8(to_image_tensor(image))
+
+    @staticmethod
+    def _resize_to_fixed(x: torch.Tensor, h: int, w: int) -> torch.Tensor:
+        """Stretch a CHW uint8 tensor to exactly (h, w); no-op at that size.
+
+        The graph is exported for a fixed size, so the stretch is
+        non-preserving.  Bilinear (``align_corners=False``) is the closest
+        tensor-first surrogate of the legacy cv2 ``INTER_AREA`` stretch
+        (<=1 LSB at integer decimation; the same convention as Any2Full's
+        fixed-size stretch and the eager v3 model's internal bilinear
+        resizes).  Kept tensor-first: no numpy bounce at the feed boundary.
+        """
+        if (x.shape[1], x.shape[2]) == (h, w):
+            return x
+        return F.interpolate(
+            x.float().unsqueeze(0), (h, w), mode="bilinear", align_corners=False
+        )[0].round().byte()
+
+    def preprocess(self, image: ImageInput) -> torch.Tensor:
+        """ImageInput -> fp16 CUDA tensor (1, 3, H, W) at the fixed size.
+
+        Pixel space is RGB (repo-wide contract) and the feed is in [0, 1]
+        (divide by 255, no ImageNet normalization), matching the eager
+        MoGe scripts' convention.
+        """
+        x = self._resize_to_fixed(self._load_image(image), self.height, self.width)
+        return x.float().div(255.0).unsqueeze(0).to(device=self.device, dtype=torch.float16)
 
     @torch.inference_mode()
     def infer(
         self,
-        image_bgr,
+        image: ImageInput,
         fov_x=None,
         force_projection: bool = True,
         apply_mask: bool = True,
         refine_steps: int = None,
     ) -> dict:
-        """Run inference on a BGR uint8 image (H, W, 3).
+        """Run inference on a single image (any ``ImageInput``).
 
         Returns {points, depth, mask, intrinsics, normal} as batched fp32
         CUDA tensors: points/depth/normal (1, H, W, 3|1), mask (1, H, W),
@@ -118,7 +157,7 @@ class MoGev3_PT2:
         """
         if refine_steps is None:
             refine_steps = self.refine_steps
-        x = self.preprocess(image_bgr)
+        x = self.preprocess(image)
         return self.infer_tensor(x, fov_x=fov_x, force_projection=force_projection,
                                  apply_mask=apply_mask, refine_steps=refine_steps)
 
@@ -172,5 +211,5 @@ class MoGev3_PT2:
         return result
 
     def infer_file(self, image_path, **kwargs) -> dict:
-        """Run inference on an image file path."""
-        return self.infer(load_image_bgr(image_path), **kwargs)
+        """Run inference on an image file path (``infer`` accepts paths too)."""
+        return self.infer(image_path, **kwargs)

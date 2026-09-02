@@ -89,7 +89,7 @@ weights
 ├── sam3/
 │   └── sam3_image_exported_bf16.pt2
 ├── waftv2/
-│   └── waftv2_dinov3_i5_640x480.onnx     # ONNX; TRT engine built from it via tools/export_trt.py
+│   └── waftv2_dinov3_i5_640x480_bf16.pt2  # WAFT optical flow (torch.export .pt2, bf16)
 └── tapip3d/
     ├── tapip3d_encoder_480x640_bf16.pt2
     └── tapip3d_iteration_1088_bf16.pt2   # fixed 1088-query iteration model

@@ -122,8 +122,9 @@ def _resolve_checkpoint(checkpoint: str) -> str:
 
     A ``.pt2`` path is used as-is.  An extension-less base name (the
     default) gets ``.pt2`` appended.  Legacy ``.onnx`` / ``.engine``
-    checkpoints are rejected — this tool now runs the WAFTv2 ``torch.export``
-    artifact only.
+    checkpoints are rejected — the WAFT runtimes run the WAFTv2
+    ``torch.export`` artifact only.  Shared by ``infer_waft.py`` and
+    ``tools/astribot/run_step2_depth_stream.py``.
     """
     path = Path(checkpoint)
     ext = path.suffix.lower()
@@ -133,7 +134,7 @@ def _resolve_checkpoint(checkpoint: str) -> str:
     if ext in (".onnx", ".engine"):
         print(
             f"ERROR: '{checkpoint}' is a legacy ONNX / TensorRT checkpoint. "
-            f"infer_waft.py now runs the WAFTv2 torch.export artifact — pass "
+            f"The WAFT tools now run the WAFTv2 torch.export artifact — pass "
             f"a .pt2 path (default: {_DEFAULT_CKPT}.pt2)."
         )
         sys.exit(1)

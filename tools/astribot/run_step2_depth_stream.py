@@ -71,11 +71,16 @@ from depth_models.streaming.da3_streaming import DA3_Streaming
 from depth_models.streaming.loop_utils.config_utils import load_config
 from depth_models.streaming.vggt_omg_streaming import VGGT_OMG_Streaming
 from tools.astribot.extract_frames import DataExtract
-from tools.general_test.module.infer_waft import _compute_motion_mask_gray
+from tools.general_test.module.infer_waft import (
+    _compute_motion_mask_gray,
+    _resolve_checkpoint,
+)
 from tools.general_test.pipeline.run_depth_stream import _report_run_stats
 from utils.visualize_mask import to_pil
 
-DEFAULT_WAFT_CKPT = "weights/waftv2/waftv2_dinov3_i5_640x480_tf32.engine"
+# WAFTv2 torch.export artifact (legacy .engine / .onnx checkpoints are
+# rejected — see _resolve_checkpoint).
+DEFAULT_WAFT_PT2 = "weights/waftv2/waftv2_dinov3_i5_640x480_bf16.pt2"
 
 
 def parse_args(argv: list[str] | None = None):
@@ -122,8 +127,10 @@ def parse_args(argv: list[str] | None = None):
     parser.add_argument("--motion-threshold", "-thr", type=float, default=2.0,
                         help="flow-magnitude (pixel displacement) threshold above which "
                              "a pixel counts as moving (default: %(default)s)")
-    parser.add_argument("--waft-checkpoint", default=DEFAULT_WAFT_CKPT,
-                        help="WAFT checkpoint; backend inferred from .engine/.onnx "
+    parser.add_argument("--waft-checkpoint", default=DEFAULT_WAFT_PT2,
+                        help="WAFTv2 .pt2 artifact; a .pt2 path is used as-is, "
+                             "otherwise .pt2 is appended (legacy .onnx/.engine "
+                             "checkpoints are rejected) "
                              "(default: %(default)s)")
     parser.add_argument("--model-path", default=None,
                         help="VGGT-Omega model artifact path (.pt2); overrides the "
@@ -175,8 +182,7 @@ class OnlineStreaming:
     """
 
     #: frames are stored RGB (dataset PIL RGB kept as-is at fetch); every
-    #: model consumes RGB.  Only the WAFT motion-mask path (untouched, still
-    #: BGR-based) flips back at its call site (_compute_step_masks).
+    #: model consumes RGB — the WAFTv2 motion-mask path included.
 
     def attach(self, wrapper) -> None:
         """Bind the dataset wrapper that provides frames + the WAFT model."""
@@ -295,21 +301,23 @@ class OnlineStreaming:
     # --- helpers ------------------------------------------------------------
 
     def _compute_step_masks(self, t: int) -> list[np.ndarray]:
-        """One motion mask per camera for step t: WAFT flow between the RGB
-        frames (t, t + stride), flipped to BGR for the (untouched, BGR-based)
-        WAFT model.  255 = moving, 0 = static (the stacker above inverts to
+        """One motion mask per camera for step t: WAFTv2 flow between the RGB
+        frames (t, t + stride) — the pt2 model consumes RGB like every other
+        runtime.  255 = moving, 0 = static (the stacker above inverts to
         1 = static, matching the disk-mask convention)."""
         stride = self.wrapper.args.stride
         thr = self.wrapper.args.motion_threshold
         masks = []
         for cam_key in self._cam_keys:
-            def _bgr(key, step):
-                return np.ascontiguousarray(
-                    self._frame_cache[step][key][:, :, ::-1]
-                )
+            def _rgb(key, step):
+                # uint8 HWC RGB from the dataset (no flip — WAFTv2 is RGB)
+                return np.ascontiguousarray(self._frame_cache[step][key])
             flow = self.wrapper.waft_model(
-                _bgr(cam_key, t), _bgr(cam_key, t + stride)
+                _rgb(cam_key, t), _rgb(cam_key, t + stride)
             )
+            # Legacy WAFTBase.__call__ sanitised NaN / Inf before returning;
+            # keep the same parity for the masks below.
+            flow = np.nan_to_num(flow, nan=0.0, posinf=0.0, neginf=0.0)
             masks.append(_compute_motion_mask_gray(flow, thr))
         return masks
 
@@ -405,19 +413,14 @@ class SubtaskStreamExtract(DataExtract):
                 f"vggt_omega for RGB-only cameras.")
 
     def _ensure_waft(self) -> None:
-        """Load the WAFT model (backend inferred from the checkpoint
-        extension, like infer_waft.py)."""
-        ckpt = self.args.waft_checkpoint
-        if ckpt.endswith(".engine"):
-            from flow_models.waft import WAFT
-            print(f"Loading TensorRT engine: {ckpt}")
-            assert os.path.exists(ckpt), f"Checkpoint not found: {ckpt}, please compile the TRT engine first or change to ONNX model, or drop the flag --with-optical-flow . To compile the TRT engine, use command: ./scripts/general_test/export_trt_docker.sh <abs/path/to>/weights/waftv2/waftv2_dinov3_i5_640x480.onnx. "
-            self.waft_model = WAFT(ckpt, bgr_input=True)
-        else:
-            from flow_models.waft import WAFTOnnx
-            print(f"Loading ONNX model: {ckpt}")
-            self.waft_model = WAFTOnnx(ckpt, device=self.args.device,
-                                       bgr_input=True)
+        """Load the WAFTv2 torch.export model (.pt2 artifact) backing the
+        per-chunk motion masks (RGB input — the shared image_io path)."""
+        from flow_models.waftv2.waftv2_pt2 import WAFTv2_PT2
+        ckpt = _resolve_checkpoint(self.args.waft_checkpoint)
+        device = self.args.device or ("cuda" if torch.cuda.is_available()
+                                      else "cpu")
+        print(f"Loading WAFTv2 .pt2 artifact: {ckpt}")
+        self.waft_model = WAFTv2_PT2(ckpt, device=device)
 
     def _ensure_stream(self) -> OnlineStreaming:
         """Construct the streaming backend once; run() is called once per
@@ -455,10 +458,10 @@ class SubtaskStreamExtract(DataExtract):
 
     def _dataset_step(self, t: int) -> dict:
         """Online decode of dataset frame t for all selected cameras: RGB
-        uint8 arrays (the dataset stores PIL RGB; no flip — DA3/VGGT/a2f
-        consume RGB; WAFT masks flip to BGR at the flow call) plus the raw
-        uint16 mm depth of each camera that has a paired depth feature, keyed
-        by the feature key (the a2f prompt)."""
+        uint8 arrays (the dataset stores PIL RGB; no flip — every runtime,
+        WAFTv2 included, consumes RGB) plus the raw uint16 mm depth of each
+        camera that has a paired depth feature, keyed by the feature key (the
+        a2f prompt)."""
         frame = self._ensure_dataset()[t]
         step = {key: np.asarray(to_pil(frame[key]), dtype=np.uint8)
                 for key in self.cam_keys.values()}
