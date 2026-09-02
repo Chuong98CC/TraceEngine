@@ -8,7 +8,8 @@ on the wrappers' plain numpy outputs (``depth``/``conf``/``intrinsics``/
 - ``save_depth_vis`` — colour-coded depth maps saved alongside the original
   images (side-by-side JPEGs).
 - ``export_glb`` — back-projects the depth maps into a coloured world point
-  cloud (+ optional camera frustums) and writes a ``.glb``.
+  cloud (+ optional camera frustums) and writes a ``.glb``; with ``mesh=True``
+  the same file carries a textured triangle mesh instead of the point cloud.
 """
 
 from __future__ import annotations
@@ -18,6 +19,8 @@ from pathlib import Path
 import imageio
 import numpy as np
 import trimesh
+from numpy.lib.stride_tricks import sliding_window_view
+from PIL import Image
 
 import matplotlib
 import numpy as np
@@ -170,12 +173,26 @@ def export_glb(
     ensure_thresh_percentile: float = 90.0,
     show_cameras: bool = True,
     camera_size: float = 0.03,
+    mesh: bool = False,
+    mesh_edge_rtol: float = 0.04,
 ) -> str:
     """Back-project ``depth`` into a coloured world point cloud and write a ``.glb``.
 
     ``depth`` ``(N, H, W)``; ``intrinsics`` ``(N, 3, 3)``; ``extrinsics`` ``(N, 3, 4)``
     or ``(N, 4, 4)`` world-to-camera; ``images_u8`` ``(N, H, W, 3)`` uint8 RGB;
     ``conf`` optional ``(N, H, W)`` used to filter low-confidence points.
+
+    With ``mesh=True`` the point cloud is replaced by a textured triangle
+    mesh: the pixel grid is meshed into triangles over valid 4-corner quads
+    (valid = finite depth > 0 and, if given, ``conf`` above the threshold),
+    each view's RGB image becomes a glTF base-colour texture with per-vertex
+    UVs at pixel centres, and smooth vertex normals are computed (no normal
+    map is available). ``mesh_edge_rtol`` mirrors the edge cleanup of the
+    official MoGe export (``utils3d.np.depth_map_edge``): pixels whose 3x3
+    neighbourhood spans more than ``rtol`` times their depth sit on a depth
+    discontinuity and are dropped, so no triangle stretches across
+    foreground/background silhouettes (``None`` disables the cleanup).
+    ``num_max_points`` applies to the point-cloud mode only.
     """
     depth = np.asarray(depth)
     intrinsics = np.asarray(intrinsics)
@@ -215,21 +232,65 @@ def export_glb(
     else:
         conf_thr = conf_thresh
 
-    # Back-project to world coordinates and pull per-point colours.
-    points, colors = _depths_to_world_points_with_colors(
-        depth_for_points, intrinsics_for_points, extrinsics_for_points, images_for_points, conf_for_points, conf_thr
-    )
+    if not mesh:
+        # ---- point-cloud mode: back-project, pull per-point colours ----
+        points, colors = _depths_to_world_points_with_colors(
+            depth_for_points, intrinsics_for_points, extrinsics_for_points, images_for_points, conf_for_points, conf_thr
+        )
 
-    # Align to the first camera in glTF axes, centred on the point cloud.
-    A = _compute_alignment_transform_first_cam_glTF_center_by_points(extrinsics[0], points)
-    if points.shape[0] > 0:
-        points = trimesh.transform_points(points, A)
+        # Align to the first camera in glTF axes, centred on the point cloud.
+        A = _compute_alignment_transform_first_cam_glTF_center_by_points(extrinsics[0], points)
+        if points.shape[0] > 0:
+            points = trimesh.transform_points(points, A)
 
-    points, colors = _filter_and_downsample(points, colors, num_max_points)
+        points, colors = _filter_and_downsample(points, colors, num_max_points)
+    else:
+        # ---- mesh mode: unproject each view on its full pixel grid ----
+        # (the same rays/scale math as the point-cloud path, but keeping the
+        # pixel structure so the grid can be meshed into quads).
+        grids, valids = [], []
+        for i in range(depth_for_points.shape[0]):
+            depth_i = depth_for_points[i]
+            if images_for_points[i].shape[:2] != depth_i.shape:
+                raise ValueError(
+                    f"View {i}: image {images_for_points[i].shape[:2]} must match depth {depth_i.shape} "
+                    "(mesh mode textures the depth grid)"
+                )
+            grid, valid = _unproject_to_world_grid(
+                depth_i, intrinsics_for_points[i], extrinsics_for_points[i]
+            )
+            if conf_for_points is not None:
+                valid &= conf_for_points[i] >= conf_thr
+            grids.append(grid)
+            valids.append(valid)
+
+        # Align to the first camera in glTF axes, centred on the valid points
+        # (same set the point-cloud path would centre on).
+        flat = np.concatenate([g[v] for g, v in zip(grids, valids)], axis=0)
+        A = _compute_alignment_transform_first_cam_glTF_center_by_points(extrinsics[0], flat)
+
+        meshes = []
+        for i, grid in enumerate(grids):
+            valid = valids[i]
+            if mesh_edge_rtol is not None:
+                valid &= ~_depth_edge_mask(depth_for_points[i], valid, mesh_edge_rtol)
+            h_i, w_i = grid.shape[:2]
+            grid_aligned = trimesh.transform_points(grid.reshape(-1, 3), A).reshape(h_i, w_i, 3)
+            mesh_i = _textured_mesh_from_grid(grid_aligned, valid, images_for_points[i])
+            if mesh_i is not None:
+                meshes.append(mesh_i)
+        # Aligned mesh vertices double as the scene-scale reference below.
+        points = (
+            np.concatenate([m.vertices for m in meshes], axis=0)
+            if meshes else np.zeros((0, 3), dtype=np.float32)
+        )
 
     scene = trimesh.Scene()
     scene.metadata = {"hf_alignment": A}
-    if points.shape[0] > 0:
+    if mesh:
+        for m in meshes:
+            scene.add_geometry(m)
+    elif points.shape[0] > 0:
         scene.add_geometry(trimesh.points.PointCloud(vertices=points, colors=colors))
 
     if show_cameras:
@@ -306,6 +367,142 @@ def _depths_to_world_points_with_colors(
     if len(pts_all) == 0:
         return np.zeros((0, 3), dtype=np.float32), np.zeros((0, 3), dtype=np.uint8)
     return np.concatenate(pts_all, 0), np.concatenate(col_all, 0)
+
+
+# ---------------------------------------------------------------------------
+# Textured-mesh mode helpers (depth grid -> triangle mesh)
+# ---------------------------------------------------------------------------
+
+
+def _unproject_to_world_grid(
+    depth: np.ndarray,
+    K: np.ndarray,
+    ext_w2c: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Unproject one depth map to world points on its full pixel grid.
+
+    ``depth`` ``(H, W)``; ``K`` ``(3, 3)`` pixel intrinsics; ``ext_w2c``
+    ``(4, 4)``/``(3, 4)`` world-to-camera. Returns ``(points, valid)`` with
+    ``points`` ``(H, W, 3)`` float64 world coordinates (NaN where invalid)
+    and ``valid`` ``(H, W)`` bool (finite depth > 0). Same rays/scale math as
+    ``_depths_to_world_points_with_colors``, minus the flattening.
+    """
+    h, w = depth.shape
+    ys, xs = np.mgrid[:h, :w]
+    pix = np.stack([xs, ys, np.ones_like(xs)], axis=-1).astype(np.float64)  # (H, W, 3)
+
+    k_inv = np.linalg.inv(np.asarray(K, dtype=np.float64))
+    c2w = np.linalg.inv(_as_homogeneous44(ext_w2c).astype(np.float64))
+    d = np.asarray(depth, dtype=np.float64)
+
+    rays = np.einsum("ij,hwj->hwi", k_inv, pix)
+    xc_h = np.concatenate(
+        [(rays * d[..., None]).reshape(-1, 3), np.ones((h * w, 1), dtype=np.float64)], axis=1
+    )
+    points = (c2w @ xc_h.T).T[:, :3].reshape(h, w, 3)
+
+    valid = np.isfinite(depth) & (depth > 0)
+    points[~valid] = np.nan
+    return points, valid
+
+
+def _depth_edge_mask(depth: np.ndarray, valid: np.ndarray, rtol: float) -> np.ndarray:
+    """Pixels on depth discontinuities: 3x3 neighbourhood spans > ``rtol * depth``.
+
+    Mirrors the edge cleanup of the official MoGe export
+    (``utils3d.np.depth_map_edge`` with ``rtol=threshold``): meshing quads
+    that touch such a pixel would stretch a triangle across
+    foreground/background, so those pixels are excluded from the mesh.
+    Invalid neighbours are ignored (grid connectivity is already enforced by
+    the quad-validity check in ``_grid_faces``).
+    """
+    d = np.where(valid, np.asarray(depth, dtype=np.float64), np.nan)
+    win = sliding_window_view(np.pad(d, 1, constant_values=np.nan), (3, 3))
+    rng = np.nanmax(win, axis=(-2, -1)) - np.nanmin(win, axis=(-2, -1))
+    above = np.where(np.isnan(rng), False, rng > rtol * d)
+    return valid & above
+
+
+def _grid_faces(keep: np.ndarray) -> np.ndarray:
+    """Triangulate the valid quads of a pixel-grid mask into ``(T, 3)`` faces.
+
+    ``keep`` ``(H, W)`` bool; a quad between four valid neighbours becomes two
+    triangles. Face indices refer to the flattened ``(H * W)`` grid (row-major).
+    """
+    h, w = keep.shape
+    quad = (
+        keep[:-1, :-1] & keep[1:, :-1] & keep[1:, 1:] & keep[:-1, 1:]
+    )
+    r = np.arange(h - 1)[:, None]
+    c = np.arange(w - 1)[None, :]
+    f00 = r * w + c  # top-left corner of each quad
+    return np.concatenate(
+        [
+            np.stack([f00, f00 + w, f00 + w + 1], axis=-1)[quad],  # ↘ diagonal
+            np.stack([f00, f00 + w + 1, f00 + 1], axis=-1)[quad],
+        ],
+        axis=0,
+    )
+
+
+def _textured_mesh_from_grid(
+    pts_world: np.ndarray,
+    keep: np.ndarray,
+    image_u8: np.ndarray,
+) -> trimesh.Trimesh | None:
+    """Build a textured trimesh from aligned world points on a pixel grid.
+
+    ``pts_world`` ``(H, W, 3)`` already glTF-aligned; ``keep`` ``(H, W)`` bool
+    pixel mask; ``image_u8`` ``(H, W, 3)`` uint8 RGB at the same resolution.
+    The image becomes the glTF base-colour texture with UVs at pixel centres
+    (``((c + 0.5) / W, (h - r - 0.5) / H)``, v measured from the image bottom,
+    matching the official MoGe export); smooth vertex normals are computed
+    (no normal map is available). Returns None when no quad survives.
+    Mirrors the official MoGe ``save_glb`` (PBR material, ``process=False``
+    so topology is kept as built).
+    """
+    h, w = keep.shape
+    faces = _grid_faces(keep)
+    if faces.size == 0:
+        return None
+
+    # Drop vertices no face references (grid pixels whose quad was invalid).
+    vidx = np.unique(faces)
+    remap = np.full(h * w, -1, dtype=np.int64)
+    remap[vidx] = np.arange(vidx.size)
+    faces = remap[faces]
+
+    rr, cc = np.divmod(vidx, w)
+    # Pixel-centre UVs with v measured from the image *bottom* (OpenGL-style
+    # texture coordinates) — exactly the per-pixel values the official MoGe
+    # export produces (utils3d's bottom-origin uv_map flipped y to glTF);
+    # viewers that sample that file upright would mirror a top-origin one.
+    uv = np.stack([(cc + 0.5) / w, (h - rr - 0.5) / h], axis=-1).astype(np.float32)
+    vertices = pts_world.reshape(-1, 3)[vidx].astype(np.float32)
+
+    # Smooth vertex normals from the triangle soup (mean of the incident
+    # face normals, renormalized).
+    tri = vertices[faces]
+    face_normals = np.cross(tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0])
+    vertex_normals = trimesh.geometry.mean_vertex_normals(
+        vertices.shape[0], faces, face_normals
+    )
+    vertex_normals /= np.linalg.norm(vertex_normals, axis=1, keepdims=True) + 1e-12
+
+    return trimesh.Trimesh(
+        vertices=vertices,
+        faces=faces,
+        vertex_normals=vertex_normals,
+        visual=trimesh.visual.texture.TextureVisuals(
+            uv=uv,
+            material=trimesh.visual.material.PBRMaterial(
+                baseColorTexture=Image.fromarray(image_u8),
+                metallicFactor=0.5,
+                roughnessFactor=1.0,
+            ),
+        ),
+        process=False,
+    )
 
 
 def _filter_and_downsample(points: np.ndarray, colors: np.ndarray, num_max: int):

@@ -1,13 +1,17 @@
 """MoGe v3 inference on a single image, via the torch.export (PT2) runtime:
-depth image (.npy/.png) + coloured point cloud (.glb).
+depth image (.npy/.png) + textured mesh (.glb) + official-reference mesh.
 
 Loads the exported dense graph + the eager sparse refiner, runs MoGe v3 on a
 single image and exports:
   - metric depth as .npy and a colour-coded .png (Spectral_r, min-max
     normalized over valid pixels),
-  - a coloured point cloud (.glb) back-projected with the model's estimated
-    intrinsics and identity extrinsics (monocular output is in camera space;
-    masked-out pixels are zeroed).
+  - a textured triangle mesh (.glb) via export_glb, back-projected with the
+    model's estimated intrinsics (rescaled to pixels) and identity
+    extrinsics (monocular output is in camera space; masked-out pixels are
+    zeroed),
+  - an official-MoGe-recipe reference mesh ({stem}_mesh.glb) built straight
+    from the model's camera-space points with utils3d (depth-edge-cleaned
+    grid mesh; uncentred).
 
 The graph is compiled for a fixed 640x480 input (non-preserving resize), so
 any input size is accepted; depth is output at that fixed resolution.
@@ -19,19 +23,23 @@ Examples:
 """
 
 import argparse
+import os
 import time
 from pathlib import Path
-import os
-from typing import Union, Optional
+from typing import Optional, Union
+
 import cv2
 import matplotlib
 import numpy as np
 from PIL import Image
 
+import utils3d_moge as utils3d
+
 from depth_models.moge3.moge_pt2 import MoGev3_PT2
 from utils.visualize.visualize_depth import export_glb
 
-def save_glb(
+
+def save_mesh_glb(
     save_path: Union[str, os.PathLike],
     vertices: np.ndarray,
     faces: np.ndarray,
@@ -39,44 +47,63 @@ def save_glb(
     texture: np.ndarray,
     vertex_normals: Optional[np.ndarray] = None,
 ):
+    """Write a textured trimesh .glb; mirrors the official MoGe io.save_glb."""
     import trimesh
     import trimesh.visual
-    from PIL import Image
 
     trimesh.Trimesh(
         vertices=vertices,
         vertex_normals=vertex_normals,
         faces=faces,
-        visual = trimesh.visual.texture.TextureVisuals(
+        visual=trimesh.visual.texture.TextureVisuals(
             uv=vertex_uvs,
             material=trimesh.visual.material.PBRMaterial(
                 baseColorTexture=Image.fromarray(texture),
                 metallicFactor=0.5,
-                roughnessFactor=1.0
-            )
+                roughnessFactor=1.0,
+            ),
         ),
-        process=False
+        process=False,
     ).export(save_path)
 
 
-def save_ply(
-    save_path: Union[str, os.PathLike],
-    vertices: np.ndarray,
-    faces: np.ndarray,
-    vertex_colors: np.ndarray,
-    vertex_normals: Optional[np.ndarray] = None,
-):
-    import trimesh
-    import trimesh.visual
-    from PIL import Image
+def build_mesh(points, image, normal, depth, mask, threshold):
+    """Official MoGe mesh construction; mirrors moge/scripts/infer.py.
 
-    trimesh.Trimesh(
-        vertices=vertices,
-        faces=faces,
-        vertex_colors=vertex_colors,
-        vertex_normals=vertex_normals,
-        process=False
-    ).export(save_path)
+    Meshes the model's camera-space point map into a textured grid mesh,
+    first dropping pixels on depth discontinuities (3x3 depth range above
+    ``threshold`` relative) so no triangle bridges a silhouette. ``image`` is
+    uint8 RGB at the grid resolution (used as the texture; vertex colours are
+    a side product). Returns (faces, vertices, vertex_colors, vertex_uvs,
+    vertex_normals) already in OpenGL export conventions: vertices flipped
+    ``* [1, -1, -1]`` and UVs y-flipped to the bottom-left texture origin.
+    """
+    height, width = points.shape[:2]
+    mask_cleaned = mask & ~utils3d.np.depth_map_edge(depth, rtol=threshold)
+    if normal is None:
+        faces, vertices, vertex_colors, vertex_uvs = utils3d.np.build_mesh_from_map(
+            points,
+            image.astype(np.float32) / 255,
+            utils3d.np.uv_map(height, width),
+            mask=mask_cleaned,
+            tri=True,
+        )
+        vertex_normals = None
+    else:
+        faces, vertices, vertex_colors, vertex_uvs, vertex_normals = utils3d.np.build_mesh_from_map(
+            points,
+            image.astype(np.float32) / 255,
+            utils3d.np.uv_map(height, width),
+            normal,
+            mask=mask_cleaned,
+            tri=True,
+        )
+    # OpenGL conventions for export: x right, y up, z backward; texture (0,0) left-bottom.
+    vertices, vertex_uvs = vertices * [1, -1, -1], vertex_uvs * [1, -1] + [0, 1]
+    if vertex_normals is not None:
+        vertex_normals = vertex_normals * [1, -1, -1]
+    return faces, vertices, vertex_colors, vertex_uvs, vertex_normals
+
 
 def _save_depth_outputs(depth: np.ndarray, out_base: Path, grayscale: bool) -> None:
     out_base.parent.mkdir(parents=True, exist_ok=True)
@@ -156,7 +183,17 @@ def main() -> None:
     print(f"Saved depth: {out_base}.npy, {out_base}.png")
 
     # ---- point cloud: model-estimated intrinsics, identity extrinsics ----
+    # MoGe's intrinsics are expressed in utils3d's normalized-uv space
+    # (principal point at 0.5, focal in image-extent units), while export_glb
+    # back-projects on an integer pixel grid — rescale to pixels so the
+    # geometry matches the model's own unprojected points (uv_map samples
+    # pixel centers at (j + 0.5)/W, hence the -0.5 on the principal point).
     K = out["intrinsics"].squeeze(0).cpu().numpy().astype(np.float64)  # (3, 3)
+    h, w = pred.shape
+    K[0, 0] *= w          # fx in pixels
+    K[1, 1] *= h          # fy in pixels
+    K[0, 2] = K[0, 2] * w - 0.5
+    K[1, 2] = K[1, 2] * h - 0.5
     glb_path = out_dir / f"{Path(args.input).stem}.glb"
     export_glb(
         depth=pred[None],
@@ -165,8 +202,25 @@ def main() -> None:
         images_u8=rgb_u8[None].astype(np.uint8),
         conf=None,
         out_path=str(glb_path),
+        mesh=True,  # textured surface mesh (official-MoGe-style) in the .glb
     )
     print(f"Saved glb : {glb_path}")
+
+    # ---- official MoGe reference mesh: utils3d grid mesh built straight
+    # from the model's camera-space points (no re-unprojection), cleaned at
+    # depth edges with rtol=0.04 -> {stem}_mesh.glb ----
+    threshold = 0.04  # relative depth-edge tolerance for the quad grid
+    glb_path_2 = out_dir / f"{Path(args.input).stem}_mesh.glb"
+    faces, vertices, vertex_colors, vertex_uvs, vertex_normals = build_mesh(
+        points=out["points"][0].cpu().numpy(),
+        image=rgb_u8,
+        normal=out["normal"][0].cpu().numpy(),
+        depth=out["depth"][0].cpu().numpy(),
+        mask=out["mask"][0].cpu().numpy(),
+        threshold=threshold,
+    )
+    save_mesh_glb(glb_path_2, vertices, faces, vertex_uvs, rgb_u8, vertex_normals)
+    print(f"Saved glb : {glb_path_2}")
 
     valid = pred > 0
     if valid.any():
