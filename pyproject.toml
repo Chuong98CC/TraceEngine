@@ -52,6 +52,8 @@ dependencies = [
     "lerobot[dataset]",
     "lz4",
     "rich",
+    "flex_gemm",
+    "utils3d_moge",
 ]
 
 [project.optional-dependencies]
@@ -69,7 +71,11 @@ torchvision = { index = "pytorch-cu128" }
 # pointops2's setup.py imports torch at build time, so it must build inside the
 # project environment (no build isolation).
 pointops2 = { path = "third_party/pointops2" }
-
+# flex_gemm (FlexGEMM) has no PyPI release — git install at a pinned commit.
+# Default build is pure-Triton (no compile); the optional CUDA extension
+# (FLEX_GEMM_BUILD_CUDA=1) would additionally need no-build-isolation.
+flex_gemm = { git = "https://github.com/JeffreyXiang/FlexGEMM.git", rev = "b2fadb29d41846c7981ade6801ffc689fae119cf" }
+utils3d_moge ={git ="https://github.com/EasternJournalist/utils3d-moge.git", rev = "62f09d58509485564e24d5d9f6aac9ee9ebc0c37" }
 
 [tool.uv]
 # pointops2's setup.py imports torch at build time, so it must build inside the
