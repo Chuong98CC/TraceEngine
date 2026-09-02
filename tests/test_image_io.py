@@ -83,10 +83,23 @@ def test_letterbox_meta_trunc2_exact():
 
 
 def test_letterbox_matches_cv2_reference():
+    # 360x700 -> 480x640: raw = min(640/700, 480/360) = 640/700 ~= 0.9142857.
+    # A 360x640 source would be raw = 1.0 (no resampling in either mode), so
+    # use a non-representable downscale + odd pad so the cv2 comparison
+    # genuinely exercises the interpolation kernels.
+    expected = {
+        "trunc2": {"orig_h": 360, "orig_w": 700, "scale_factor": 0.91,
+                   "tile_h": 327, "tile_w": 637, "pad_top": 76, "pad_left": 1},
+        # round: scale = 640/700 raw; tile 700*640/700 -> 640 (w), 360*640/700
+        # -> round(329.1428) = 329 (h); pad_h 151 -> top 75, pad_w 0.
+        "round": {"orig_h": 360, "orig_w": 700, "scale_factor": 640 / 700,
+                  "tile_h": 329, "tile_w": 640, "pad_top": 75, "pad_left": 0},
+    }
     for scale_mode in ("trunc2", "round"):
-        x = _rand_chw(seed=7)
+        x = _rand_chw(seed=7, h=360, w=700)
         hwc = x.permute(1, 2, 0).numpy()
         padded, meta = letterbox(x, 480, 640, scale_mode=scale_mode)
+        assert meta == expected[scale_mode]
         ref, _, _, _, _ = _cv2_letterbox(hwc, 480, 640, scale_mode)
         ref_t = torch.from_numpy(ref).permute(2, 0, 1)
         assert padded.shape == ref_t.shape

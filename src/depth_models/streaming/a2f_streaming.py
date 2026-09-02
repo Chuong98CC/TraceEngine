@@ -144,7 +144,7 @@ class A2F_Streaming(BaseStreaming):
         # parallel raw-depth list built by _load_depth_paths.
         rgb_paths = self.img_list[start:end]
         if self._depth_shape is None:
-            # Online mode swaps BGR arrays into img_list (see
+            # Online mode swaps RGB arrays into img_list (see
             # tools/astribot/run_step2_depth_stream.py), so the reference frame
             # may be an array instead of a path.
             first = rgb_paths[0]

@@ -14,12 +14,9 @@ The exported graph runs with init_scaling disabled; the scale recovery
 is re-implemented here as post-processing, deterministically (no jitter).
 """
 
-import os
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from PIL import Image
 import numpy as np
 
 from .utils import remove_outliers
