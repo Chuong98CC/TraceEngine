@@ -8,17 +8,27 @@ resolution.
 
 The artifact is a static-shape ExportedProgram: images must be resized /
 padded to the exported ``(target_h, target_w)`` geometry before the run.
+Image entry follows the repo-wide contract (``utils.image_io``): each input
+may be any ``ImageInput`` (path / PIL image / RGB HWC numpy / CHW tensor)
+and is decoded to a CHW uint8 RGB tensor via :func:`to_image_tensor`, then
+letterboxed with the shared trunc2 geometry (identical to the legacy
+WAFT letterboxes) before the bf16 feed — the exported model normalizes
+internally, so the feed stays in [0, 255].
 """
 
 from __future__ import annotations
 
 import os
 
-import numpy as np
 import torch
 import cv2
 
-from .utils.img_utils import bgr_to_rgb, letterbox, load_image, to_model_input
+from utils.image_io import (
+    ImageInput,
+    letterbox,
+    to_image_tensor,
+    to_pixel_uint8,
+)
 
 _DTYPE = torch.bfloat16  # the pt2 artifacts are exported in bf16
 
@@ -29,7 +39,7 @@ def postprocess_flow(flow: torch.Tensor, meta: dict) -> np.ndarray:
         flow: Model output ``[1, 2, H, W]`` (bf16, any device) at the
             letterboxed ``(target_h, target_w)`` resolution.
         meta: Letterbox metadata from
-            :func:`infer_pt2.utils.img_utils.letterbox` (of image 1).
+            :func:`utils.image_io.letterbox` (of image 1).
 
     Returns:
         np.ndarray: Flow of shape ``(orig_h, orig_w, 2)``, float32 (values
@@ -62,13 +72,10 @@ class WAFTv2_PT2:
     Parameters
     ----------
     pt2_path : str
-        Path to the ``.pt2`` artifact (see ``infer_pt2/export_pt2.py``).
+        Path to the ``.pt2`` bf16 artifact.
     device : str
         ``"cuda"`` or ``"cpu"``.  The artifact stores bf16 weights, which are
         moved to this device at load time.
-    bgr_input : bool
-        If ``True`` (default), input images are BGR (OpenCV convention) and
-        are converted to RGB internally.
     target_h, target_w : int, optional
         Override the model input geometry.  If ``None`` (default) the size
         is read from the exported graph placeholders.
@@ -78,7 +85,6 @@ class WAFTv2_PT2:
         self,
         pt2_path: str,
         device: str = "cuda",
-        bgr_input: bool = True,
         target_h: int | None = None,
         target_w: int | None = None,
     ) -> None:
@@ -87,7 +93,6 @@ class WAFTv2_PT2:
 
         self.pt2_path = pt2_path
         self.device = device
-        self._bgr_input = bgr_input
         self._meta: dict | None = None  # set by preprocess
 
         # ── Load artifact & move weights to the target device ─────────────
@@ -150,13 +155,21 @@ class WAFTv2_PT2:
     # Preprocessing
     # ------------------------------------------------------------------
 
-    def preprocess(self, img1, img2) -> dict[str, torch.Tensor]:
+    @staticmethod
+    def _load_image(image: ImageInput) -> torch.Tensor:
+        """Decode any ImageInput into a CHW uint8 RGB tensor (CPU)."""
+        return to_pixel_uint8(to_image_tensor(image))
+
+    def preprocess(self, img1: ImageInput, img2: ImageInput) -> dict[str, torch.Tensor]:
         """Preprocess a pair of images into a feed dict for the artifact.
 
         Parameters
         ----------
-        img1, img2 : str or np.ndarray
-            Path to the image, or uint8 H×W×3 array.
+        img1, img2 : ImageInput
+            Any accepted image form — a path, a PIL image, an RGB HWC uint8
+            numpy array or a CHW tensor (see ``utils.image_io.ImageInput``).
+            Pixel space is RGB; the legacy BGR/``bgr_input`` handling was
+            removed in the unified image-input refactor.
 
         Returns
         -------
@@ -166,12 +179,8 @@ class WAFTv2_PT2:
             normalizes internally).  Also stores letterbox metadata in
             ``self._meta`` for :meth:`postprocess`.
         """
-        img1 = load_image(img1)
-        img2 = load_image(img2)
-
-        if self._bgr_input:
-            img1 = bgr_to_rgb(img1)
-            img2 = bgr_to_rgb(img2)
+        img1 = self._load_image(img1)
+        img2 = self._load_image(img2)
 
         # Letterbox (metadata from image1 drives both for consistency)
         img1_padded, meta = letterbox(img1, self.target_h, self.target_w)
@@ -179,8 +188,8 @@ class WAFTv2_PT2:
         self._meta = meta
 
         return {
-            "image1": to_model_input(img1_padded, _DTYPE, self.device),
-            "image2": to_model_input(img2_padded, _DTYPE, self.device),
+            "image1": img1_padded.unsqueeze(0).to(device=self.device, dtype=_DTYPE),
+            "image2": img2_padded.unsqueeze(0).to(device=self.device, dtype=_DTYPE),
         }
 
     # ------------------------------------------------------------------
@@ -232,13 +241,14 @@ class WAFTv2_PT2:
     # Convenience
     # ------------------------------------------------------------------
 
-    def __call__(self, img1, img2) -> np.ndarray:
+    def __call__(self, img1: ImageInput, img2: ImageInput) -> np.ndarray:
         """Run the full pipeline: preprocess → infer → postprocess.
 
         Parameters
         ----------
-        img1, img2 : str or np.ndarray
-            Image paths or uint8 H×W×3 arrays.
+        img1, img2 : ImageInput
+            Image paths, PIL images, RGB HWC uint8 numpy arrays or CHW
+            tensors.
 
         Returns
         -------

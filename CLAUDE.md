@@ -171,9 +171,11 @@ Model-specific wrappers:
   `preprocess` / `infer` / `postprocess`; see the Any2Full section below.
 - `WAFTOnnx(WAFTBase, ONNXModel)` / `WAFT(WAFTBase, TRTModel)` — optical flow
   (legacy exception: BGR numpy in, flow out — the repo's only non-RGB
-  runtime); `infer_waft.py --backend trt|onnx`. `WAFTv2_PT2`
-  (`flow_models/waftv2/`) is the torch.export `.pt2` runtime, still BGR/numpy
-  until the unified pipeline replaces it.
+  runtime; its own cv2/numpy `_load_image` + `bgr_input`), used for motion
+  masks by `tools/astribot/run_step2_depth_stream.py`. `WAFTv2_PT2`
+  (`flow_models/waftv2/`, driven by `tools/general_test/module/infer_waft.py`)
+  is the torch.export `.pt2` runtime — unified on the shared `image_io` path:
+  RGB `ImageInput` + tensor-first trunc2 `letterbox`, bf16 [0,255] feed.
 - `Tapip3D_PT2` / `Tapip3DStreamPT2` (`flow_models/tapip3d/`) — TAPIP3D
   torch.export stream runtime: encoder + fused corr/updater iteration
   programs, sliding-window orchestration. SAM3 — standalone `torch.export`
@@ -319,11 +321,14 @@ Only `tf32` (default, fp32 data with TF32 tensor-core math) and `fp32`
   normalize all run as torch ops via the shared `src/utils/image_io.py`
   helpers (`to_image_tensor`, `to_pixel_uint8`, `letterbox`,
   `imagenet_normalize`), so `torch.export` graphs receive tensors straight
-  from preprocess — no numpy bounce at the feed boundary. **WAFT is the
-  legacy exception** — BGR + numpy + cv2, its own `_load_image` and
-  `bgr_input` (the `.pt2` `WAFTv2_PT2` is still BGR/numpy too) — until the
-  unified pipeline replaces it; call sites that feed it flip RGB→BGR locally
+  from preprocess — no numpy bounce at the feed boundary. **The
+  `flow_models/waft` ONNX/TRT backends are the legacy exception** — BGR +
+  numpy + cv2, their own `_load_image` and `bgr_input` — until the unified
+  pipeline replaces them; call sites that feed them flip RGB→BGR locally
   (e.g. `tools/astribot/run_step2_depth_stream.py`'s motion-mask path).
+  `WAFTv2_PT2` (`flow_models/waftv2/`) follows the unified path: shared
+  `_load_image` decode to CHW uint8 RGB, shared trunc2 `letterbox`, feed in
+  [0, 255] (the exported graph normalizes internally).
 - **DA3 preprocessing** (`BaseDA3Model`): shared `_load_image`, then
   `letterbox(scale_mode="trunc2")` — aspect-preserving resize with a
   2-decimal-truncated uniform scale, center-pad — and `imagenet_normalize`
@@ -344,8 +349,10 @@ Only `tf32` (default, fp32 data with TF32 tensor-core math) and `fp32`
   output is metric depth (fp32).
 - **RoMaV2** (`RoMaV2PT2`): `_load_image` is decode-only; the float/255,
   batching and device moves happen in `match_pair`.
-- **WAFT**: BGR input by default (legacy exception, see above); motion masks
-  from flow-magnitude threshold (pixels >127 are moving).
+- **WAFT** (`flow_models/waft`, ONNX/TRT): BGR input by default (legacy
+  exception, see above); motion masks from flow-magnitude threshold (pixels
+  >127 are moving). **WAFTv2** (`WAFTv2_PT2`, `.pt2`): unified RGB
+  `ImageInput`, bf16 [0,255] feed to a graph that normalizes internally.
 - **TAPIP3D**: the shared frame loader `utils.streaming_utils.load_batch_frames`
   decodes via `image_io` into `[T, 3, H, W]` uint8; the `.pt2` iteration
   program is exported for a **fixed query count (1088)** — an 8×8 bbox grid

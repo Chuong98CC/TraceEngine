@@ -149,7 +149,7 @@ def create_model(args: argparse.Namespace):
     """Create the WAFTv2_PT2 model (bf16 torch.export .pt2 artifact)."""
     ckpt_path = _resolve_checkpoint(args.checkpoint)
     print(f"Loading PT2 artifact: {ckpt_path}")
-    return WAFTv2_PT2(ckpt_path, device=args.device, bgr_input=not args.no_bgr_input)
+    return WAFTv2_PT2(ckpt_path, device=args.device)
 
 
 # ---------------------------------------------------------------------------
@@ -319,8 +319,14 @@ def infer_frames(args: argparse.Namespace) -> None:
         if not ret:
             break  # EOF
 
-        # Run inference — model.__call__ handles pre/post processing
-        flow = model(frame_a, frame_b)  # → [H_orig, W_orig, 2] float32
+        # Run inference — model.__call__ handles pre/post processing.  The
+        # model takes RGB (repo-wide pixel-space contract); cv2 frames are
+        # BGR, so flip at this boundary (frames stay BGR for the video /
+        # overlay encoders below).
+        flow = model(
+            cv2.cvtColor(frame_a, cv2.COLOR_BGR2RGB),
+            cv2.cvtColor(frame_b, cv2.COLOR_BGR2RGB),
+        )  # → [H_orig, W_orig, 2] float32
 
         # Legacy WAFTBase.__call__ sanitised NaN / Inf before returning;
         # keep the same parity for downstream masks / .flo / viz outputs.
@@ -460,11 +466,6 @@ def main() -> None:
         type=str,
         choices=["cuda", "cpu"],
         help="Device to run the .pt2 artifact on (default: cuda).",
-    )
-    parser.add_argument(
-        "--no-bgr-input",
-        action="store_true",
-        help="Images are already RGB (skip internal BGR→RGB conversion).",
     )
 
     args = parser.parse_args()

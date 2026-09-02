@@ -31,7 +31,10 @@ python tools/general_test/module/infer_waft.py --input video.mp4 \
 | `--max-frames` | until EOF | Max number of frame **pairs** to process |
 | `--motion-threshold`, `-thr` | — | Pixel-displacement threshold for the binary moving-pixel mask (required for `mask` / `flow-mask`) |
 | `--device` | `cuda` | Device to run the `.pt2` artifact on (`cuda` / `cpu`) |
-| `--no-bgr-input` | off | Images are already RGB (skip internal BGR→RGB conversion) |
+
+Inputs follow the repo-wide image contract: RGB pixel space via
+`utils.image_io` (paths, PIL images, RGB HWC numpy arrays or CHW tensors are
+all accepted; cv2 frames are converted to RGB at the call site).
 
 **Output** — under `<output-dir>/<video_name>/`: `flow/flow.mp4` (colour
 wheel), `raw/frame_*.flo` (Middlebury format), `overlay/overlay.mp4`,
@@ -43,8 +46,10 @@ motion masks on a demo frame folder).
 
 ## Notes
 
-- Inputs use the same letterbox pipeline as DA3 (no ImageNet normalization).
-  Flow is rescaled and cropped back to the original resolution on output.
+- Inputs use the shared trunc2 letterbox from `utils.image_io` (same geometry
+  as DA3; no ImageNet normalization — the exported graph normalizes
+  internally, so the bf16 feed is in [0, 255]). Flow is rescaled and cropped
+  back to the original resolution on output.
 - **Flow format**: `[H, W, 2]` float32 array where `[:,:,0]` = horizontal
   displacement (dx) and `[:,:,1]` = vertical displacement (dy). Raw output is
   saved in the standard `.flo` (Middlebury) format.
