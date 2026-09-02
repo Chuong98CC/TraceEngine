@@ -20,20 +20,15 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from PIL import Image
-import torchvision.transforms as T
 import numpy as np
 
 from .utils import remove_outliers
-from utils.image_io import ImageInput, to_image_tensor
-
-
-def _load_rgb(rgb: ImageInput) -> torch.Tensor:
-    """Convert any ImageInput to a float CHW [0, 1] tensor."""
-    rgb = to_image_tensor(rgb)                     # uint8 CHW [0, 255] (or float CHW)
-    if rgb.dtype == torch.uint8:
-        rgb = rgb.float() / 255.0
-    rgb = T.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225))(rgb)
-    return rgb.unsqueeze(0)
+from utils.image_io import (
+    ImageInput,
+    imagenet_normalize,
+    to_image_tensor,
+    to_pixel_uint8,
+)
 
 
 class Any2Full_PT2(nn.Module):
@@ -63,9 +58,15 @@ class Any2Full_PT2(nn.Module):
             x = F.interpolate(x, size=(exp_h, exp_w), mode=mode, align_corners=None)
         return x
 
-    def preprocess(self, rgb_path: str, depth_metrics: np.ndarray,
+    def _load_image(self, rgb: ImageInput) -> torch.Tensor:
+        """Decode any ImageInput into a CHW uint8 RGB tensor (CPU)."""
+        return to_pixel_uint8(to_image_tensor(rgb))
+
+    def preprocess(self, rgb: ImageInput, depth_metrics: np.ndarray,
                    denoise: bool = False, denoise_kwargs=None) -> tuple:
-        rgb = _load_rgb(rgb_path).to(device=self.device, dtype=self.dtype)
+        rgb = imagenet_normalize(self._load_image(rgb)).unsqueeze(0).to(
+            device=self.device, dtype=self.dtype
+        )
         if denoise:
             depth_metrics = remove_outliers(depth_metrics, **(denoise_kwargs or {}))
         # Input sanity check (mirrors the former in-graph assert in
