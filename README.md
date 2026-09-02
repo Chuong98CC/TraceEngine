@@ -159,6 +159,14 @@ Each subtask has a start frame, an end frame, and several key-frames.
   motion**, similar to the gripper (To-Do). Otherwise, they can be uniformly
   sampled, e.g. every 1–2 seconds.
 
+The figure below shows the detected key-frame indexes of an episode: each
+subtask spans from its start frame to its end frame, with the key-frames marked
+in between.
+
+<p align="center">
+  <img src="docs/assets/step1_detect_keyframe_index.png" alt="Detected key-frame indexes for the subtask splitting" width="800"/>
+</p>
+
 ### Step 2 — Compute the Camera Pose and Depth Images
 
 Due to memory limits, a camera-pose estimation model can only run on a small
@@ -182,6 +190,13 @@ setup:
 - **Arbitrary RGB cameras** — either **DA3Nested** or **VGGT-Omega** produce
   both depth and camera poses.
 
+The video below shows the depth stream of an episode — estimated per-view
+metric depth and camera poses rendered along the trajectory:
+
+<p align="center">
+  <video src="docs/assets/step2_depth_stream.mp4" alt="Depth stream: camera pose and depth per frame" width="800" controls></video>
+</p>
+
 ### Step 3 — Sampling Keypoints
 
 For each subtask, we require a text prompt for each interacted object, which
@@ -189,19 +204,42 @@ can be extracted from the subtask description. Given the text prompt:
 
 1. **RexOmni** detects the objects in each key-frame (start / end frames
    included).
+
+   <p align="center">
+     <img src="docs/assets/rexomni_detection.jpg" alt="RexOmni object detection on a key-frame" width="800"/>
+   </p>
+
 2. The bounding boxes and their corresponding text prompts are used as the
    prompts for **SAM3** to segment the object masks.
 3. The bounding boxes are enlarged with a scale and used to crop the objects
    from the key-frames; the cropped object images are then passed to
    **RoMAv2** to find matching keypoints consistent across the key-frames of a
    subtask.
+
+   <p align="center">
+     <img src="docs/assets/roma2_matching.jpg" alt="RoMAv2 cross-frame keypoint matching on the object crops" width="800"/>
+   </p>
+
 4. Only the **top-k** keypoints that belong to the object masks are kept.
+
+The figure below shows the final sampled keypoints of the interacted objects
+across the key-frames of a subtask:
+
+<p align="center">
+  <img src="docs/assets/step3_result.png" alt="Sampled keypoints of the interacted objects on the key-frames" width="800"/>
+</p>
 
 ### Step 4 — 3D Trace
 
 We use **TAPIP3D** to track the 3D positions of the keypoints detected in
 Step 3, from the first frame to the last frame of each subtask, and save the
 output.
+
+The video below shows the 3D traces of the tracked keypoints across the frames:
+
+<p align="center">
+  <video src="docs/assets/step4_tapip.mp4" alt="3D traces of the tracked keypoints (TAPIP3D)" width="800" controls></video>
+</p>
 
 ## 4. Run Inference
 
