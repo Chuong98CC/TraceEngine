@@ -6,8 +6,9 @@ defines no ``__init__`` and relies on ``self.target_h`` / ``self.target_w``
 supplied by the backend (``DA3AnyViewPT2`` / ``DA3MetricPT2``).  Standalone
 copy of ``tools/model/base_da3.py``, with the input-camera (extrinsics /
 intrinsics) paths removed — the exported graphs predict their own poses and
-intrinsics, so no camera parameters are ever consumed (``cv2`` is imported
-lazily in ``_preprocess_one`` so the package also imports without OpenCV).
+intrinsics, so no camera parameters are ever consumed.  Images are decoded
+through the shared ``utils.image_io`` helpers (PIL / torchvision), so the
+package also imports without OpenCV.
 """
 
 from __future__ import annotations
@@ -15,33 +16,41 @@ from __future__ import annotations
 import numpy as np
 import torch
 from depth_models.da3.utils.alignment import align_anyview_with_metric
+from utils.image_io import (
+    ImageInput,
+    imagenet_normalize,
+    letterbox,
+    to_image_tensor,
+    to_pixel_uint8,
+)
 
 
 class BaseDA3Model:
     """Shared DA3 preprocessing + alignment.  Requires ``self.target_h/target_w``."""
 
-    _MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
-    _STD = np.array([0.229, 0.224, 0.225], dtype=np.float32)
-
     # ---- preprocessing (letterbox: aspect-preserve + pad) -------------------
+
+    def _load_image(self, image: ImageInput) -> torch.Tensor:
+        """Decode any ImageInput into a CHW uint8 RGB tensor (CPU)."""
+        return to_pixel_uint8(to_image_tensor(image))
 
     def preprocess_views(
         self,
         imgs: list,
         target_h: int | None = None,
         target_w: int | None = None,
-    ) -> tuple[np.ndarray, list[dict]]:
+    ) -> tuple[torch.Tensor, list[dict]]:
         """Resize/normalize *N* views to ``(1, N, 3, H, W)``.
 
         ``target_h``/``target_w`` default to ``self.target_h``/``self.target_w``;
-        pass explicit values to preprocess for a differently-sized model (e.g. the
-        metric branch inside the nested pipeline).  Returns the padded batch and
-        per-view crop-back metadata.
+        pass explicit values to preprocess for a differently-sized model (e.g.
+        the metric branch inside the nested pipeline).  Returns the padded
+        fp32 CPU tensor batch and per-view crop-back metadata.
         """
         th = target_h if target_h is not None else self.target_h
         tw = target_w if target_w is not None else self.target_w
         n = len(imgs)
-        proc = np.zeros((n, 3, th, tw), dtype=np.float32)
+        proc = torch.zeros((n, 3, th, tw), dtype=torch.float32)
         metas: list[dict] = []
         for i in range(n):
             proc[i], meta = self._preprocess_one(imgs[i], th, tw)
@@ -50,67 +59,18 @@ class BaseDA3Model:
 
     def _preprocess_one(
         self,
-        img,
+        img: ImageInput,
         target_h: int,
         target_w: int,
-    ) -> tuple[np.ndarray, dict]:
-        """Letterbox a single view (path or BGR array): aspect-preserving resize
-        with a 2-decimal-truncated scale, then center-pad to the target.
-        Returns CHW float32 and per-view meta for the crop-back on post-process.
+    ) -> tuple[torch.Tensor, dict]:
+        """Letterbox a single view (any ImageInput; numpy arrays are RGB):
+        aspect-preserving resize with a 2-decimal-truncated scale, then
+        center-pad to the target.  Returns CHW fp32 (ImageNet-normalized) and
+        per-view meta for the crop-back on post-process.
         """
-        import cv2  # noqa: PLC0415  (lazy so the package imports without OpenCV)
-
-        if isinstance(img, str):
-            bgr = cv2.imread(img, cv2.IMREAD_COLOR)
-            if bgr is None:
-                raise FileNotFoundError(f"Could not load image: {img}")
-        elif isinstance(img, np.ndarray):
-            bgr = img.copy()
-        else:
-            raise TypeError(f"Unsupported image type: {type(img)}")
-
-        orig_h, orig_w = bgr.shape[:2]
-        rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
-
-        # Uniform scale, truncated to 2 decimals so the leftover fit is padded.
-        raw_scale = min(target_w / orig_w, target_h / orig_h)
-        scale = np.floor(raw_scale * 100.0) / 100.0
-        if scale <= 0:
-            scale = raw_scale
-
-        new_w = int(orig_w * scale)
-        new_h = int(orig_h * scale)
-        resized = cv2.resize(rgb, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
-
-        pad_w = target_w - new_w
-        pad_h = target_h - new_h
-        pad_top = pad_h // 2
-        pad_bottom = pad_h - pad_top
-        pad_left = pad_w // 2
-        pad_right = pad_w - pad_left
-        padded = cv2.copyMakeBorder(
-            resized,
-            pad_top,
-            pad_bottom,
-            pad_left,
-            pad_right,
-            cv2.BORDER_CONSTANT,
-            value=(0, 0, 0),
-        )
-
-        img_f = padded.astype(np.float32) / 255.0
-        chw = ((img_f - self._MEAN) / self._STD).transpose(2, 0, 1).astype(np.float32)
-
-        meta = {
-            "orig_h": orig_h,
-            "orig_w": orig_w,
-            "scale_factor": float(scale),
-            "tile_h": new_h,
-            "tile_w": new_w,
-            "pad_top": int(pad_top),
-            "pad_left": int(pad_left),
-        }
-        return chw, meta
+        x = self._load_image(img)
+        padded, meta = letterbox(x, target_h, target_w, scale_mode="trunc2")
+        return imagenet_normalize(padded), meta
 
     @staticmethod
     def crop_to_tile(arr: np.ndarray, meta: dict) -> np.ndarray:

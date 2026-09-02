@@ -36,7 +36,7 @@ def _parse_geometry(model_path: str) -> tuple[int, int, int]:
 
 
 class DA3AnyViewPT2(BaseDA3Model):
-    """Any-view torch.export inference: images → depth bundle (numpy in/out)."""
+    """Any-view torch.export inference: (ImageInput in, numpy out)."""
 
     _OUTPUT_NAMES = ("depth", "depth_conf", "pred_extrinsics", "pred_intrinsics")
 
@@ -59,15 +59,16 @@ class DA3AnyViewPT2(BaseDA3Model):
         self.num_views, self.target_w, self.target_h = _parse_geometry(model_path)
         print(f"[PT2] num_views={self.num_views}  {self.target_w}x{self.target_h}")
 
-    def run(self, img_batch: np.ndarray) -> dict[str, np.ndarray]:
-        """Run the exported graph on the preprocessed batch ``(1,N,3,H,W)`` fp32."""
-        image = torch.from_numpy(img_batch.astype(np.float32)).to(self.device)
+    def run(self, img_batch: torch.Tensor) -> dict[str, np.ndarray]:
+        """Run the exported graph on the preprocessed ``(1,N,3,H,W)`` fp32
+        CPU tensor batch."""
+        image = img_batch.to(self.device)
         with torch.no_grad():
             outputs = self.model(image)
         return dict(zip(self._OUTPUT_NAMES, [o.float().cpu().numpy() for o in outputs]))
 
     def infer(self, imgs: list) -> dict:
-        """Run the any-view model on *N* image paths or BGR arrays.
+        """Run the any-view model on *N* image paths, RGB arrays or tensors.
 
         Returns the mapped output dict with batched values (``(1,N,…)``): the
         graph predicts its own camera poses and intrinsics, so no camera

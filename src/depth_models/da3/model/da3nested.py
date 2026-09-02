@@ -10,6 +10,7 @@ are set to max depth inside ``align_anyview_with_metric``).  Standalone copy of
 from __future__ import annotations
 
 import numpy as np
+import torch
 
 from .base_da3 import BaseDA3Model
 from .da3anyview import DA3AnyViewPT2
@@ -73,7 +74,7 @@ class DA3NestedPT2(BaseDA3Model):
 
     def _run_metric_branch(
         self,
-        av_img_batch: np.ndarray,
+        av_img_batch: torch.Tensor,
     ) -> tuple[np.ndarray, np.ndarray]:
         """Per-view metric inference on the any-view letterbox grid.
 

@@ -78,23 +78,19 @@ class DA3MetricPT2(BaseDA3Model):
         self.outputs = [{"name": n, "shape": []} for n in self._OUTPUT_NAMES]
         print(f"[PT2] metric @ {self.target_w}x{self.target_h}")
 
-    def run(self, feed: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
-        """Run the exported graph: ``{"image": (1,3,H,W) fp32}`` → output dict."""
-        image = torch.from_numpy(feed["image"].astype(np.float32)).to(self.device)
+    def run(self, feed: dict[str, torch.Tensor]) -> dict[str, np.ndarray]:
+        """Run the exported graph: ``{"image": (1,3,H,W) fp32 tensor}``."""
+        image = feed["image"].to(self.device)
         with torch.no_grad():
             outputs = self.model(image)
         return dict(zip(self._OUTPUT_NAMES, [o.float().cpu().numpy() for o in outputs]))
 
     def infer_view(
-        self, img: np.ndarray, apply_mono_sky: bool = True
+        self, img: torch.Tensor, apply_mono_sky: bool = True
     ) -> tuple[np.ndarray, np.ndarray]:
-        """``img`` is a preprocessed ``(3, H, W)`` CHW array → ``(depth, sky)``.
-
-        ``apply_mono_sky`` clamps sky-region depth to match the full PyTorch metric
-        forward; the nested pipeline passes ``False`` to feed the raw depth to
-        alignment.
-        """
-        raw = self.run({"image": img[None].astype(np.float32)})
+        """``img`` is a preprocessed ``(3, H, W)`` CHW fp32 tensor →
+        ``(depth, sky)`` numpy."""
+        raw = self.run({"image": img.unsqueeze(0)})
         depth, sky = self.extract_metric(raw)
         if apply_mono_sky:
             depth = self.apply_mono_sky(depth, sky)
