@@ -4,8 +4,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project overview
 
-Multi-model 3D-vision inference, each model deployed on the runtime that fits
-it best (ONNX Runtime, TensorRT, or `torch.export` programs):
+Multi-model 3D-vision inference, with every model running as a `torch.export`
+program (`.pt2` checkpoint):
 
 - **DA3 (Depth Anything 3)** — any-view depth + camera pose. Runs as two
   torch.export checkpoints (any-view + metric depth, fixed `num_views`,
@@ -22,14 +22,14 @@ it best (ONNX Runtime, TensorRT, or `torch.export` programs):
 - **TAPIP3D** — 3D point tracking (`torch.export` / `.pt2`), fixed query count.
 - **SAM3** — promptable segmentation (`torch.export` / `.pt2`).
 
-Backend-agnostic engine/session wrappers and camera types live in `src/base`;
-model-specific pre/post-processing lives under `src/depth_models`,
-`src/flow_models`, and `src/det_seg_models`. The repo uses **uv** for
+Runtimes and pre/post-processing live alongside each model under
+`src/depth_models`, `src/flow_models`, and `src/det_seg_models`; shared camera
+types, image I/O, and visualizers live in `src/utils`. The repo uses **uv** for
 environment management and **hatchling** as the build backend. Core
-dependencies: TensorRT, ONNX Runtime, PyTorch, OpenCV, NumPy, trimesh. Requires
-**Python ≥3.12.1, <3.13** (TensorRT / ONNX Runtime wheel availability; the
-3.12.1 floor excludes 3.12.0, where multiprocess 0.70.19 crashes at exit on
-the missing `RLock._recursion_count`). The only automated tests are CPU-only
+dependencies: PyTorch, OpenCV, NumPy, trimesh. Requires
+**Python ≥3.12.1, <3.13** (the 3.12.1 floor excludes 3.12.0, where
+multiprocess 0.70.19 crashes at exit on the missing
+`RLock._recursion_count`). The only automated tests are CPU-only
 unit tests in `tests/test_image_io.py`
 (`uv run --extra dev pytest tests/ -q`; `dev` is an optional-dependencies
 extra, not a PEP-735 group).
@@ -42,17 +42,13 @@ uv sync
 ```
 
 The editable install puts both the repo root and `src/` on `sys.path`, so
-`base`, `depth_models`, `flow_models`, `det_seg_models`, `utils`, and `tools`
+`depth_models`, `flow_models`, `det_seg_models`, `utils`, and `tools`
 are all importable as top-level packages.
 
 ## Package structure
 
 ```
 src/
-├── base/                       # Backend-agnostic wrappers + camera types
-│   ├── base_trt.py             # TRTModel (ABC) + MonoDepthTRT / StereoDepthTRT
-│   ├── base_onnx.py            # ONNXModel (ONNX Runtime session wrapper)
-│   └── cam_structure.py        # CameraIntrinsics, CameraExtrinsics, read_calib_file
 ├── depth_models/
 │   ├── a3f/                    # Any2Full — RGB-D depth densification
 │   │   ├── any2full.py         # Any2Full_PT2 (torch.export runtime + pre/post)
@@ -78,17 +74,16 @@ src/
 │   ├── rex_omni/               # RexOmni detection wrapper (RexOmniWrapper; .venv-rexomni)
 │   └── sam3/                   # SAM3 promptable segmentation (Sam3Image, .pt2 runtime)
 ├── flow_models/
-│   ├── waft/                   # legacy WAFT ONNX/TRT classes (superseded by waftv2)
 │   ├── waftv2/                 # WAFTv2_PT2 (torch.export .pt2, bf16) — preprocess/run/postprocess
 │   └── tapip3d/                # TAPIP3D 3D tracking (Tapip3D_PT2: .pt2 encoder + fused corr/updater)
-└── utils/
-    ├── astribot_dataloader.py  # Astribot dataset: load_rgbd, CAMERA_SETS, depth configs
-    ├── keyframe_utils.py       # Step-3 key-frame discovery (episode + folder layouts)
-    ├── image_io.py             # ImageInput, to_image_tensor, letterbox, imagenet_normalize
-    ├── depth_utils.py, streaming_utils.py, video_io.py
-    └── visualize_*.py          # depth / flow / mask / tapip3d visualizers + export_glb
+└── utils/                       # shared camera types, image I/O, visualizers
+    ├── cam_structure.py         # CameraIntrinsics, CameraExtrinsics, read_calib_file
+    ├── astribot_dataloader.py   # Astribot dataset: load_rgbd, CAMERA_SETS, depth configs
+    ├── keyframe_utils.py        # Step-3 key-frame discovery (episode + folder layouts)
+    ├── depth_utils.py, streaming_utils.py
+    ├── file_io/                 # image_io (ImageInput, letterbox…), video_io, mask_rle
+    └── visualize/               # depth / flow / mask / tapip3d visualizers + export_glb
 tools/
-├── export_trt.py               # ONNX → TensorRT engine via trtexec
 ├── general_test/               # Case 1 (README): general-purpose inference + viz entry points
 │   ├── module/                 # one tool per model — infer_<model>.py (test each component)
 │   │   ├── infer_any2full.py   # RGB-D depth densification (single frame → .glb)
@@ -114,8 +109,7 @@ tools/
 └── hifi-umi/                   # HiFi-UMI dataset preprocessing (extract_frames, generate_masks)
 scripts/                        # ready-to-run pipeline scripts
 ├── general_test/               # wrappers: infer_waft.sh, infer_stream_stereo/rgbd.sh,
-│                               #   infer_tapip3d.sh, infer_step3.sh, visualize_stream.sh,
-│                               #   export_trt_docker.sh
+│                               #   infer_tapip3d.sh, infer_step3.sh, visualize_stream.sh
 └── astribot/                   # extract_frames.sh, run_subtask_stream.sh (+ visualize helper)
 docs/
 ├── general_test/               # general_test.md master index (mermaid pipeline diagram) +
@@ -135,24 +129,13 @@ Model weights are expected under `weights/` (git-ignored): `any2full/`, `da3/`,
 
 ## Class hierarchy
 
-Backend bases (in `src/base`) are runtime-agnostic — they own engine/session
-load, IO-tensor metadata, input-geometry resolution, and a name-matched
-execution helper.
-
-- `TRTModel(ABC)` — TensorRT engine wrapper. Uses the TensorRT 10.3+
-  `set_tensor_address` API (no manual CUDA memory management). `_run` binds
-  inputs **by name**, allocates outputs, executes on the current CUDA stream.
-  `MonoDepthTRT` / `StereoDepthTRT` are legacy single-image / stereo-pair
-  helpers.
-- `ONNXModel` — ONNX Runtime session wrapper (CUDA EP + CPU fallback); `run(feed)`.
-
 Model-specific wrappers:
 
-- `BaseDA3Model` — pure mixin (needs `self.target_h/target_w` from the
-  backend base — no `__init__` of its own). Letterbox preprocessing
-  (ImageNet-normalized), extrinsics normalization, any-view feed assembly,
-  output-key mapping, mono-sky post-processing, and alignment orchestration
-  (`align_with_metric`, `align_to_input`).
+- `BaseDA3Model` — pure mixin (needs `self.target_h/target_w` supplied by the
+  backend `DA3AnyViewPT2` / `DA3MetricPT2` — no `__init__` of its own).
+  Letterbox preprocessing (ImageNet-normalized), extrinsics normalization,
+  any-view feed assembly, output-key mapping, mono-sky post-processing, and
+  alignment orchestration (`align_with_metric`, `align_to_input`).
 - `DA3NestedPT2` (`depth_models/da3/model/da3nested.py`) — the concrete DA3
   runtime: composes two **independent torch.export checkpoints** —
   `DA3AnyViewPT2` (any-view graph, fixed `num_views`, image-only input,
@@ -174,10 +157,7 @@ Model-specific wrappers:
   `tools/general_test/module/infer_waft.py` and
   `tools/astribot/run_step2_depth_stream.py`'s motion-mask path — unified on
   the shared `image_io` path: RGB `ImageInput` + tensor-first trunc2
-  `letterbox`, bf16 [0,255] feed. `WAFTOnnx(WAFTBase, ONNXModel)` /
-  `WAFT(WAFTBase, TRTModel)` (`flow_models/waft/`) are the superseded legacy
-  ONNX/TRT runtimes (BGR numpy/cv2 — the repo's only non-RGB classes), kept
-  as reference with no remaining call sites.
+  `letterbox`, bf16 [0,255] feed.
 - `Tapip3D_PT2` / `Tapip3DStreamPT2` (`flow_models/tapip3d/`) — TAPIP3D
   torch.export stream runtime: encoder + fused corr/updater iteration
   programs, sliding-window orchestration. SAM3 — standalone `torch.export`
@@ -230,7 +210,7 @@ Run: `tools/general_test/module/infer_any2full.py` loads an Astribot head RGB-D 
 (`utils.astribot_dataloader.load_rgbd`), runs the model, and exports a
 coloured point cloud (`utils.visualize_depth.export_glb`).
 
-## Key data types (`src/base/cam_structure.py`)
+## Key data types (`src/utils/cam_structure.py`)
 
 - `CameraIntrinsics` (dataclass, slots) — `fx, fy, cx, cy, bl (baseline,
   metres), w, h`. `from_intrinsics_matrix()`, `from_calib_file()`, per-axis
@@ -276,11 +256,6 @@ python tools/astribot/extract_frames.py \
 python tools/astribot/run_step2_depth_stream.py \
     --repo-id Kronze157/astri_making_coffee_vlva \
     --data-root /data/astri_making_coffee_v1 --episode-idxes 0 --backend vggt_omega
-
-# --- Export ONNX → TRT engine ---
-python tools/export_trt.py weights/waftv2/waftv2_dinov3_i5_640x480.onnx
-# or inside the NVIDIA TensorRT container (avoids local env setup):
-bash scripts/general_test/export_trt_docker.sh /abs/path/to/model.onnx tf32
 ```
 
 ## Dataset loading
@@ -298,20 +273,6 @@ symlink points here): `astribot_test_imgs/` (per-camera RGB-D frames) +
 - `load_calib()` scales all intrinsics to 640×480 on load; depth is loaded
   from lz4-compressed uint16 files (`load_depth_lz4`).
 
-## TensorRT / backend version requirements
-
-TensorRT code uses the 10.3+ `set_tensor_address` API. Engine files are
-version-locked — on a deserialization failure, rebuild with the matching
-TensorRT version via `scripts/general_test/export_trt_docker.sh`. Pinned runtimes
-(pyproject): `torch==2.11.0+cu128`, `torchvision==0.26.0+cu128`,
-`tensorrt-cu12==11.1.0.106`, `onnxruntime-gpu==1.28.0`. TRT 11 removed the
-`--fp16`/`--precisionConstraints`/`--layerPrecisions` trtexec flags (builds
-are strongly typed by the ONNX's own dtypes); `tools/export_trt.py` builds
-with `--decomposableAttentions='*'` — required for the fused opset-25
-Attention nodes in the DA3 ONNX exports (see [[trt11-export-attention-fix]]).
-Only `tf32` (default, fp32 data with TF32 tensor-core math) and `fp32`
-(`--noTF32`) precisions are supported.
-
 ## Model input/output conventions
 
 - **Image input contract**: every image-ingesting runtime class accepts the
@@ -326,10 +287,7 @@ Only `tf32` (default, fp32 data with TF32 tensor-core math) and `fp32`
   from preprocess — no numpy bounce at the feed boundary.
   `WAFTv2_PT2` (`flow_models/waftv2/`) follows the unified path: shared
   `_load_image` decode to CHW uint8 RGB, shared trunc2 `letterbox`, feed in
-  [0, 255] (the exported graph normalizes internally). The superseded
-  `flow_models/waft` ONNX/TRT classes were the legacy exception — BGR +
-  numpy + cv2, their own `_load_image` and `bgr_input` — with no remaining
-  call sites.
+  [0, 255] (the exported graph normalizes internally).
 - **DA3 preprocessing** (`BaseDA3Model`): shared `_load_image`, then
   `letterbox(scale_mode="trunc2")` — aspect-preserving resize with a
   2-decimal-truncated uniform scale, center-pad — and `imagenet_normalize`
@@ -352,9 +310,7 @@ Only `tf32` (default, fp32 data with TF32 tensor-core math) and `fp32`
   batching and device moves happen in `match_pair`.
 - **WAFTv2** (`WAFTv2_PT2`, `.pt2`): unified RGB `ImageInput`, bf16 [0,255]
   feed to a graph that normalizes internally; motion masks from
-  flow-magnitude threshold (pixels >127 are moving). (The legacy
-  `flow_models/waft` ONNX/TRT classes took BGR numpy by default —
-  superseded, see above.)
+  flow-magnitude threshold (pixels >127 are moving).
 - **TAPIP3D**: the shared frame loader `utils.streaming_utils.load_batch_frames`
   decodes via `image_io` into `[T, 3, H, W]` uint8; the `.pt2` iteration
   program is exported for a **fixed query count (1088)** — an 8×8 bbox grid
@@ -364,7 +320,7 @@ Only `tf32` (default, fp32 data with TF32 tensor-core math) and `fp32`
   1008 resolution and a fixed number of box-prompt slots in the exported
   graph (callers right-pad prompts).
 - All models use NCHW and GPU tensors; the wrappers handle HWC→CHW, batch dim,
-  GPU transfer, and dtype matching the engine's expected input dtype.
+  GPU transfer, and dtype matching the runtime's expected input dtype.
 
 ## Calibration file formats
 

@@ -1,10 +1,8 @@
 """WAFT optical flow inference via a torch.export (``.pt2``) artifact in bf16.
 
-:class:`WAFTv2_PT2` plays the same role as ``model.waft_onnx.WAFTOnnx``
-(which pairs ``WAFTBase`` with ``ONNXModel``): it loads the serialized
-backend artifact, exposes ``preprocess`` / ``run`` / ``postprocess``, and a
-convenience ``__call__(img1, img2)`` returning the flow at the original
-resolution.
+:class:`WAFTv2_PT2` loads the serialized backend artifact, exposes
+``preprocess`` / ``run`` / ``postprocess``, and a convenience
+``__call__(img1, img2)`` returning the flow at the original resolution.
 
 The artifact is a static-shape ExportedProgram: images must be resized /
 padded to the exported ``(target_h, target_w)`` geometry before the run.

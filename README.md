@@ -28,7 +28,7 @@ uv sync
 ```
 
 with pinned inference runtimes: `torch==2.11.0+cu128`,
-`onnxruntime-gpu==1.28.0`, `tensorrt-cu12==11.1.0.106`.
+`torchvision==0.26.0+cu128`.
 
 ### Rex-Omni environment
 

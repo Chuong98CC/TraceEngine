@@ -123,7 +123,6 @@ extraction:
 | `infer_step3.sh` | Step 3 on a key-frame folder (3a + 3b, see [`pipeline/step3.md`](pipeline/step3.md)) |
 | `setup_rexomni_env.sh` | Create the `.venv-rexomni` environment (torch 2.7 / transformers 4.51.3, Python 3.10); run the tool with `PYTHONPATH="$PWD/src" .venv-rexomni/bin/python tools/general_test/pipeline/run_object_detection.py` |
 | `visualize_stream.sh` | Trajectory video from a streaming result |
-| `export_trt_docker.sh` | Build a TensorRT engine from an ONNX checkpoint inside the NVIDIA TensorRT container (`<onnx_path> [fp16|tf32|fp32]`) |
 
 ## Relation to dataset-specific tools
 
