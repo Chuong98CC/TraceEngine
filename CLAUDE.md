@@ -29,7 +29,10 @@ environment management and **hatchling** as the build backend. Core
 dependencies: TensorRT, ONNX Runtime, PyTorch, OpenCV, NumPy, trimesh. Requires
 **Python ≥3.12.1, <3.13** (TensorRT / ONNX Runtime wheel availability; the
 3.12.1 floor excludes 3.12.0, where multiprocess 0.70.19 crashes at exit on
-the missing `RLock._recursion_count`). There are no tests.
+the missing `RLock._recursion_count`). The only automated tests are CPU-only
+unit tests in `tests/test_image_io.py`
+(`uv run --extra dev pytest tests/ -q`; `dev` is an optional-dependencies
+extra, not a PEP-735 group).
 
 ## Environment setup
 
@@ -71,14 +74,17 @@ src/
 │       ├── base_vggt_omega.py  # BaseVGGTOmega (letterbox, feed assembly, pose/depth post)
 │       └── vggt_omega.py       # concrete wrapper + move_lifted_state_to_device
 ├── det_seg_models/
-│   └── sam3/                   # SAM3 promptable segmentation (.pt2 runtime)
+│   ├── romav2/                 # RoMaV2 cross-image matching — RoMaV2PT2 (.pt2 runtime)
+│   ├── rex_omni/               # RexOmni detection wrapper (RexOmniWrapper; .venv-rexomni)
+│   └── sam3/                   # SAM3 promptable segmentation (Sam3Image, .pt2 runtime)
 ├── flow_models/
 │   ├── waft/                   # WAFT optical flow — WAFTOnnx (ONNX) / WAFT (TRT)
+│   ├── waftv2/                 # WAFTv2_PT2 (torch.export .pt2, bf16) — preprocess/run/postprocess
 │   └── tapip3d/                # TAPIP3D 3D tracking (Tapip3D_PT2: .pt2 encoder + fused corr/updater)
 └── utils/
     ├── astribot_dataloader.py  # Astribot dataset: load_rgbd, CAMERA_SETS, depth configs
     ├── keyframe_utils.py       # Step-3 key-frame discovery (episode + folder layouts)
-    ├── image_io.py             # ImageInput, to_image_tensor
+    ├── image_io.py             # ImageInput, to_image_tensor, letterbox, imagenet_normalize
     ├── depth_utils.py, streaming_utils.py, video_io.py
     └── visualize_*.py          # depth / flow / mask / tapip3d visualizers + export_glb
 tools/
@@ -164,7 +170,10 @@ Model-specific wrappers:
 - `Any2Full_PT2` (`depth_models/a3f/any2full.py`) — torch.export runtime with
   `preprocess` / `infer` / `postprocess`; see the Any2Full section below.
 - `WAFTOnnx(WAFTBase, ONNXModel)` / `WAFT(WAFTBase, TRTModel)` — optical flow
-  (BGR in, flow out); `infer_waft.py --backend trt|onnx`.
+  (legacy exception: BGR numpy in, flow out — the repo's only non-RGB
+  runtime); `infer_waft.py --backend trt|onnx`. `WAFTv2_PT2`
+  (`flow_models/waftv2/`) is the torch.export `.pt2` runtime, still BGR/numpy
+  until the unified pipeline replaces it.
 - `Tapip3D_PT2` / `Tapip3DStreamPT2` (`flow_models/tapip3d/`) — TAPIP3D
   torch.export stream runtime: encoder + fused corr/updater iteration
   programs, sliding-window orchestration. SAM3 — standalone `torch.export`
@@ -232,6 +241,9 @@ coloured point cloud (`utils.visualize_depth.export_glb`).
 ## Common commands
 
 ```bash
+# --- CPU-only unit tests (dev is an optional-dependencies extra, not a PEP-735 group) ---
+uv run --extra dev pytest tests/ -q
+
 # --- Streaming (multi-camera depth + pose) ---
 python tools/general_test/pipeline/run_depth_stream.py --backend vggt_omega \
     --input-dirs <left_dir> <right_dir> \
@@ -298,26 +310,50 @@ Only `tf32` (default, fp32 data with TF32 tensor-core math) and `fp32`
 
 ## Model input/output conventions
 
-- **DA3 preprocessing** (`BaseDA3Model`): BGR → RGB, aspect-preserving resize
-  with a 2-decimal-truncated scale, center-pad (letterbox), ImageNet
-  normalization (`mean=[0.485,0.456,0.406]`, `std=[0.229,0.224,0.225]`).
-  Intrinsics are adjusted for the scale + pad. NCHW; any-view batches to
-  `(1, N, 3, H, W)`.
+- **Image input contract**: every image-ingesting runtime class accepts the
+  full `ImageInput` union — a path, a `PIL.Image`, an HWC numpy array or a
+  CHW tensor — via a uniformly named `_load_image(image) -> torch.Tensor`
+  (decode-only; CHW **uint8 RGB** on CPU; float `[0,1]` CHW tensors are
+  rescaled on entry). Pixel space is **RGB uint8** repo-wide (numpy sources
+  must be uint8). Preprocessing is **tensor-first**: decode → letterbox →
+  normalize all run as torch ops via the shared `src/utils/image_io.py`
+  helpers (`to_image_tensor`, `to_pixel_uint8`, `letterbox`,
+  `imagenet_normalize`), so `torch.export` graphs receive tensors straight
+  from preprocess — no numpy bounce at the feed boundary. **WAFT is the
+  legacy exception** — BGR + numpy + cv2, its own `_load_image` and
+  `bgr_input` (the `.pt2` `WAFTv2_PT2` is still BGR/numpy too) — until the
+  unified pipeline replaces it; call sites that feed it flip RGB→BGR locally
+  (e.g. `tools/astribot/run_step2_depth_stream.py`'s motion-mask path).
+- **DA3 preprocessing** (`BaseDA3Model`): shared `_load_image`, then
+  `letterbox(scale_mode="trunc2")` — aspect-preserving resize with a
+  2-decimal-truncated uniform scale, center-pad — and `imagenet_normalize`
+  (`mean=[0.485,0.456,0.406]`, `std=[0.229,0.224,0.225]`).
+  `preprocess_views(imgs: list[ImageInput])` batches N views to
+  `(1, N, 3, H, W)` fp32 CPU. Intrinsics are adjusted for the scale + pad.
+- **VGGT-Omega** (`BaseVGGTOmega.infer(images: list[ImageInput])`): shared
+  `_load_image`, then `letterbox(scale_mode="round", bicubic, antialias)` —
+  the raw-scale VGGT convention — followed by float `[0,1]` canvas assembly.
 - **DA3 output-name resolution**: outputs are matched by keyword
   (`depth`/`depth_conf`/`pred_extrinsics`/`pred_intrinsics`/`sky`), so exact
   tensor names from the export don't matter. `uses_extrinsics` reads the
   loaded graph's inputs, so whether pose is fed is driven by the model, not a
   caller flag (the shipped any-view export is image-only).
-- **Any2Full**: fixed 480×640 input (any size resized internally); depth input
-  is the sparse metric depth in metres; output is metric depth (fp32).
-- **WAFT**: BGR input by default; motion masks from flow-magnitude threshold
-  (pixels >127 are moving).
-- **TAPIP3D**: the `.pt2` iteration program is exported for a **fixed query
-  count (1088)** — an 8×8 bbox grid (64) + 32×32 support grid (1024) matches
-  it exactly (SAM3 mask-sampled queries fall back to the grid when the mask
-  is too small).
-- **SAM3**: fixed 1008 resolution and a fixed number of box-prompt slots in
-  the exported graph (callers right-pad prompts).
+- **Any2Full**: `preprocess(rgb: ImageInput, depth_metrics)` — the RGB leg is
+  decoded via `_load_image` and resized to the fixed 480×640 input (any size
+  resized internally); depth input is the sparse metric depth in metres;
+  output is metric depth (fp32).
+- **RoMaV2** (`RoMaV2PT2`): `_load_image` is decode-only; the float/255,
+  batching and device moves happen in `match_pair`.
+- **WAFT**: BGR input by default (legacy exception, see above); motion masks
+  from flow-magnitude threshold (pixels >127 are moving).
+- **TAPIP3D**: the shared frame loader `utils.streaming_utils.load_batch_frames`
+  decodes via `image_io` into `[T, 3, H, W]` uint8; the `.pt2` iteration
+  program is exported for a **fixed query count (1088)** — an 8×8 bbox grid
+  (64) + 32×32 support grid (1024) matches it exactly (SAM3 mask-sampled
+  queries fall back to the grid when the mask is too small).
+- **SAM3**: `preprocess_image` decodes via the shared `_load_image`; fixed
+  1008 resolution and a fixed number of box-prompt slots in the exported
+  graph (callers right-pad prompts).
 - All models use NCHW and GPU tensors; the wrappers handle HWC→CHW, batch dim,
   GPU transfer, and dtype matching the engine's expected input dtype.
 
