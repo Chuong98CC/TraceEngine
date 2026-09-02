@@ -50,7 +50,14 @@ def _np(x) -> np.ndarray:
 def _frames(frames_dir: Path, n: int = 2) -> list[Path]:
     imgs = sorted(p for p in frames_dir.rglob("*.jpg") if "depth" not in p.parts)
     if len(imgs) < n:
-        raise SystemExit(f"Need >= {n} jpgs under {frames_dir}, found {len(imgs)}")
+        raise SystemExit(
+            f"Need >= {n} jpgs under {frames_dir}, found {len(imgs)}.\n"
+            "Hint: every assets/astribot_test_imgs/<camera> folder holds exactly "
+            "one jpg and the e2e probes need num_views (64) frames, so re-run "
+            "with --frames-dir pointing at a folder with >= 64 RGB jpgs (e.g. "
+            "an extracted-frames folder such as "
+            "demo_data/astribot_stereo_lrb/extract_frames/stereo_left)."
+        )
     return imgs[:n]
 
 
@@ -276,6 +283,7 @@ def run(args) -> int:
             continue
         items = probe(frames_dir)
         goldens = _load(Path(args.golden_dir), rt)
+        new_names = {key.rpartition(":")[0] for key, _ in items}
         rt_ok = True
         for key, val in items:
             name, _, mode = key.rpartition(":")
@@ -286,6 +294,15 @@ def run(args) -> int:
             passed, msg = _check(key, mode, goldens[name], val)
             print(f"[compare] {rt}: {'PASS' if passed else 'FAIL'} {name} ({mode}) {msg}")
             rt_ok = rt_ok and passed
+        # Reverse direction: every captured golden entry must still be produced
+        # (npz keys are bare names, so compare against the bare-name items set).
+        for name in goldens:
+            if name not in new_names:
+                print(
+                    f"[compare] {rt}: FAIL {name}: no longer produced "
+                    "(golden key missing from new output)"
+                )
+                rt_ok = False
         print(f"[compare] {rt}: {'PASS' if rt_ok else 'FAILED'}")
         ok = ok and rt_ok
     # e2e: real-model runs (da3 nested / vggt) whenever their weights exist.
@@ -297,6 +314,7 @@ def run(args) -> int:
             print(f"[capture] e2e: {len(items)} entries (real model runs)")
         else:
             goldens = _load(Path(args.golden_dir), "e2e")
+            new_names = {key.rpartition(":")[0] for key, _ in items}
             for key, val in items:
                 name, _, mode = key.rpartition(":")
                 if name not in goldens:
@@ -305,6 +323,13 @@ def run(args) -> int:
                     continue
                 passed, msg = _check(key, mode, goldens[name], val)
                 print(f"[compare] e2e: {'PASS' if passed else 'FAIL'} {name} {msg}")
+            for name in goldens:
+                if name not in new_names:
+                    print(
+                        f"[compare] e2e: FAIL {name}: no longer produced "
+                        "(golden key missing from new output)"
+                    )
+                    ok = False
     elif args.mode == "compare":
         print("[compare] e2e: skipped (no da3/vggt weights under weights/)")
     return 0 if ok else 1
