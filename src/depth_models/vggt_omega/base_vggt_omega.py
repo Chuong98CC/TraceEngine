@@ -1,25 +1,31 @@
 """Backend-agnostic VGGT-Omega pre/post-processing mixin.
 
-Sibling of ``da3.base_da3.BaseDA3Model`` and ``s2m2.base_s2m2.BaseS2M2``: holds
-the letterbox preprocessing, input-feed assembly, and pose/depth post-processing
-shared by every VGGT-Omega inference wrapper.  It is a pure mixin — it defines no
-``__init__`` and relies on ``self.target_h`` / ``self.target_w`` and the
-name-keyed ``self.inputs`` metadata supplied by the backend base (``TRTModel`` or
-``ONNXModel``).
+Holds the letterbox preprocessing, input-feed assembly, and pose/depth
+post-processing shared by the VGGT-Omega inference wrapper.  It is a pure
+mixin — it defines no ``__init__`` and relies on ``self.target_h`` /
+``self.target_w`` and the name-keyed ``self.inputs`` metadata supplied by
+the backend base.  Images are decoded through the shared ``utils.image_io``
+helpers (PIL / torchvision).
 
-Each backend supplies ``_forward(feed) -> {name: np.ndarray}``:
-``TRTModel`` via ``_run`` (numpy → engine-dtype CUDA tensors internally),
-``ONNXModel`` via ``run`` (numpy cast to the declared input dtypes).  Both consume
-the same float32 RGB [0,1] ``(1, N, 3, H, W)`` input this mixin produces.
+The concrete wrapper supplies ``_forward(feed) -> {name: np.ndarray}``: it
+receives the CPU float32 RGB [0,1] ``(1, N, 3, H, W)`` tensor feed
+``build_feed`` assembles, keyed by the model's own input name, and casts it
+to the model's expected dtype (the torch.export wrapper moves it to cuda as
+fp16/fp32).  Outputs stay numpy.
 """
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import numpy as np
 import torch
-from PIL import Image
+from torchvision.transforms import v2
+
+from utils.image_io import (
+    ImageInput,
+    letterbox,
+    to_image_tensor,
+    to_pixel_uint8,
+)
 
 
 def quat_to_mat(quaternions: torch.Tensor) -> torch.Tensor:
@@ -80,29 +86,6 @@ def encoding_to_camera(pose_encoding, image_size_hw, build_intrinsics=True):
     return extrinsics, intrinsics
 
 
-def _letterbox_preprocess(
-    image: np.ndarray, target_w: int, target_h: int
-) -> tuple[np.ndarray, tuple[int, int, int, int]]:
-    """Letterbox uint8 RGB (H0,W0,3) into a zero-padded float32 [0,1] canvas.
-
-    Scale s = min(target_w/W0, target_h/H0) preserves aspect (upscales small
-    images too), content is pasted centered; returns (canvas, (ox, oy, h, w)).
-    """
-    h0, w0 = image.shape[:2]
-    scale = min(target_w / w0, target_h / h0)
-    w, h = round(w0 * scale), round(h0 * scale)
-    if (w, h) == (w0, h0):
-        resized = image
-    else:
-        resized = np.asarray(
-            Image.fromarray(image, mode="RGB").resize((w, h), Image.Resampling.BICUBIC)
-        )
-    canvas = np.zeros((target_h, target_w, 3), dtype=np.float32)
-    ox, oy = (target_w - w) // 2, (target_h - h) // 2
-    canvas[oy : oy + h, ox : ox + w] = resized.astype(np.float32) / 255.0
-    return canvas, (ox, oy, h, w)
-
-
 def _adjust_intrinsics(intrinsics: np.ndarray, crops: np.ndarray) -> np.ndarray:
     """Shift the principal point by each frame's letterbox offset.
 
@@ -127,18 +110,6 @@ def _crop_spatial(
     ]
 
 
-def _load_rgb_uint8(image: str | Path | np.ndarray) -> np.ndarray:
-    if isinstance(image, (str, Path)):
-        with Image.open(image) as im:
-            return np.asarray(im.convert("RGB"), dtype=np.uint8)
-    arr = np.asarray(image)
-    if arr.ndim != 3 or arr.shape[2] != 3 or arr.dtype != np.uint8:
-        raise ValueError(
-            f"Expected uint8 (H, W, 3) RGB array, got shape {arr.shape}, dtype {arr.dtype}"
-        )
-    return arr
-
-
 class BaseVGGTOmega:
     """Shared VGGT-Omega preprocessing + pose/depth post-processing.  Requires
     ``self.target_h/target_w``, ``self.inputs`` and ``self._forward`` from the
@@ -152,33 +123,55 @@ class BaseVGGTOmega:
     def height(self) -> int | None:
         return self.target_h
 
-    def infer(self, images: list[str | Path] | list[np.ndarray]) -> dict[str, np.ndarray]:
-        """Run inference on image paths or uint8 RGB arrays.
+    def _load_image(self, image: ImageInput) -> torch.Tensor:
+        """Decode any ImageInput into a CHW uint8 RGB tensor (CPU)."""
+        return to_pixel_uint8(to_image_tensor(image))
+
+    def infer(self, images: list[ImageInput]) -> dict[str, np.ndarray]:
+        """Run inference on image paths, RGB arrays or tensors.
 
         The static image size comes from the backend base's resolved geometry;
-        images are letterboxed to it and spatial outputs are cropped back to the
-        content region.  Mean/std normalization happens inside the model, so
-        inputs only need to be float32 RGB in [0,1] (done here).
+        images are letterboxed (VGGT convention: raw-scale ``round`` tiles,
+        bicubic) to it and spatial outputs are cropped back to the content
+        region.  Mean/std normalization happens inside the model, so inputs
+        only need to be float32 RGB in [0,1] (done here).
 
         Returns ``{pose_enc, extrinsic, intrinsic, depth, depth_conf, crop}``.
         """
         if not images:
             raise ValueError("At least one image is required")
-        frames = [_load_rgb_uint8(image) for image in images]
-        canvases, crops = zip(
-            *(_letterbox_preprocess(frame, self.target_w, self.target_h) for frame in frames)
+        canvases, metas = zip(
+            *(
+                letterbox(
+                    self._load_image(image),
+                    self.target_h,
+                    self.target_w,
+                    scale_mode="round",
+                    resize=v2.InterpolationMode.BICUBIC,
+                    antialias=True,  # matches the legacy PIL bicubic within 1 uint8 level
+                )
+                for image in images
+            )
         )
-        crops_np = np.asarray(crops, dtype=np.int64)  # (N, 4) [ox, oy, h', w']
+        # VGGT pads into float [0,1] canvases; the letterbox meta maps 1:1 onto
+        # the old (ox, oy, h, w) crop tuple (pad_left, pad_top, tile_h, tile_w).
+        canvases = [c.float().div(255.0) for c in canvases]
+        crops_np = np.asarray(
+            [
+                [m["pad_left"], m["pad_top"], m["tile_h"], m["tile_w"]]
+                for m in metas
+            ],
+            dtype=np.int64,
+        )
         outputs = self._forward(self.build_feed(canvases))
         return self.postprocess(outputs, crops_np)
 
-    # ---- input-feed assembly ------------------------------------------------
-
-    def build_feed(self, canvases: list[np.ndarray]) -> dict:
-        """Stack the letterboxed canvases into the model's ``(1, N, 3, H, W)``
-        float32 input, keyed by the model's own input name.  Each backend casts
-        to the model's expected dtype (fp16 engine / declared ONNX dtype)."""
-        batch = np.stack(canvases).transpose(0, 3, 1, 2)[None]
+    def build_feed(self, canvases: list[torch.Tensor]) -> dict:
+        """Stack the letterboxed CHW canvases into the model's ``(1, N, 3, H, W)``
+        fp32 CPU tensor, keyed by the model's own input name.  Each backend
+        casts to the model's expected dtype (fp16 export / declared ONNX
+        dtype)."""
+        batch = torch.stack(canvases)[None]
         return {self.inputs[0]["name"]: batch}
 
     # ---- pose/depth post-processing -----------------------------------------

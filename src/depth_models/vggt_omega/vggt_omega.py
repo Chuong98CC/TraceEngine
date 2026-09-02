@@ -3,7 +3,7 @@
 ``BaseVGGTOmega`` holds the backend-agnostic pre/post (letterbox, feed
 assembly, pose/depth post-processing); the concrete wrapper supplies the
 static input geometry, the name-keyed ``self.inputs`` metadata, and
-``_forward``, mirroring ``s2m2.s2m2``.
+``_forward``.
 """
 
 from __future__ import annotations
@@ -12,6 +12,8 @@ from pathlib import Path
 
 import numpy as np
 import torch
+
+from utils.image_io import ImageInput
 
 from .base_vggt_omega import BaseVGGTOmega
 
@@ -42,10 +44,14 @@ class VGGT_Omega(BaseVGGTOmega):
     Despite the name, the file is not a TorchScript (jit) module — it is an
     ExportedProgram saved by torch.export, in either the classic pickle .pt2
     or the newer zip-based .pt format. The static (N, H, W) input size is
-    read from the saved example input; images are letterboxed to it and
-    spatial outputs are cropped back to the content region. Mean/std
-    normalization happens inside the model, so inputs only need to be
-    float32 RGB in [0,1] (done by ``BaseVGGTOmega``).
+    read from the saved example input; ``infer`` takes N images in any
+    ``ImageInput`` form — paths, RGB arrays or CHW tensors — decoded and
+    letterboxed by ``BaseVGGTOmega`` (via the shared ``utils.image_io``
+    helpers) into a CPU float32 ``(1, N, 3, H, W)`` feed that ``_forward``
+    casts to the export's dtype and runs on cuda.  Spatial outputs are
+    cropped back to the content region.  Mean/std normalization happens
+    inside the model, so the feed only needs to be float32 RGB in [0,1]
+    (done by ``BaseVGGTOmega``).
 
     Runs on CUDA: the exported graph is device-baked at trace time (RoPE
     derives its arange device from the lifted weights), and the lifted
@@ -79,8 +85,8 @@ class VGGT_Omega(BaseVGGTOmega):
         move_lifted_state_to_device(self._exported, "cuda")
         self._graph_module = self._exported.module()
 
-    def infer(self, images: list[str | Path] | list[np.ndarray]) -> dict[str, np.ndarray]:
-        """Run inference on exactly N image paths or uint8 RGB arrays.
+    def infer(self, images: list[ImageInput]) -> dict[str, np.ndarray]:
+        """Run inference on exactly N image paths, RGB arrays or tensors.
 
         N is the static frame count the model was exported with; see
         ``BaseVGGTOmega.infer`` for the pre/post-processing pipeline.
@@ -96,13 +102,15 @@ class VGGT_Omega(BaseVGGTOmega):
     run = infer
 
     def _forward(self, feed: dict) -> dict[str, np.ndarray]:
-        """Run the exported graph on the ``(1, N, 3, H, W)`` feed, casting to
-        the export's input dtype; returns the raw ``(1, N, ...)`` outputs
-        keyed for ``BaseVGGTOmega.postprocess``."""
+        """Run the exported graph on the ``(1, N, 3, H, W)`` CPU tensor feed,
+        casting to the export's input dtype; returns the raw ``(1, N, ...)``
+        outputs keyed for ``BaseVGGTOmega.postprocess``."""
         batch = next(iter(feed.values()))
-        batch = batch.astype(np.float16 if self._input_fp16 else np.float32)
+        dtype = torch.float16 if self._input_fp16 else torch.float32
         with torch.inference_mode():
-            pose_e, depth_e, conf_e = self._graph_module(torch.from_numpy(batch).cuda())
+            pose_e, depth_e, conf_e = self._graph_module(
+                batch.to(dtype=dtype, device="cuda")
+            )
         return {
             "pose_enc": pose_e.float().cpu().numpy(),
             "depth": depth_e.float().cpu().numpy(),
