@@ -27,8 +27,9 @@ model-specific pre/post-processing lives under `src/depth_models`,
 `src/flow_models`, and `src/det_seg_models`. The repo uses **uv** for
 environment management and **hatchling** as the build backend. Core
 dependencies: TensorRT, ONNX Runtime, PyTorch, OpenCV, NumPy, trimesh. Requires
-**Python ≥3.12, <3.13** (TensorRT / ONNX Runtime wheel availability). There are
-no tests.
+**Python ≥3.12.1, <3.13** (TensorRT / ONNX Runtime wheel availability; the
+3.12.1 floor excludes 3.12.0, where multiprocess 0.70.19 crashes at exit on
+the missing `RLock._recursion_count`). There are no tests.
 
 ## Environment setup
 
