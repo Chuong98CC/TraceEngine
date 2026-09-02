@@ -1,29 +1,27 @@
 #!/usr/bin/env python
 """Run WAFT optical flow inference on a video file or a folder of extracted
-frames (ONNX or TensorRT).
+frames (WAFTv2 torch.export ``.pt2`` artifact).
 
 A folder input is auto-detected when ``--input`` is a directory: frames are
 scanned as ``frame_{idx}.jpg`` / ``frame_{idx}.png``, sorted by index, and
 paired exactly like video frames.  Per-frame output files are then named
 after the anchor frame's source index instead of the running pair counter.
 
-Backend is auto-detected from the checkpoint file extension (``.onnx`` →
-ONNX Runtime, ``.engine`` → TensorRT).  If the path has no recognised
-extension the ``--backend`` flag picks the right default.
+The model is the WAFTv2 bf16 ``torch.export`` artifact wrapped by
+:class:`WAFTv2_PT2`.  A ``.pt2`` path is used as-is; an extension-less base
+name gets ``.pt2`` appended (legacy ``.onnx`` / ``.engine`` checkpoints are
+rejected).
 
 Usage:
-    # TensorRT default
-    python tools/infer_waft.py --input video.mp4 --backend trt --start
-
-    # ONNX default
-    python tools/infer_waft.py --input video.mp4 --backend onnx
+    # Video file (default checkpoint)
+    python tools/infer_waft.py --input video.mp4 --start 0
 
     # Folder of extracted frames
-    python tools/infer_waft.py --input frames/ --backend trt --stride 4
+    python tools/infer_waft.py --input frames/ --stride 4
 
-    # Explicit checkpoint (backend inferred from extension)
+    # Explicit .pt2 artifact
     python tools/infer_waft.py --input video.mp4 \\
-        --checkpoint weights/waftv2/waftv2_dinov3_i5_640x480.engine
+        --checkpoint weights/waftv2/waftv2_dinov3_i5_640x480_bf16.pt2
 """
 
 from __future__ import annotations
@@ -38,13 +36,13 @@ import cv2
 import numpy as np
 from tqdm import tqdm
 
-from flow_models.waft import WAFTOnnx, WAFT
+from flow_models.waftv2.waftv2_pt2 import WAFTv2_PT2
 from utils.streaming_utils import scan_image_folder
 from utils.visualize_flow import writeFlow, flow_to_image
 from utils.video_io import get_video_info, VideoWriter
 
 # ---------------------------------------------------------------------------
-# Default checkpoint (backend extension appended at load time)
+# Default checkpoint (.pt2 suffix appended at load time)
 # ---------------------------------------------------------------------------
 
 _DEFAULT_CKPT = "weights/waftv2/waftv2_dinov3_i5_640x480"
@@ -116,35 +114,31 @@ def _save_mask_jpg(
 
 
 # ---------------------------------------------------------------------------
-# Checkpoint / backend resolution
+# Checkpoint resolution
 # ---------------------------------------------------------------------------
 
-def _resolve_checkpoint(checkpoint: str, backend: str | None) -> tuple[str, str]:
-    """Return ``(resolved_path, backend)`` from the user-supplied checkpoint
-    and optional ``--backend`` flag.
+def _resolve_checkpoint(checkpoint: str) -> str:
+    """Return the resolved ``.pt2`` artifact path.
 
-    1. Path has ``.onnx`` / ``.engine`` extension → backend is inferred.
-    2. Path has no recognised extension → ``--backend`` is required to
-       append the right suffix to the default or user-supplied base name.
+    A ``.pt2`` path is used as-is.  An extension-less base name (the
+    default) gets ``.pt2`` appended.  Legacy ``.onnx`` / ``.engine``
+    checkpoints are rejected — this tool now runs the WAFTv2 ``torch.export``
+    artifact only.
     """
     path = Path(checkpoint)
     ext = path.suffix.lower()
 
-    if ext == ".onnx":
-        return checkpoint, "onnx"
-    if ext == ".engine":
-        return checkpoint, "trt"
-
-    # No recognised extension — needs explicit --backend.
-    if backend is None:
+    if ext == ".pt2":
+        return checkpoint
+    if ext in (".onnx", ".engine"):
         print(
-            f"ERROR: Cannot infer backend from checkpoint '{checkpoint}' "
-            f"(no .onnx / .engine extension).  Pass --backend onnx|trt."
+            f"ERROR: '{checkpoint}' is a legacy ONNX / TensorRT checkpoint. "
+            f"infer_waft.py now runs the WAFTv2 torch.export artifact — pass "
+            f"a .pt2 path (default: {_DEFAULT_CKPT}.pt2)."
         )
         sys.exit(1)
 
-    ext_map = {"onnx": ".onnx", "trt": ".engine"}
-    return checkpoint + ext_map[backend], backend
+    return checkpoint + ".pt2"
 
 
 # ---------------------------------------------------------------------------
@@ -152,15 +146,10 @@ def _resolve_checkpoint(checkpoint: str, backend: str | None) -> tuple[str, str]
 # ---------------------------------------------------------------------------
 
 def create_model(args: argparse.Namespace):
-    """Create the WAFT model for the resolved backend."""
-    ckpt_path, backend = _resolve_checkpoint(args.checkpoint, args.backend)
-
-    if backend == "trt":
-        print(f"Loading TensorRT engine: {ckpt_path}")
-        return WAFT(ckpt_path, bgr_input=not args.no_bgr_input)
-    else:
-        print(f"Loading ONNX model: {ckpt_path}")
-        return WAFTOnnx(ckpt_path, device=args.device, bgr_input=not args.no_bgr_input)
+    """Create the WAFTv2_PT2 model (bf16 torch.export .pt2 artifact)."""
+    ckpt_path = _resolve_checkpoint(args.checkpoint)
+    print(f"Loading PT2 artifact: {ckpt_path}")
+    return WAFTv2_PT2(ckpt_path, device=args.device, bgr_input=not args.no_bgr_input)
 
 
 # ---------------------------------------------------------------------------
@@ -333,6 +322,10 @@ def infer_frames(args: argparse.Namespace) -> None:
         # Run inference — model.__call__ handles pre/post processing
         flow = model(frame_a, frame_b)  # → [H_orig, W_orig, 2] float32
 
+        # Legacy WAFTBase.__call__ sanitised NaN / Inf before returning;
+        # keep the same parity for downstream masks / .flo / viz outputs.
+        flow = np.nan_to_num(flow, nan=0.0, posinf=0.0, neginf=0.0)
+
         # Per-frame outputs are named by the anchor frame's source index in
         # folder mode, the running pair counter in video mode.
         out_idx = frame_a_idx if frame_a_idx is not None else pair_idx
@@ -390,7 +383,7 @@ def infer_frames(args: argparse.Namespace) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Run WAFT optical flow inference on a video file or a "
-                    "folder of extracted frames (ONNX or TensorRT backend).",
+                    "folder of extracted frames (WAFTv2 torch.export .pt2).",
     )
     parser.add_argument(
         "--input", required=True, type=str,
@@ -398,22 +391,15 @@ def main() -> None:
              "(frame_{idx}.jpg / .png).",
     )
 
-    # Checkpoint & backend
+    # Checkpoint
     parser.add_argument(
         "--checkpoint",
         type=str,
         default=_DEFAULT_CKPT,
-        help="Path to model checkpoint.  Backend is inferred from the file "
-             f"extension (.onnx / .engine).  Default: {_DEFAULT_CKPT} + "
-             "extension from --backend.",
-    )
-    parser.add_argument(
-        "--backend",
-        default=None,
-        type=str,
-        choices=["onnx", "trt"],
-        help="Inference backend.  Required when --checkpoint has no .onnx / "
-             ".engine extension; ignored otherwise.",
+        help="Path to the WAFTv2 .pt2 artifact.  A .pt2 path is used as-is; "
+             "an extension-less base name gets .pt2 appended.  Legacy "
+             f".onnx / .engine checkpoints are rejected.  Default: "
+             f"{_DEFAULT_CKPT}.pt2",
     )
 
     # Output
@@ -473,7 +459,7 @@ def main() -> None:
         default="cuda",
         type=str,
         choices=["cuda", "cpu"],
-        help="ONNX Runtime device (default: cuda).  Ignored for TRT backend.",
+        help="Device to run the .pt2 artifact on (default: cuda).",
     )
     parser.add_argument(
         "--no-bgr-input",

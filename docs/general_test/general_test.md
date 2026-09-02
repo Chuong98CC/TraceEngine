@@ -91,7 +91,7 @@ CLI, its output, and how it plugs into the pipeline. Ordered by pipeline step:
 |---|---|---|---|---|---|
 | 2 | [`streaming.md`](module/streaming.md) | `run_depth_stream.py` / `visualize_stream.py` | streaming multi-camera depth + pose (incl. RGB-D `a2f`), trajectory video | DA3 / VGGT-Omega / Any2Full (`.pt2`) | `scripts/general_test/infer_stream_stereo.sh`, `infer_stream_rgbd.sh`, `visualize_stream.sh` |
 | 2 | [`any2full.md`](module/any2full.md) | `infer_any2full.py` | RGB-D depth densification (the `a2f` backend component) | Any2Full (`.pt2`) | — |
-| 2 (opt.) | [`waft.md`](module/waft.md) | `infer_waft.py` | dense optical flow → motion masks (zero moving pixels during chunk alignment) | WAFT (ONNX / TensorRT) | `scripts/general_test/infer_waft.sh` |
+| 2 (opt.) | [`waft.md`](module/waft.md) | `infer_waft.py` | dense optical flow → motion masks (zero moving pixels during chunk alignment) | WAFTv2 (`.pt2`) | `scripts/general_test/infer_waft.sh` |
 | 3 | [`rexomni.md`](module/rexomni.md) | `infer_rexomni.py` | open-vocabulary object detection from a text prompt | Rex-Omni (`.venv-rexomni`) | `scripts/general_test/setup_rexomni_env.sh` |
 | 3 | [`sam3.md`](module/sam3.md) | `infer_sam3.py` | promptable segmentation (box + text) | SAM3 (`.pt2`) | — |
 | 3 | [`romav2.md`](module/romav2.md) | `infer_romav2.py` | multi-image keypoint matching (points visible in all images) | RoMAv2 (`.pt2`) | `scripts/general_test/infer_romav2.sh` |
@@ -115,7 +115,7 @@ extraction:
 
 | Script | What it runs |
 |---|---|
-| `infer_waft.sh` | WAFT motion masks on a demo frame folder (TRT engine, `-thr 2`) |
+| `infer_waft.sh` | WAFTv2 motion masks on a demo frame folder (`.pt2` artifact, `-thr 2`) |
 | `infer_stream_stereo.sh` | Stereo streaming (`da3` / `vggt_omega`) on the sample extraction, then renders the trajectory video |
 | `infer_stream_rgbd.sh` | RGB-D streaming (`a2f` backend) on the sample extraction, then renders the trajectory video |
 | `infer_tapip3d.sh` | 3D point tracking of the coffee cup (`--bbox 1 240 100 340 --text_prompt "brown coffee cup"`), env-configurable via `IMG_DIR` / `DEPTH_DIR` / `OUTPUT_DIR` |
