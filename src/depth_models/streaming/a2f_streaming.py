@@ -9,7 +9,7 @@ are the ``input_dirs``; the parallel raw-depth folders (one per RGB folder,
 ``.lz4`` uint16 mm maps with matching frame stems, e.g. ``cam_head`` →
 ``depth_cam_head``) are passed as ``depth_dirs`` and loaded via
 ``load_depth_lz4`` (metres = mm x ``depth_scale``, 0 = invalid).  The
-online streamer (``tools/astribot/run_subtask_stream.py --backend a2f``)
+online streamer (``tools/astribot/run_step2_depth_stream.py --backend a2f``)
 supplies the depth as raw uint16 ndarrays instead — ``_process_chunk`` and
 ``_load_depth`` accept both.
 
@@ -145,7 +145,7 @@ class A2F_Streaming(BaseStreaming):
         rgb_paths = self.img_list[start:end]
         if self._depth_shape is None:
             # Online mode swaps BGR arrays into img_list (see
-            # tools/astribot/run_subtask_stream.py), so the reference frame
+            # tools/astribot/run_step2_depth_stream.py), so the reference frame
             # may be an array instead of a path.
             first = rgb_paths[0]
             if isinstance(first, str):
@@ -178,7 +178,7 @@ class A2F_Streaming(BaseStreaming):
         """Raw sensor depth -> (H, W) float32 metres.
 
         Accepts an .lz4 uint16 mm path (disk flow) or a raw uint16 ndarray
-        (online mode; see tools/astribot/run_subtask_stream.py); 0 = invalid
+        (online mode; see tools/astribot/run_step2_depth_stream.py); 0 = invalid
         -> 0.0 metres."""
         if isinstance(path_or_arr, (str, Path)):
             depth = load_depth_lz4(Path(path_or_arr), shape).astype(np.float32)

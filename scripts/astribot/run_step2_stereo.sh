@@ -1,4 +1,4 @@
-python tools/astribot/run_subtask_stream.py \
+python tools/astribot/run_step2_depth_stream.py \
     --repo-id Kronze157/astri_making_coffee_vlva \
     --data-root /data/astri_making_coffee_v1 \
     --episode-idxes 0 \

@@ -6,7 +6,7 @@ cam_head/ folder saved by Step 1 — extract_frames.py --mode key_frames):
 first Step 3a (run_object_detection.py — RexOmni detections, under
 .venv-rexomni), then Step 3b (run_object_init_points.py — SAM3 masks +
 RoMAv2 keypoints, main env). This is the folder-input variant of
-run_subtask_step3.py: instead of an episode key-frames root, the folder is
+run_step3_init_points.py: instead of an episode key-frames root, the folder is
 treated as sub-task 00 of a synthetic episode labelled --episode-idx
 (default 0) and the folder name is the default camera key.
 

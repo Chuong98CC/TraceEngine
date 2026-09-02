@@ -3,6 +3,7 @@ Standalone runtime for the exported SAM3 image model (torch.export .pt2).
 """
 
 import os
+import warnings
 from typing import Optional, Sequence, Union
 
 import torch
@@ -60,7 +61,13 @@ class Sam3Image:
         self.device = device
         self.autocast_dtype = autocast_dtype
         self.tokenizer = SimpleTokenizer(bpe_path=bpe_path or _DEFAULT_BPE_PATH)
-        self.exported = torch.export.load(checkpoint_path)
+        # torch.export.load maps the archive's read-only buffers with
+        # torch.frombuffer, which warns once per process that the buffer is
+        # not writable (a harmless artifact of the zip-backed archive)
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore",
+                                    message=r"The given buffer is not writable.*")
+            self.exported = torch.export.load(checkpoint_path)
         self.transform = v2.Compose(
                 [
                     v2.ToDtype(torch.uint8, scale=True),

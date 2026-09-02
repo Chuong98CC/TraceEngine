@@ -17,6 +17,7 @@ Usage:
 from __future__ import annotations
 
 import json
+import warnings
 from itertools import combinations
 from pathlib import Path
 
@@ -66,7 +67,13 @@ class RoMaV2PT2:
         # NOTE: the .pt2 stores tensors on the device it was exported from
         # (CUDA here); running on a CPU-only machine requires a CPU export.
         # ExportedProgram.module() is always inference-mode (eval() unsupported).
-        self.module: torch.nn.Module = torch.export.load(model_path).module()
+        # torch.export.load maps the archive's read-only buffers with
+        # torch.frombuffer, which warns once per process that the buffer is
+        # not writable (a harmless artifact of the zip-backed archive)
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore",
+                                    message=r"The given buffer is not writable.*")
+            self.module: torch.nn.Module = torch.export.load(model_path).module()
 
     def _load_image(self, img_like: ImageInput) -> torch.Tensor:
         if isinstance(img_like, (str, Path)):
@@ -81,6 +88,10 @@ class RoMaV2PT2:
             assert img_like.shape[-1] == 3, (
                 f"Image must have 3 channels, but got shape {img_like.shape=}"
             )
+            if not img_like.flags.writeable:
+                # np.asarray on a decoded PIL image can yield a read-only
+                # view; torch.from_numpy warns on non-writable input
+                img_like = img_like.copy()
             img = torch.from_numpy(img_like).permute(2, 0, 1)
         elif isinstance(img_like, torch.Tensor):
             assert img_like.shape[-3] == 3, (

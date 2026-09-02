@@ -37,8 +37,8 @@ flowchart LR
     end
 
     subgraph Step2["Step 2 · Camera Pose + Depth (each frame)"]
-        FR --> RS{"run_depth_stream.py<br/>--backend"}
         WF["infer_waft.py — motion masks<br/>(optional)"] --> RS
+        FR --> RS{"run_depth_stream.py<br/>--backend"}
         RS -->|"vggt_omega / da3"| ST["Stereo / mono<br/>depth + pose"]
         RS -->|"a2f (RGB-D)"| A2F["Any2Full densified<br/>depth + pose"]
         ST --> OUT["depth_&lt;cam&gt;/frame_*.lz4 + .npz<br/>metric depth + camera pose"]
@@ -106,7 +106,7 @@ and verifies the output contract:
 | Step | Page | What it verifies | Entry points |
 |---|---|---|---|
 | 2 | [`step2.md`](pipeline/step2.md) | Camera pose + depth: chunked streaming → SIM3 alignment → per-frame `depth` + `pose` outputs | `run_depth_stream.py`, `infer_stream_stereo.sh`, `infer_stream_rgbd.sh`, `visualize_stream.sh` |
-| 3 | [`step3.md`](pipeline/step3.md) | Sampling keypoints: RexOmni detections (3a) → SAM3 masks + RoMAv2 keypoints (3b) | `run_e2e_init_points.py`, `infer_step3.sh`, `run_subtask_step3.py` (dataset mode) |
+| 3 | [`step3.md`](pipeline/step3.md) | Sampling keypoints: RexOmni detections (3a) → SAM3 masks + RoMAv2 keypoints (3b) | `run_e2e_init_points.py`, `infer_step3.sh`, `run_step3_init_points.py` (dataset mode) |
 
 ## Ready-to-run scripts (`scripts/general_test/`)
 
@@ -136,7 +136,7 @@ for a particular dataset:
   write frames to disk (see [`docs/astribot/`](../astribot/)). The
   `tools/astribot` streamers reuse the same streaming backend classes and
   the same output contract, so the same visualizers load their results.
-  `run_subtask_step3.py` is the dataset-mode driver of the Step-3 pipeline
+  `run_step3_init_points.py` is the dataset-mode driver of the Step-3 pipeline
   (see [`pipeline/step3.md`](pipeline/step3.md)).
 - `tools/hifi-umi` — HiFi-UMI dataset preprocessing (`extract_frames.py`,
   `generate_masks.py`), reusing the same model entry points.

@@ -37,19 +37,19 @@ the dataset alongside the RGB frames and slice-swapped into
 Examples
 --------
     # All sub-tasks of episode 0, cam_head, VGGT-Omega (WAFT off by default)
-    python tools/astribot/run_subtask_stream.py \
+    python tools/astribot/run_step2_depth_stream.py \
         --repo-id Kronze157/astri_making_coffee_vlva \
         --data-root /data/astri_making_coffee --episode-idxes 0
 
     # Stereo pair, DA3 backend, with WAFT motion masks
-    python tools/astribot/run_subtask_stream.py \
+    python tools/astribot/run_step2_depth_stream.py \
         --repo-id Kronze157/astri_making_coffee_vlva \
         --data-root /data/astri_making_coffee --episode-idxes 0 \
         --camera-idxes 4 5 --backend da3 --with-optical-flow
 
     # RGB-D camera, a2f backend (Any2Full densifies the sensor depth;
     # defaults to the first camera with a paired raw-depth feature)
-    python tools/astribot/run_subtask_stream.py \
+    python tools/astribot/run_step2_depth_stream.py \
         --repo-id Kronze157/astri_making_coffee_vlva \
         --data-root /data/astri_making_coffee --episode-idxes 0 \
         --backend a2f
@@ -149,6 +149,11 @@ def parse_args(argv: list[str] | None = None):
                         help="device (default: auto)")
     parser.add_argument("--skip-done", action="store_true",
                         help="skip sub-tasks whose pipeline output already exists")
+    parser.add_argument("--use-inferred-splits", action="store_true",
+                        help="prefer the sub-task split frames inferred by "
+                             "detect_subtask (subtask_splits.json) over the "
+                             "dataset's ground-truth subtask_index column "
+                             "when both exist")
     return parser.parse_args(argv)
 
 

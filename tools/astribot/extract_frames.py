@@ -85,6 +85,7 @@ import argparse
 import json
 import os
 import subprocess
+import warnings
 
 import cv2
 import numpy as np
@@ -748,7 +749,12 @@ class DataExtract:
         # key-frame labels at the top edge
         ax.legend(bbox_to_anchor=(1.01, 1.0), loc="upper left",
                   borderaxespad=0.0)
-        plt.tight_layout()
+        # the legend sits outside the axes (bbox_to_anchor), which tight_layout
+        # cannot account for and warns about; the savefig below crops with
+        # bbox_inches="tight", so the output includes the legend correctly
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", message=r".*tight_layout.*")
+            plt.tight_layout()
         edir = self._episode_dir()
         os.makedirs(edir, exist_ok=True)
         plt.savefig(os.path.join(edir, f"split_graph_{self.ep_idx:06d}.png"),

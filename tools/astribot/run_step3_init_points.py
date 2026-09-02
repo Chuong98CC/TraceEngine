@@ -19,25 +19,25 @@ needs Python 3.10 / torch 2.7 while the SAM3/RoMAv2 .pt2 runtimes need the
 main env), so they are launched sequentially as subprocesses. Run it from
 the **main** environment:
 
-    python tools/astribot/run_subtask_step3.py \
+    python tools/astribot/run_step3_init_points.py \
         --repo-id Kronze157/astri_making_coffee_vlva \
         --data-root /data/astri_making_coffee --episode-idxes 0
 
 Examples
 --------
     # Full pipeline on episode 0: extract key-frames, 3a, 3b
-    python tools/astribot/run_subtask_step3.py \
+    python tools/astribot/run_step3_init_points.py \
         --repo-id Kronze157/astri_making_coffee_vlva \
         --data-root /data/astri_making_coffee --episode-idxes 0
 
     # Reuse the key-frames on disk: re-run only 3b (tuned params)
-    python tools/astribot/run_subtask_step3.py \
+    python tools/astribot/run_step3_init_points.py \
         --repo-id Kronze157/astri_making_coffee_vlva \
         --data-root /data/astri_making_coffee --episode-idxes 0 \
         --skip-extract --skip-3a --top-k 64
 
     # Skip RexOmni entirely: extract, then 3b with SAM3 text-only prompts
-    python tools/astribot/run_subtask_step3.py \
+    python tools/astribot/run_step3_init_points.py \
         --repo-id Kronze157/astri_making_coffee_vlva \
         --data-root /data/astri_making_coffee --episode-idxes 0 \
         --no-rexomni
@@ -58,7 +58,7 @@ from utils.keyframe_utils import (
 DEFAULT_PROMPTS = ["brown coffee cup", "robot gripper"]
 DEFAULT_MAX_KEYFRAMES = 8
 DEFAULT_TOP_K = 128
-DEFAULT_BBOX_SCALE = 1.5
+DEFAULT_BBOX_SCALE = 1.25
 DEFAULT_NUM_CORRESP = 2000
 DEFAULT_STRATEGY = "reference"
 #: default path of the RexOmni environment (relative to the repo root).

@@ -99,8 +99,8 @@ tools/
 │       └── run_e2e_init_points.py         # Step 3 driver on a key-frame folder (3a + 3b)
 ├── astribot/                   # Case 2 (README): online streaming, no frame extraction
 │   ├── extract_frames.py       # sub-task splits, key-frame jpgs, per-subtask videos/frames (+ depth .lz4)
-│   ├── run_subtask_stream.py   # online per-sub-task depth+pose streaming (da3/vggt_omega/a2f)
-│   ├── run_subtask_step3.py    # Step 3 driver on episodes (extract key-frames + 3a + 3b)
+│   ├── run_step2_depth_stream.py   # online per-sub-task depth+pose streaming (da3/vggt_omega/a2f)
+│   ├── run_step3_init_points.py    # Step 3 driver on episodes (extract key-frames + 3a + 3b)
 │   ├── run_subtask_a3f.py      # online per-sub-task Any2Full RGB-D densification
 │   └── visualize_subtask_stream.py  # per-sub-task trajectory videos, online (no re-inference)
 ├── push_ckpt_2HF.py            # upload weights/ to Hugging Face (Chuong98vt/TraceEngine)
@@ -193,7 +193,7 @@ per-view `depth` + warped `extrinsics` + `intrinsics` per frame.
   (wrappers: `scripts/general_test/infer_stream_stereo.sh` /
   `infer_stream_rgbd.sh` / `visualize_stream.sh`). The online per-sub-task
   variant that streams straight from the dataset (no frames on disk) is
-  `tools/astribot/run_subtask_stream.py` (see
+  `tools/astribot/run_step2_depth_stream.py` (see
   `docs/astribot/astribot_subtask_depth_stream.md`).
 
 ## Any2Full (RGB-D depth densification)
@@ -256,7 +256,7 @@ python tools/astribot/extract_frames.py \
     --camera-idxes 0 1 --interval 4 --max-frames 50
 
 # --- Online per-sub-task streaming straight from the dataset (no frame extraction) ---
-python tools/astribot/run_subtask_stream.py \
+python tools/astribot/run_step2_depth_stream.py \
     --repo-id Kronze157/astri_making_coffee_vlva \
     --data-root /data/astri_making_coffee_v1 --episode-idxes 0 --backend vggt_omega
 

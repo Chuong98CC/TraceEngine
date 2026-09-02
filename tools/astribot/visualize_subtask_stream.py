@@ -1,9 +1,9 @@
 """Render the trajectory video of every sub-task segment of an episode,
-online — the visualization counterpart of ``run_subtask_stream.py``.
+online — the visualization counterpart of ``run_step2_depth_stream.py``.
 
 Reuses ``DataExtract`` (tools/astribot/extract_frames.py) for dataset
 introspection, episode/camera selection and sub-task split-frame inference
-(identical flags to ``run_subtask_stream.py``), then for each sub-task
+(identical flags to ``run_step2_depth_stream.py``), then for each sub-task
 segment renders the streaming trajectory video from the saved pipeline
 outputs: per-frame ``depth``/``extrinsics``/``intrinsics`` npz files under
 ``<out-dir>/pipeline/<episode>/subtask_XX/`` (the same contract as
@@ -127,7 +127,7 @@ class SubtaskStreamVisualize(DataExtract):
     """Render one trajectory video per sub-task segment, online.
 
     Reuses DataExtract for dataset introspection, episode/camera selection
-    and split-frame inference (same selection as ``run_subtask_stream.py``);
+    and split-frame inference (same selection as ``run_step2_depth_stream.py``);
     the frames shown in the point clouds are decoded from the LeRobotDataset
     on the fly, the geometry comes from the saved pipeline npz files.
     """

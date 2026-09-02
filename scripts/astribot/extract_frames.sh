@@ -1,5 +1,5 @@
 python tools/astribot/extract_frames.py \
         --repo-id Kronze157/astri_making_coffee_vlva \
         --data-root /data/astri_making_coffee_v1 \
-        --camera-idxes 0 --mode videos --use-inferred-splits
+        --camera-idxes 0 --mode detect_subtask --use-inferred-splits
 

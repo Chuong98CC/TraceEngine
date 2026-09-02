@@ -38,6 +38,10 @@ def to_image_tensor(image: ImageInput, mode: Optional[str] = "RGB") -> torch.Ten
             image = image.convert(mode)
         return v2.functional.to_image(image)
     elif isinstance(image, np.ndarray):
+        if not image.flags.writeable:
+            # np.asarray on a decoded PIL image can yield a read-only view;
+            # torch.from_numpy (inside to_image) warns on non-writable input
+            image = image.copy()
         return v2.functional.to_image(image)
     elif isinstance(image, torch.Tensor):
         if image.ndim != 3:

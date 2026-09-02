@@ -828,15 +828,22 @@ class RexOmniWrapper:
         ).to(self.model.device)
 
         # Prepare generation kwargs
+        do_sample = self.temperature > 0  # sampling enabled when temperature > 0
         generation_kwargs = {
             "max_new_tokens": self.max_tokens,
-            "temperature": self.temperature,
-            "top_p": self.top_p,
-            "top_k": self.top_k,
             "repetition_penalty": self.repetition_penalty,
-            "do_sample": self.temperature > 0,  # Enable sampling if temperature > 0
+            "do_sample": do_sample,
             "pad_token_id": self.processor.tokenizer.eos_token_id,
         }
+        # transformers warns when temperature/top_p/top_k are passed with
+        # do_sample=False (they only affect sample-based generation), so pass
+        # them only when sampling
+        if do_sample:
+            generation_kwargs.update(
+                temperature=self.temperature,
+                top_p=self.top_p,
+                top_k=self.top_k,
+            )
 
         # Generate
         with torch.no_grad():
@@ -892,15 +899,22 @@ class RexOmniWrapper:
         ).to(self.model.device)
 
         # Prepare generation kwargs
+        do_sample = self.temperature > 0  # sampling enabled when temperature > 0
         generation_kwargs = {
             "max_new_tokens": self.max_tokens,
-            "temperature": self.temperature,
-            "top_p": self.top_p,
-            "top_k": self.top_k,
             "repetition_penalty": self.repetition_penalty,
-            "do_sample": self.temperature > 0,
+            "do_sample": do_sample,
             "pad_token_id": self.processor.tokenizer.eos_token_id,
         }
+        # transformers warns when temperature/top_p/top_k are passed with
+        # do_sample=False (they only affect sample-based generation), so pass
+        # them only when sampling
+        if do_sample:
+            generation_kwargs.update(
+                temperature=self.temperature,
+                top_p=self.top_p,
+                top_k=self.top_k,
+            )
 
         # Generate for entire batch
         with torch.no_grad():

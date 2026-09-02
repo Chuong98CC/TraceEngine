@@ -37,7 +37,7 @@ The high-level drivers launch the two tools **sequentially as
 subprocesses**, so you run them from the **main** environment:
 
 ```
-run_e2e_init_points.py / run_subtask_step3.py  (drivers)
+run_e2e_init_points.py / run_step3_init_points.py  (drivers)
     ├── 3a: run_object_detection.py  →  <out>/detections/ep{idx:06d}.json
     └── 3b: run_object_init_points.py →  <out>/init_points/ep{idx:06d}/subtask_XX/<prompt_slug>/
 ```
@@ -48,7 +48,7 @@ run_e2e_init_points.py / run_subtask_step3.py  (drivers)
 |---|---|---|
 | `tools/general_test/pipeline/run_e2e_init_points.py` | **one key-frame folder** (one sub-task of one camera, dataset-independent) | 3a + 3b; the folder is sub-task 00 of a synthetic episode labelled `--episode-idx` (default 0), the folder name is the camera key |
 | `scripts/general_test/infer_step3.sh` | wrapper of `run_e2e_init_points.py` | `python tools/general_test/pipeline/run_e2e_init_points.py --keyframes-dir "$1" "$@"` |
-| `tools/astribot/run_subtask_step3.py` | **episodes on the dataset** | Step 1 (extract the sub-task key-frames) + 3a + 3b; the dataset layer that drives the same tools (see [`docs/astribot/`](../../astribot/)) |
+| `tools/astribot/run_step3_init_points.py` | **episodes on the dataset** | Step 1 (extract the sub-task key-frames) + 3a + 3b; the dataset layer that drives the same tools (see [`docs/astribot/`](../../astribot/)) |
 | `tools/general_test/pipeline/run_object_detection.py` | 3a alone | episode layout or `--keyframes-dir` |
 | `tools/general_test/pipeline/run_object_init_points.py` | 3b alone | episode layout or `--keyframes-dir`; `--no-rexomni` for SAM3 text-only prompts (no 3a JSON) |
 
@@ -62,7 +62,7 @@ python tools/general_test/pipeline/run_e2e_init_points.py \
 bash scripts/general_test/infer_step3.sh <key-frames-dir> [extra args...]
 
 # Dataset mode (Case 2): episodes on the dataset, extraction included
-python tools/astribot/run_subtask_step3.py \
+python tools/astribot/run_step3_init_points.py \
     --repo-id Kronze157/astri_making_coffee_vlva \
     --data-root /data/astri_making_coffee --episode-idxes 0
 

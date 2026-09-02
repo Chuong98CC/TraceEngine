@@ -1,4 +1,4 @@
-# Per-Sub-Task Depth + Pose Streaming (`tools/astribot/run_subtask_stream.py`)
+# Per-Sub-Task Depth + Pose Streaming (`tools/astribot/run_step2_depth_stream.py`)
 
 Streams **metric depth + camera pose per sub-task segment** directly from a
 local [LeRobotDataset](https://github.com/huggingface/lerobot) copy of an
@@ -66,7 +66,7 @@ are).
 ### 1. All sub-tasks of one episode, single camera, VGGT-Omega
 
 ```bash
-python tools/astribot/run_subtask_stream.py \
+python tools/astribot/run_step2_depth_stream.py \
     --repo-id Kronze157/astri_making_coffee_vlva \
     --data-root /data/astri_making_coffee \
     --episode-idxes 0
@@ -79,7 +79,7 @@ dataset). WAFT is **off by default**; add `--with-optical-flow` to run it
 ### 2. Stereo pair with WAFT motion masks
 
 ```bash
-python tools/astribot/run_subtask_stream.py \
+python tools/astribot/run_step2_depth_stream.py \
     --repo-id Kronze157/astri_making_coffee_vlva \
     --data-root /data/astri_making_coffee \
     --episode-idxes 0 \
@@ -94,7 +94,7 @@ folders with identical frame stems.
 ### 3. DA3 backend, one episode per task
 
 ```bash
-python tools/astribot/run_subtask_stream.py \
+python tools/astribot/run_step2_depth_stream.py \
     --repo-id Kronze157/astri_making_coffee_vlva \
     --data-root /data/astri_making_coffee \
     --one-per-task --backend da3
@@ -148,7 +148,7 @@ the `extrinsics` (3×4, world→camera), `intrinsics` (3×3) and the depth
 
 `tools/astribot/visualize_subtask_stream.py` renders one trajectory video per
 sub-task segment from the saved pipeline outputs — the visualization
-counterpart of `run_subtask_stream.py`, built on
+counterpart of `run_step2_depth_stream.py`, built on
 `tools/general_test/pipeline/visualize_stream.py` but with the colour frames decoded
 **online from the dataset** (no extracted frames or videos on disk). Full
 usage and argument reference: `astribot_visualize_subtask_depth_stream.md`.
@@ -162,7 +162,7 @@ python tools/astribot/visualize_subtask_stream.py \
 ```
 
 - Selection flags (`-id`, `-d`, `-c`, `-e`, `--one-per-task`, `-x`, `-o`)
-  match `run_subtask_stream.py`; cameras must match the ones used for
+  match `run_step2_depth_stream.py`; cameras must match the ones used for
   streaming. `--stride` only affects the view fitting (the rendered steps are
   the saved file stems).
 - Per segment: `--fps` (10), `--size` (960x540), `--max-points` (100000);

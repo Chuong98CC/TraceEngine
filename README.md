@@ -111,49 +111,39 @@ performed **for each subtask**:
    track the keypoints across frames and save the output.
 
 ```mermaid
-flowchart TD
-    V["Synchronized videos from different cameras of an episode"] --> KF
-
-    subgraph KF["Step 1 · Key-Frame Extracting"]
-        direction TB
-        Q1{"Subtask labels in the dataset?"}
-        Q1 -->|"Yes"| L1["Use ground-truth start / end frames"]
-        Q1 -->|"No"| L2["Key-frames from gripper-state (close / open)<br/>or hand motion (human, To-Do);<br/>start / end = midpoints between key-frames"]
-        L1 --> SPLIT["Subtask = start + end + key-frames"]
-        L2 --> SPLIT
+flowchart LR
+    subgraph Step1["Step 1 · Key-Frame Extracting"]
+        V["Synchronized videos<br/>(multi-camera episode)"] --> Q1{"Subtask labels<br/>in the dataset?"}
+        Q1 -->|"Yes"| L1["Ground-truth<br/>start / end frames"]
+        Q1 -->|"No"| L2["Gripper-state / hand-motion key-frames<br/>start / end = midpoints between them"]
+        L1 --> SUB["Subtask = start + end + key-frames"]
+        L2 --> SUB
     end
 
-    KF --> LOOP{"For each subtask"}
-    LOOP --> POS
-    LOOP --> KP
-
-    subgraph POS["Step 2 · Camera Pose + Depth (each frame)"]
-        direction TB
-        CH["Split the sequence into overlapped chunks<br/>(≤ 64 views), optional down-sampling (e.g. interval=4)"] --> Q2{"Camera setup"}
+    subgraph Step2["Step 2 · Camera Pose + Depth (each frame)"]
+        SUB --> CH["Overlapped chunks ≤ 64 views<br/>(optional down-sampling)"]
+        CH --> Q2{"Camera setup"}
         Q2 -->|"Stereo pair"| M1["VGGT-Omega"]
-        Q2 -->|"RGB-D"| M2["Any2Full (densify raw depth) → DA3<br/>(optional: raw depth directly)"]
-        Q2 -->|"Arbitrary RGB"| M3["DA3Nested or VGGT-Omega"]
-        M1 --> AL["Chunk alignment (SLAM)<br/>→ global camera poses + depth"]
+        Q2 -->|"RGB-D"| M2["Any2Full (densify) → DA3<br/>(raw depth optional)"]
+        Q2 -->|"Arbitrary RGB"| M3["DA3Nested / VGGT-Omega"]
+        M1 --> AL["Chunk alignment (SLAM)<br/>→ global poses + depth"]
         M2 --> AL
         M3 --> AL
     end
 
-    subgraph KP["Step 3 · Sampling Keypoints (key-frames)"]
-        direction TB
-        T["Text prompt per interacted object<br/>(from the subtask description)"] --> RX["RexOmni — detect objects<br/>in start / end / key-frames"]
-        RX --> SM["SAM3 — segment object masks<br/>(bbox + text prompt)"]
-        SM --> RM["RoMAv2 — match keypoints across key-frames<br/>on enlarged bbox crops"]
-        RM --> TK["Keep top-k keypoints inside the object masks"]
+    subgraph Step3["Step 3 · Sampling Keypoints (key-frames)"]
+        T["Text prompt per interacted object"] --> RX["RexOmni — object detection"]
+        SUB -->|"key-frames"| RX
+        RX --> SM["SAM3 — segment object masks"]
+        SM --> RM["RoMAv2 — keypoint matching"]
+        RM --> TK["top-k keypoints<br/>inside the masks"]
     end
 
-    POS --> TR
-    KP --> TR
-
-    subgraph TR["Step 4 · 3D Trace"]
-        TP["TAPIP3D — track keypoint 3D positions<br/>from first to last frame of the subtask"]
+    subgraph Step4["Step 4 · 3D Trace"]
+        AL --> TP["TAPIP3D — 3D point tracking"]
+        TK --> TP
+        TP --> OUT["3D traces + visibility<br/>saved output"]
     end
-
-    TR --> OUT["Save output"]
 ```
 
 ### Step 1 — Key-Frame Extracting
@@ -257,7 +247,7 @@ to disk, so no extracted frames or per-subtask videos are needed. Sub-task
 splits are taken from the ground-truth `subtask_index` column (gripper-based
 inference fallback).
 
-- `run_subtask_stream.py` — per-sub-task depth + pose streaming (DA3 /
+- `run_step2_depth_stream.py` — per-sub-task depth + pose streaming (DA3 /
   VGGT-Omega / Any2Full backends, optional per-chunk WAFT motion masks).
 - `run_subtask_a3f.py` — per-sub-task Any2Full RGB-D densification (RGB-D
   cameras only).
@@ -267,7 +257,7 @@ inference fallback).
   (also the frame-extraction script of case 1).
 
 ```bash
-python tools/astribot/run_subtask_stream.py \
+python tools/astribot/run_step2_depth_stream.py \
     --repo-id Kronze157/astri_making_coffee_vlva \
     --data-root <dataset_dir> --episode-idxes 0 --backend vggt_omega
 ```

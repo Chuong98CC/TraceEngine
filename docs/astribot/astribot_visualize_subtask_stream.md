@@ -1,7 +1,7 @@
 # Per-Sub-Task Trajectory Video (`tools/astribot/visualize_subtask_stream.py`)
 
 Renders **one trajectory video per sub-task segment** of an episode, online —
-the visualization counterpart of `tools/astribot/run_subtask_stream.py` (see
+the visualization counterpart of `tools/astribot/run_step2_depth_stream.py` (see
 `astribot_subtask_depth_stream.md`). It does **not** re-run inference: the geometry
 (depth from the saved `.lz4` files, pose from the paired `.npz` files) is read
 from the pipeline outputs, and the colour images shown in the point clouds are
@@ -11,7 +11,7 @@ no extracted frames or videos need to exist on disk.
 - Reuses `DataExtract` (`tools/astribot/extract_frames.py`, see
   `astribot_extract_frames.md`) for dataset introspection, episode/camera
   selection and sub-task split-frame inference — the selection flags are
-  identical to `run_subtask_stream.py`, so the same episode/camera command
+  identical to `run_step2_depth_stream.py`, so the same episode/camera command
   line works for both tools.
 - Built on `tools/general_test/pipeline/visualize_stream.py`'s `render_stream_video`
   (the same lz4-depth + npz-pose input contract), with a `frame_loader` that
@@ -25,7 +25,7 @@ no extracted frames or videos need to exist on disk.
 
 ## How it works
 
-**Inputs.** Geometry comes from `run_subtask_stream.py`'s outputs:
+**Inputs.** Geometry comes from `run_step2_depth_stream.py`'s outputs:
 `<out-dir>/pipeline/<episode>/subtask_XX/depth_<camera>/frame_<idx>.lz4`
 (absolute dataset indices, stride-subsampled). Each `.lz4` holds the depth as
 raw uint16 mm and is reshaped with the `shape` recorded in the paired
@@ -74,7 +74,7 @@ python tools/astribot/visualize_subtask_stream.py \
     --camera-idxes 4 5 --fps 30
 ```
 
-The cameras must match the ones used by `run_subtask_stream.py` — results are
+The cameras must match the ones used by `run_step2_depth_stream.py` — results are
 read from the same `depth_<camera>` folders.
 
 ## Output
@@ -83,7 +83,7 @@ read from the same `depth_<camera>` folders.
 <out-dir>/pipeline/                     # <out-dir> defaults to <data-root>/eps_data
 └── ep000000/
     ├── subtask_00/
-    │   ├── depth_cam_head/             # run_subtask_stream.py outputs (read-only)
+    │   ├── depth_cam_head/             # run_step2_depth_stream.py outputs (read-only)
     │   └── trajectory.mp4              # ← produced here, per segment
     ├── subtask_01/
     │   └── trajectory.mp4
@@ -116,7 +116,7 @@ read from the same `depth_<camera>` folders.
 ## Notes
 
 - Requires `open3d` + `imageio` (the offscreen renderer), plus the
-  lz4/npz outputs of `run_subtask_stream.py` — the tool only renders, it
+  lz4/npz outputs of `run_step2_depth_stream.py` — the tool only renders, it
   never runs inference.
 - The final `AttributeError: '_thread.RLock' …` printed at interpreter
   shutdown is harmless `multiprocess.resource_tracker` noise (exit code 0).
