@@ -1,7 +1,8 @@
 """Standalone RoMaV2 inference wrapper for an exported .pt2 program.
 
 Only depends on torch/numpy/PIL — no `romav2` package, no checkpoint download.
-The exported program expects fixed-resolution inputs (see config.json written
+Image decoding is shared via ``utils.image_io`` (PIL / torchvision).  The
+exported program expects fixed-resolution inputs (see config.json written
 next to the .pt2); `match_pair` resizes inputs accordingly, mirroring
 RoMaV2.match. `match` runs the multi-image strategy on top of `match_pair`.
 
@@ -37,12 +38,9 @@ from .utils import (
     to_pixel,
     warp_points,
 )
+from utils.image_io import ImageInput, to_image_tensor, to_pixel_uint8
 
 DEFAULT_MODEL_PATH: str = "weights/romav2/romav2.pt2"
-
-# Accepted image inputs (see _load_image): file path, PIL image, HWC numpy
-# array, or CHW/NCHW tensor (uint8 or float in [0, 1]).
-ImageInput = str | Path | Image.Image | np.ndarray | torch.Tensor
 
 class RoMaV2PT2:
     """Standalone inference wrapper around an exported RoMaV2 .pt2 program."""
@@ -76,43 +74,28 @@ class RoMaV2PT2:
             self.module: torch.nn.Module = torch.export.load(model_path).module()
 
     def _load_image(self, img_like: ImageInput) -> torch.Tensor:
-        if isinstance(img_like, (str, Path)):
-            img_pil = Image.open(img_like)
-            if img_pil.mode == "I;16":
-                raise NotImplementedError("Can't handle 16 bit images")
-            img_pil = img_pil.convert("RGB")
-            img = torch.from_numpy(np.array(img_pil)).permute(2, 0, 1)
-        elif isinstance(img_like, Image.Image):
-            img = torch.from_numpy(np.array(img_like)).permute(2, 0, 1)
-        elif isinstance(img_like, np.ndarray):
-            assert img_like.shape[-1] == 3, (
-                f"Image must have 3 channels, but got shape {img_like.shape=}"
-            )
-            if not img_like.flags.writeable:
-                # np.asarray on a decoded PIL image can yield a read-only
-                # view; torch.from_numpy warns on non-writable input
-                img_like = img_like.copy()
-            img = torch.from_numpy(img_like).permute(2, 0, 1)
-        elif isinstance(img_like, torch.Tensor):
-            assert img_like.shape[-3] == 3, (
-                f"Image must have 3 channels, but got shape {img_like.shape=}"
-            )
-            img = img_like
-        else:
-            raise ValueError(f"Unsupported image type: {type(img_like)}")
+        """Decode any ImageInput into a CHW uint8 RGB tensor (CPU).
 
-        if img.dtype == torch.uint8:
-            img = img.float() / 255.0
-        if len(img.shape) == 3:
-            img = img[None]
-        return img.to(self.device)
+        numpy arrays must be uint8 RGB (HWC); CHW tensors may be uint8 or
+        float [0,1] (rescaled to uint8 pixel space).
+        """
+        if isinstance(img_like, (str, Path)):
+            with Image.open(img_like) as im:
+                mode = im.mode
+        elif isinstance(img_like, Image.Image):
+            mode = img_like.mode
+        else:
+            mode = None
+        if mode == "I;16":
+            raise NotImplementedError("Can't handle 16 bit images")
+        return to_pixel_uint8(to_image_tensor(img_like))
 
     @torch.inference_mode()
     def match_pair(
         self, img_A: ImageInput, img_B: ImageInput
     ) -> dict[str, torch.Tensor]:
-        img_A = self._load_image(img_A)
-        img_B = self._load_image(img_B)
+        img_A = self._load_image(img_A).float().div(255.0).unsqueeze(0).to(self.device)
+        img_B = self._load_image(img_B).float().div(255.0).unsqueeze(0).to(self.device)
 
         img_A = F.interpolate(
             img_A,
@@ -167,9 +150,9 @@ class RoMaV2PT2:
         first image (sampled with balanced sampling from the (0, 1) pair) and
         projected into every other image through that pair's dense warp field.
 
-        images: a list of image paths, PIL images or (H, W, 3) arrays (uint8
-        or float), or a (B, 3, H, W) uint8/float tensor. Each element is
-        loaded the same way as in match_pair (see _load_image).
+        images: a list of image paths, PIL images or uint8 RGB (H, W, 3)
+        arrays, or a (B, 3, H, W) tensor (uint8 or float in [0, 1]). Each
+        element is loaded the same way as in match_pair (see _load_image).
 
         Strategies:
             reference  -- match image 0 against every other image (N-1 calls);
