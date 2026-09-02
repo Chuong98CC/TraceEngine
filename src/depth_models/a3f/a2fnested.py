@@ -40,6 +40,7 @@ import torch
 
 from depth_models.da3.model.da3anyview import DA3AnyViewPT2
 from depth_models.da3.model.da3nested import DA3NestedPT2
+from utils.image_io import ImageInput
 
 from .any2full import Any2Full_PT2
 
@@ -93,16 +94,16 @@ class A2F_NestedPT2(DA3NestedPT2):
                 "(raw depth fed directly to the alignment)"
             )
 
-    def infer(self, imgs: list[str | np.ndarray],
+    def infer(self, imgs: list[ImageInput],
               depths: list[np.ndarray]) -> dict[str, np.ndarray]:
         """Run the full nested pipeline; returns cropped numpy outputs.
 
-        ``imgs`` are the ``num_views`` RGB views (paths or BGR arrays);
-        ``depths`` the parallel raw metric depth maps ``(H, W)`` float32
-        metres with 0 = invalid (the Any2Full prompt).  The any-view graph
-        predicts its own camera poses AND intrinsics (image-only input), so no
-        camera parameters are consumed; the output keeps the predicted
-        poses/intrinsics, like ``DA3NestedPT2.infer``.
+        ``imgs`` are the ``num_views`` RGB views (paths, RGB arrays or
+        tensors); ``depths`` the parallel raw metric depth maps ``(H, W)``
+        float32 metres with 0 = invalid (the Any2Full prompt).  The any-view
+        graph predicts its own camera poses AND intrinsics (image-only
+        input), so no camera parameters are consumed; the output keeps the
+        predicted poses/intrinsics, like ``DA3NestedPT2.infer``.
         """
         n = len(imgs)
         if len(depths) != n:
@@ -155,8 +156,12 @@ class A2F_NestedPT2(DA3NestedPT2):
         n = len(imgs)
         grid = np.zeros((1, n, h, w), dtype=np.float32)
         for i in range(n):
-            # np.ascontiguousarray: array views with negative strides (e.g. a
-            # BGR flip) are rejected by torch.from_numpy inside _load_rgb.
+            # np.ascontiguousarray: a numpy view with negative strides (e.g. a
+            # channel-flipped slice) is rejected by torch.from_numpy, which
+            # Any2Full's preprocess applies to the depth map (the RGB view is
+            # decoded by image_io — any ImageInput — inside that preprocess).
+            # Callers pass contiguous RGB arrays, so the guard is a harmless
+            # no-op kept as insurance for raw ndarray inputs.
             rgb_t, dep_t = self.a2f.preprocess(
                 np.ascontiguousarray(imgs[i]) if isinstance(imgs[i], np.ndarray) else imgs[i],
                 depths[i],

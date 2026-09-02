@@ -174,9 +174,9 @@ class OnlineStreaming:
     re-running optical flow.
     """
 
-    #: frames are stored BGR (dataset PIL RGB flipped once at fetch); models
-    #: expecting RGB (VGGT-Omega) flip back when assembling a chunk
-    _rgb_input = False
+    #: frames are stored RGB (dataset PIL RGB kept as-is at fetch); every
+    #: model consumes RGB.  Only the WAFT motion-mask path (untouched, still
+    #: BGR-based) flips back at its call site (_compute_step_masks).
 
     def attach(self, wrapper) -> None:
         """Bind the dataset wrapper that provides frames + the WAFT model."""
@@ -242,10 +242,7 @@ class OnlineStreaming:
 
         frames = []
         for i, t in enumerate(steps):
-            arr = self._frame_cache[t][self._cam_keys[i % self.num_cams]]
-            if self._rgb_input:
-                arr = arr[:, :, ::-1]
-            frames.append(arr)
+            frames.append(self._frame_cache[t][self._cam_keys[i % self.num_cams]])
 
         # a2f backend: swap the chunk's raw depth arrays into depth_paths in
         # parallel with the RGB frames (placeholder stems built by
@@ -298,37 +295,38 @@ class OnlineStreaming:
     # --- helpers ------------------------------------------------------------
 
     def _compute_step_masks(self, t: int) -> list[np.ndarray]:
-        """One motion mask per camera for step t: WAFT flow between the BGR
-        frames (t, t + stride).  255 = moving, 0 = static (the stacker above
-        inverts to 1 = static, matching the disk-mask convention)."""
+        """One motion mask per camera for step t: WAFT flow between the RGB
+        frames (t, t + stride), flipped to BGR for the (untouched, BGR-based)
+        WAFT model.  255 = moving, 0 = static (the stacker above inverts to
+        1 = static, matching the disk-mask convention)."""
         stride = self.wrapper.args.stride
         thr = self.wrapper.args.motion_threshold
         masks = []
         for cam_key in self._cam_keys:
-            flow = self.wrapper.waft_model(self._frame_cache[t][cam_key],
-                                           self._frame_cache[t + stride][cam_key])
+            def _bgr(key, step):
+                return np.ascontiguousarray(
+                    self._frame_cache[step][key][:, :, ::-1]
+                )
+            flow = self.wrapper.waft_model(
+                _bgr(cam_key, t), _bgr(cam_key, t + stride)
+            )
             masks.append(_compute_motion_mask_gray(flow, thr))
         return masks
 
 
 class OnlineVGGTStreaming(OnlineStreaming, VGGT_OMG_Streaming):
-    """VGGT-Omega streaming with online frames; the preprocess expects RGB."""
-
-    _rgb_input = True
+    """VGGT-Omega streaming with online frames; RGB arrays (all runtimes
+    consume RGB)."""
 
 
 class OnlineDA3Streaming(OnlineStreaming, DA3_Streaming):
-    """DA3 streaming with online frames; the preprocess expects BGR arrays."""
-
-    _rgb_input = False
+    """DA3 streaming with online frames; RGB arrays."""
 
 
 class OnlineA2FStreaming(OnlineStreaming, A2F_Streaming):
-    """Any2Full RGB-D streaming with online frames; the preprocess expects
-    BGR arrays and the raw depth comes from the dataset (the a2f backend's
-    depth_dirs are virtual — see SubtaskStreamExtract._ensure_stream)."""
-
-    _rgb_input = False
+    """Any2Full RGB-D streaming with online frames; RGB arrays and the raw
+    depth comes from the dataset (the a2f backend's depth_dirs are virtual —
+    see SubtaskStreamExtract._ensure_stream)."""
 
 
 def _paired_depth_key(cam_key: str, features: dict) -> str | None:
@@ -457,12 +455,12 @@ class SubtaskStreamExtract(DataExtract):
 
     def _dataset_step(self, t: int) -> dict:
         """Online decode of dataset frame t for all selected cameras: RGB
-        frames as BGR uint8 arrays (the dataset stores PIL RGB; flipped once
-        here — WAFT, DA3 and a2f take BGR, VGGT flips back in the stream)
-        plus the raw uint16 mm depth of each camera that has a paired depth
-        feature, keyed by the feature key (the a2f prompt)."""
+        uint8 arrays (the dataset stores PIL RGB; no flip — DA3/VGGT/a2f
+        consume RGB; WAFT masks flip to BGR at the flow call) plus the raw
+        uint16 mm depth of each camera that has a paired depth feature, keyed
+        by the feature key (the a2f prompt)."""
         frame = self._ensure_dataset()[t]
-        step = {key: np.asarray(to_pil(frame[key]), dtype=np.uint8)[:, :, ::-1]
+        step = {key: np.asarray(to_pil(frame[key]), dtype=np.uint8)
                 for key in self.cam_keys.values()}
         for key, dkey in zip(self.cam_keys.values(), self.depth_keys):
             if dkey is not None:
