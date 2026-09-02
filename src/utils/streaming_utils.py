@@ -1,14 +1,19 @@
 """Shared helpers for image-folder-based inference pipelines."""
 
-import os
 import glob
+import os
+from pathlib import Path
+from typing import Tuple
+
 import cv2
 import numpy as np
 import torch
-from typing import Tuple
-from pathlib import Path
+from torchvision.transforms import v2 as _v2
 
 from utils.astribot_dataloader import load_depth_lz4
+from utils.image_io import to_image_tensor
+
+F_resize = _v2.functional.resize
 
 def resize_depth_bilinear(depth: np.ndarray, new_shape: Tuple[int, int]) -> np.ndarray:
     is_valid = (depth > 0).astype(np.float32)
@@ -111,14 +116,15 @@ def load_pair(
                 break
         if img_path is None:
             raise FileNotFoundError(f"Image not found: {Path(img_dir) / stem}.*")
-        bgr = cv2.imread(str(img_path), cv2.IMREAD_COLOR)
-        if bgr is None:
-            raise RuntimeError(f"Failed to load: {img_path}")
-        rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
-
         H, W = depth.shape
-        if rgb.shape[:2] != (H, W):
-            rgb = cv2.resize(rgb, (W, H), interpolation=cv2.INTER_LINEAR)
+        rgb = (
+            _v2.functional.resize(
+                to_image_tensor(img_path), (H, W),
+                interpolation=_v2.InterpolationMode.BILINEAR, antialias=False,
+            )
+            .permute(1, 2, 0)
+            .numpy()
+        )
         images_u8_list.append(rgb)
 
     return (
@@ -130,14 +136,10 @@ def load_pair(
 
 
 def load_batch_frames(file_list, start, end):
-    """Load a slice of frames into a (T, H, W, 3) uint8 numpy array."""
-    batch = []
-    for _, fpath in file_list[start:end]:
-        img = cv2.imread(fpath)
-        if img is None:
-            raise RuntimeError(f"Cannot read {fpath}")
-        batch.append(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
-    return np.stack(batch, axis=0)
+    """Load a slice of frames into a (T, 3, H, W) uint8 CHW CPU tensor."""
+    return torch.stack(
+        [to_image_tensor(fpath) for _, fpath in file_list[start:end]]
+    )
 
 
 def load_npz_batch(npz_dir, file_list, start, end):
@@ -277,14 +279,14 @@ def load_resized_batch(file_list, npz_dir, start, end, inference_h, inference_w)
       intrs: (T, 3, 3) float32, fx/fy/cx/cy scaled to the inference resolution
       extrs: (T, 4, 4) float32
     """
-    video_np = load_batch_frames(file_list, start, end)          # (T,H0,W0,3) uint8
+    video = load_batch_frames(file_list, start, end)          # (T,3,H0,W0) uint8
     geo = load_npz_batch(npz_dir, file_list, start, end)
-    orig_h, orig_w = video_np.shape[1:3]
+    orig_h, orig_w = video.shape[1:3]
 
-    video_rs = np.stack([
-        cv2.resize(video_np[t], (inference_w, inference_h),
-                   interpolation=cv2.INTER_LINEAR)
-        for t in range(video_np.shape[0])])
+    video_rs = torch.stack([
+        F_resize(video[t], (inference_h, inference_w),
+                 interpolation=_v2.InterpolationMode.BILINEAR, antialias=False)
+        for t in range(video.shape[0])])
     depths_rs = np.stack([
         resize_depth_bilinear(geo["depth"][t], (inference_w, inference_h))
         for t in range(geo["depth"].shape[0])])
@@ -295,7 +297,7 @@ def load_resized_batch(file_list, npz_dir, start, end, inference_h, inference_w)
     intrs[:, 0, :] *= scale_x
     intrs[:, 1, :] *= scale_y
 
-    video_t = torch.from_numpy(video_rs).permute(0, 3, 1, 2).float() / 255.0
+    video_t = video_rs.float() / 255.0
     depths_t = torch.from_numpy(depths_rs).float()
     intrs_t = torch.from_numpy(intrs).float()
     extrs_t = torch.from_numpy(geo["extrs"]).float()
