@@ -20,7 +20,7 @@ import torch.nn.functional as F
 import numpy as np
 
 from .utils import remove_outliers
-from utils.image_io import (
+from utils.file_io.image_io import (
     ImageInput,
     imagenet_normalize,
     to_image_tensor,

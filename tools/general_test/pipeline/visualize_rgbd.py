@@ -36,7 +36,7 @@ import cv2
 import numpy as np
 
 from utils.astribot_dataloader import _scale_intrinsics_matrix, load_depth_lz4, load_rgbd
-from utils.visualize_depth import export_glb, save_depth_vis
+from utils.visualize.visualize_depth import export_glb, save_depth_vis
 
 
 # ---------------------------------------------------------------------------

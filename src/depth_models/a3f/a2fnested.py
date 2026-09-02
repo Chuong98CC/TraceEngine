@@ -40,7 +40,7 @@ import torch
 
 from depth_models.da3.model.da3anyview import DA3AnyViewPT2
 from depth_models.da3.model.da3nested import DA3NestedPT2
-from utils.image_io import ImageInput
+from utils.file_io.image_io import ImageInput
 
 from .any2full import Any2Full_PT2
 

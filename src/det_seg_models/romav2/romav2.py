@@ -38,7 +38,7 @@ from .utils import (
     to_pixel,
     warp_points,
 )
-from utils.image_io import ImageInput, to_image_tensor, to_pixel_uint8
+from utils.file_io.image_io import ImageInput, to_image_tensor, to_pixel_uint8
 
 DEFAULT_MODEL_PATH: str = "weights/romav2/romav2.pt2"
 

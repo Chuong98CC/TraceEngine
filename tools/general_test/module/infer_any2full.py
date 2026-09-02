@@ -27,7 +27,7 @@ import torch
 
 from depth_models.a3f.any2full import Any2Full_PT2
 from utils.astribot_dataloader import _scale_intrinsics_matrix, load_rgbd
-from utils.visualize_depth import export_glb
+from utils.visualize.visualize_depth import export_glb
 from PIL import Image
 import matplotlib
 import matplotlib.pyplot as plt

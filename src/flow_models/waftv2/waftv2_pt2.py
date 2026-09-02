@@ -23,7 +23,7 @@ import os
 import torch
 import cv2
 
-from utils.image_io import (
+from utils.file_io.image_io import (
     ImageInput,
     letterbox,
     to_image_tensor,

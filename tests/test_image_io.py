@@ -4,7 +4,7 @@ import torch
 from PIL import Image
 from torchvision.transforms.v2 import InterpolationMode
 
-from utils.image_io import (
+from utils.file_io.image_io import (
     imagenet_normalize,
     letterbox,
     to_image_tensor,

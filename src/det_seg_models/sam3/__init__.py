@@ -20,7 +20,7 @@ from .sam3_model import (
     Sam3Image,
 )
 from .tokenizer import SimpleTokenizer
-from utils.visualize_mask import draw_box_on_image, normalize_bbox, plot_results
+from utils.visualize.visualize_mask import draw_box_on_image, normalize_bbox, plot_results
 
 __all__ = [
     "BOXES_MAX",

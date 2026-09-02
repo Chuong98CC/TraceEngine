@@ -38,8 +38,8 @@ from tqdm import tqdm
 
 from flow_models.waftv2.waftv2_pt2 import WAFTv2_PT2
 from utils.streaming_utils import scan_image_folder
-from utils.visualize_flow import writeFlow, flow_to_image
-from utils.video_io import get_video_info, VideoWriter
+from utils.visualize.visualize_flow import writeFlow, flow_to_image
+from utils.file_io.video_io import get_video_info, VideoWriter
 
 # ---------------------------------------------------------------------------
 # Default checkpoint (.pt2 suffix appended at load time)

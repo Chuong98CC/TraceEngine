@@ -144,7 +144,7 @@ def save_mask_visualization(out_dir, frame_t, mask, bbox, xy, text_prompt):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
-    from utils.visualize_mask import to_pil, draw_box_on_image, plot_mask
+    from utils.visualize.visualize_mask import to_pil, draw_box_on_image, plot_mask
 
     out_dir = Path(out_dir)
     np.save(out_dir / "sam3_mask.npy", mask.cpu().numpy())
@@ -342,7 +342,7 @@ def main():
     print(f"[bold green]Done! Results saved to {out_dir.resolve()}[/bold green]")
 
     if args.visualize:
-        from utils.visualize_tapip3d import render_tracks
+        from utils.visualize.visualize_tapip3d import render_tracks
         video_path = render_tracks(out_dir, fps=args.video_fps)
         print(f"[bold green]Video saved to {video_path}[/bold green]")
 

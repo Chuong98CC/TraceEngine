@@ -16,7 +16,7 @@ from __future__ import annotations
 import numpy as np
 import torch
 from depth_models.da3.utils.alignment import align_anyview_with_metric
-from utils.image_io import (
+from utils.file_io.image_io import (
     ImageInput,
     imagenet_normalize,
     letterbox,

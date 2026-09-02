@@ -20,7 +20,7 @@ import numpy as np
 import torch
 from torchvision.transforms import v2
 
-from utils.image_io import (
+from utils.file_io.image_io import (
     ImageInput,
     letterbox,
     to_image_tensor,

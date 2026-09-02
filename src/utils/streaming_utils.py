@@ -11,7 +11,7 @@ import torch
 from torchvision.transforms import v2 as _v2
 
 from utils.astribot_dataloader import load_depth_lz4
-from utils.image_io import to_image_tensor
+from utils.file_io.image_io import to_image_tensor
 
 F_resize = _v2.functional.resize
 

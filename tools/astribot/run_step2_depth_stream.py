@@ -76,7 +76,7 @@ from tools.general_test.module.infer_waft import (
     _resolve_checkpoint,
 )
 from tools.general_test.pipeline.run_depth_stream import _report_run_stats
-from utils.visualize_mask import to_pil
+from utils.visualize.visualize_mask import to_pil
 
 # WAFTv2 torch.export artifact (legacy .engine / .onnx checkpoints are
 # rejected — see _resolve_checkpoint).

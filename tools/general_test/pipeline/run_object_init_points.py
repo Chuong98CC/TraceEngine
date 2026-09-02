@@ -78,7 +78,7 @@ from utils.keyframe_utils import (
     select_camera,
     select_episodes,
 )
-from utils.rle_utils import encode_rle
+from utils.file_io.mask_rle import encode_rle
 
 DEFAULT_SAM3_CKPT = "weights/sam3/sam3_image_exported_bf16.pt2"
 DEFAULT_ROMAV2_CKPT = "weights/romav2/romav2.pt2"

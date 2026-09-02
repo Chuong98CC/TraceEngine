@@ -36,7 +36,7 @@ import numpy as np
 import open3d as o3d
 import trimesh
 
-from utils.visualize_depth import (  # noqa: E402
+from utils.visualize.visualize_depth import (  # noqa: E402
     _as_homogeneous44,
     _camera_frustum_lines,
     _compute_alignment_transform_first_cam_glTF_center_by_points,

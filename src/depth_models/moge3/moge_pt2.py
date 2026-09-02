@@ -29,7 +29,7 @@ import torch.nn.functional as F
 from .refiner import Sparse3DUNet
 
 from .utils.postprocess import refine_logz, remap_points_exp, resize_channel_last, affine_to_camera
-from utils.image_io import ImageInput, to_image_tensor, to_pixel_uint8
+from utils.file_io.image_io import ImageInput, to_image_tensor, to_pixel_uint8
 
 # Order of the exported graph's outputs; keep in sync with `ExportWrapper.forward`
 # in the (repo-side) export script. Only `moge_pt2` consumes them here.

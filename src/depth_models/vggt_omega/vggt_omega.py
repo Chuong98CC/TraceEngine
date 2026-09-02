@@ -13,7 +13,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from utils.image_io import ImageInput
+from utils.file_io.image_io import ImageInput
 
 from .base_vggt_omega import BaseVGGTOmega
 

@@ -93,7 +93,7 @@ from lerobot.datasets import LeRobotDataset, LeRobotDatasetMetadata
 from tqdm import tqdm
 
 from utils.astribot_dataloader import save_depth_lz4
-from utils.visualize_mask import to_pil
+from utils.visualize.visualize_mask import to_pil
 
 # gripper values above this threshold count as 1 (closed), otherwise 0
 # (open); a change between the two levels marks a key frame

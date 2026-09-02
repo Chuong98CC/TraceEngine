@@ -29,7 +29,7 @@ import numpy as np
 from PIL import Image
 
 from depth_models.moge3.moge_pt2 import MoGev3_PT2
-from utils.visualize_depth import export_glb
+from utils.visualize.visualize_depth import export_glb
 
 def save_glb(
     save_path: Union[str, os.PathLike],

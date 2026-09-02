@@ -44,7 +44,7 @@ from tqdm import tqdm
 from tools.astribot.extract_frames import DataExtract
 from tools.general_test.pipeline.visualize_stream import render_stream_video
 from utils.streaming_utils import load_stream_data
-from utils.visualize_mask import to_pil
+from utils.visualize.visualize_mask import to_pil
 
 
 def parse_args(argv: list[str] | None = None):
