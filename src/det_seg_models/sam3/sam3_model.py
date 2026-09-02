@@ -19,7 +19,7 @@ torch.backends.cudnn.allow_tf32 = True
 
 from . import utils
 from .tokenizer import SimpleTokenizer
-from utils.image_io import ImageInput, to_image_tensor
+from utils.image_io import ImageInput, to_image_tensor, to_pixel_uint8
 
 RESOLUTION = 1008
 
@@ -100,6 +100,10 @@ class Sam3Image:
                 image_tensor, tokens, boxes, box_labels, box_mask
             )
 
+    def _load_image(self, image: ImageInput) -> torch.Tensor:
+        """Decode any ImageInput into a CHW uint8 RGB tensor (CPU)."""
+        return to_pixel_uint8(to_image_tensor(image))
+
     def preprocess_image(
         self, image: ImageInput, device: str = "cuda"
     ) -> torch.Tensor:
@@ -107,10 +111,11 @@ class Sam3Image:
 
         Accepts a path, a PIL image, an RGB numpy array (HWC, uint8) or a
         CHW tensor (uint8 [0, 255] or float [0, 1]); returns the
-        [1, 3, 1008, 1008] tensor normalized to [-1, 1].
+        [1, 3, 1008, 1008] tensor normalized to [-1, 1].  float [0,1] CHW
+        tensors are rescaled to uint8 on entry.
         """
 
-        input = to_image_tensor(image)             # uint8 CHW [0, 255] (or float CHW)
+        input = self._load_image(image)            # uint8 CHW [0, 255]
         return self.transform(input.to(device)).unsqueeze(0)
 
     def predict(
@@ -133,7 +138,7 @@ class Sam3Image:
         if (boxes is None) != (labels is None):
             raise ValueError("boxes and labels must be provided together")
 
-        image_t = to_image_tensor(image)           # single conversion, reused below
+        image_t = self._load_image(image)          # single conversion, reused below
         height, width = image_t.shape[-2:]
         image_tensor = self.preprocess_image(image_t, self.device)
         tokens = self.tokenize(text_prompt)
