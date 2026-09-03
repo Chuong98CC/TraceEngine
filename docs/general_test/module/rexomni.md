@@ -34,36 +34,66 @@ PYTHONPATH="$PWD/src" .venv-rexomni/bin/python tools/general_test/module/infer_r
 
 Do not install these packages into the main environment.
 
-## Example script
+## Running the tool
 
-`infer_rexomni.py` is a **notebook-style example** rather than a configurable
-CLI: the image path, categories and generation parameters are hard-coded at
-the top. It detects the Astribot scene objects on the head camera frame
-(`assets/astribot_test_imgs/head_rgbd/color/img_000000.jpg`):
+`infer_rexomni.py` is a plain CLI (same contract as
+[`infer_sam3.py`](sam3.md)): it runs on a **folder of images** (or a
+**single image file**, or one frame of a folder selected by `--frame-idx`)
+and saves **one annotated PNG per input image** — all detected boxes of all
+categories drawn on the image, with per-category colours + labels.
 
-```python
-from det_seg_models.rex_omni import RexOmniWrapper, RexOmniVisualize
+Rex-Omni is a generative model: the categories are joined into **one
+detection call per image** (`inference(task="detection", categories=...)`)
+and the parsed output carries **no per-box confidence scores** — hence no
+`--conf` threshold.
 
-model = RexOmniWrapper(
-    model_path="IDEA-Research/Rex-Omni",
-    backend="transformers",  # or "vllm" for faster inference
-    max_tokens=4096, temperature=0.0, top_p=0.05, top_k=1,
-    repetition_penalty=1.05,
-)
+```bash
+# Every image of the folder -> one annotated PNG per image
+PYTHONPATH="$PWD/src" .venv-rexomni/bin/python tools/general_test/module/infer_rexomni.py \
+    -i assets/astribot_test_imgs/head_rgbd/color \
+    --prompts "brown cup" "coffee machine" \
+    --out_dir ./output/rexomni
 
-results = model.inference(
-    images=image, task="detection",
-    categories=["left robot gripper", "right robot gripper", "brown coffee cup",
-                "coffee machine", "transparent plastic tray",
-                "dark green container"],
-)
+# Single image file
+PYTHONPATH="$PWD/src" .venv-rexomni/bin/python tools/general_test/module/infer_rexomni.py \
+    -i assets/astribot_test_imgs/head_rgbd/color/img_000000.jpg \
+    --prompts "brown cup" --out_dir ./output/rexomni
+
+# Single frame of a folder only (frame-idx is a 0-based index into the
+# sorted file list, not a frame number)
+PYTHONPATH="$PWD/src" .venv-rexomni/bin/python tools/general_test/module/infer_rexomni.py \
+    -i assets/astribot_test_imgs/head_rgbd/color --frame-idx 0 \
+    --prompts "brown cup" --out_dir ./output/rexomni
 ```
 
-`results` is a per-image list of dicts with `success`, `extracted_predictions`
-(parsed by category), `raw_output`, `inference_time`, token counts and
-`image_size`. `RexOmniVisualize(image, predictions, font_size=20,
-draw_width=5, show_labels=True)` draws the boxes and saves
-`cache/rexomni_detection.jpg`.
+or via the ready-to-run wrapper `scripts/general_test/module/infer_rexomni.sh`
+(env interpreter + `PYTHONPATH` baked in).
+
+| Argument | Default | Description |
+|---|---|---|
+| `--input`, `-i` | **required** | A single image file, or a folder of images (`.jpg/.jpeg/.png/.bmp/.webp`, sorted by filename) |
+| `--frame-idx` | `None` | 0-based index into the sorted image list — process only that frame; default: all images (a single-file input is a 1-element list, so only `0` is valid) |
+| `--prompts` | **required** | One or more object categories (open-vocabulary text prompts, `nargs='+'`); all joined into one detection call per image |
+| `--model-path` | `IDEA-Research/Rex-Omni` | Hugging Face model id or local dir (downloaded to the HF cache on first use) |
+| `--out_dir` | `./output/rexomni` | Output folder |
+
+**Output** — flat under `--out_dir`, one PNG per input image (`<stem>.png`,
+full input resolution, drawn with `RexOmniVisualize`): per-category boxes
+with category labels (per-category colours, `font_size=20`, `draw_width=5`).
+No file is written when the model detects nothing on that image; the
+per-image console log reports each parsed category's object count and the
+`type` + coordinates of every annotation. Unlike `infer_sam3.py` there is
+no `--conf` flag — Rex-Omni's parser returns boxes without scores.
+
+Key points:
+
+- `inference()` returns one result dict per image with `success`,
+  `extracted_predictions` (parsed by category: `{"type": "box"|"point"|...,
+  "coords": [...]}` — boxes are absolute pixels `[x0, y0, x1, y1]`),
+  `raw_output`, token counts and `image_size`.
+- `--prompts` entries map 1:1 to the `categories` argument of
+  `RexOmniWrapper.inference`; the model may echo a category back under a
+  slightly different name, so the console log prints the **parsed** keys.
 
 ## Wrapper API
 

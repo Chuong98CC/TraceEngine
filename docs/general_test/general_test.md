@@ -94,7 +94,7 @@ CLI, its output, and how it plugs into the pipeline. Ordered by pipeline step:
 | 2 | [`any2full.md`](module/any2full.md) | `infer_any2full.py` | RGB-D depth densification (the `a2f` backend component) | Any2Full (`.pt2`) | — |
 | 2 (opt.) | [`waft.md`](module/waft.md) | `infer_waft.py` | dense optical flow → motion masks (zero moving pixels during chunk alignment) | WAFTv2 (`.pt2`) | `scripts/general_test/infer_waft.sh` |
 | 3 | [`rexomni.md`](module/rexomni.md) | `infer_rexomni.py` | open-vocabulary object detection from a text prompt | Rex-Omni (`.venv-rexomni`) | `scripts/general_test/setup_rexomni_env.sh` |
-| 3 | [`sam3.md`](module/sam3.md) | `infer_sam3.py` | promptable segmentation (box + text) | SAM3 (`.pt2`) | — |
+| 3 | [`sam3.md`](module/sam3.md) | `infer_sam3.py` | text-prompt segmentation over an image folder → per-image overlay PNG | SAM3 (`.pt2`) | — |
 | 3 | [`romav2.md`](module/romav2.md) | `infer_romav2.py` | multi-image keypoint matching (points visible in all images) | RoMAv2 (`.pt2`) | `scripts/general_test/infer_romav2.sh` |
 | 4 | [`tapip3d.md`](module/tapip3d.md) | `infer_tapip3d.py` | 3D point tracking over long videos | TAPIP3D (`.pt2`) | `scripts/general_test/infer_tapip3d.sh` |
 | — | [`visualize_rgbd.md`](module/visualize_rgbd.md) | `visualize_rgbd.py` | RGB-D visualization (image / depth-lz4 + pose-npz folder pair) | — (rendering) | — |

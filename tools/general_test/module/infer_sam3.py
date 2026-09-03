@@ -1,89 +1,187 @@
-"""
-Run the exported SAM3 image model on box and text prompts using only
-(no sam3 import) — the standalone twin of test/base_exported.py, which is
-itself the exported twin of test/base_box.py.
+"""SAM3 text-prompt segmentation over a folder of images via the torch.export
+(PT2) runtime.
 
-Usage:
-    python sam3_runtime/example.py          # or: python -m sam3_runtime.example
-"""
-#%%
-# # Make the package importable when run as a plain script from anywhere.
-# import os
-# import sys
-#
-# sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+Runs the exported SAM3 image model (fixed 1008 resolution, fixed prompt
+slots) on each image of an input folder — or on a single image file, or on
+one image of a folder selected by index into the sorted file list — for
+every text prompt given on the command line, and saves **one overlay PNG
+per input image**: all prompts' detected instances drawn together on the
+image (coloured masks + boxes + scores, label ``[p] id=i, score`` where
+``p`` is the prompt index).
 
-#%%
-import matplotlib.pyplot as plt
+Examples:
+  python tools/general_test/module/infer_sam3.py \
+      -i assets/astribot_test_imgs/head_stereo_left \
+      --prompts "brown cup" "coffee machine" \
+      --out_dir ./output/sam3
+
+  # single image file
+  python tools/general_test/module/infer_sam3.py \
+      -i assets/astribot_test_imgs/head_stereo_left/frame_000210.jpg \
+      --prompts "brown cup" --out_dir ./output/sam3
+
+  # one frame of a folder: frame-idx is a 0-based index into the sorted
+  # file list (not a frame number)
+  python tools/general_test/module/infer_sam3.py \
+      -i assets/astribot_test_imgs/head_stereo_left --frame-idx 2 \
+      --prompts "brown cup" --out_dir ./output/sam3
+"""
+
+import argparse
+from pathlib import Path
+
+import matplotlib
+
+matplotlib.use("Agg")  # headless-safe; set before pyplot is imported
+
 import torch
 from PIL import Image
-# turn on tfloat32 for Ampere GPUs (also done by sam3_runtime on import)
-# https://pytorch.org/docs/stable/notes/cuda.html#tensorfloat-32-tf32-on-ampere-devices
-torch.backends.cuda.matmul.allow_tf32 = True
-torch.backends.cudnn.allow_tf32 = True
 
-# use bfloat16 for the entire script (the model class also wraps its runs and
-# post-processing in the trace-matching autocast)
-torch.autocast("cuda", dtype=torch.bfloat16).__enter__()
+from det_seg_models.sam3 import Sam3Image
+from utils.visualize.visualize_mask import COLORS, plot_bbox, plot_mask
 
-from det_seg_models.sam3 import (
-    Sam3Image,
-    draw_box_on_image,
-    normalize_bbox,
-    plot_results,
-)
+IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
 
-from det_seg_models.sam3.utils import box_xyxy_to_cxcywh
 
-model = Sam3Image("../../weights/sam3/sam3_image_exported_bf16.pt2")
+def list_images(input_path: Path) -> list[Path]:
+    """Image paths to process from ``input_path``: the file itself when it is
+    a single image, otherwise the sorted images of a folder (extension
+    filter)."""
+    if input_path.is_file():
+        return [input_path]
+    images = sorted(
+        p for p in input_path.iterdir() if p.suffix.lower() in IMAGE_EXTS
+    )
+    if not images:
+        exts = ", ".join(sorted(IMAGE_EXTS))
+        raise FileNotFoundError(
+            f"No image files ({exts}) found in {input_path}"
+        )
+    return images
 
-#%%
-# infer image path
-image_path = "/data/astri_making_coffee_v1/eps_data/key_frames/ep000000/subtask_00/cam_head/frame_000000.jpg"
-image = Image.open(image_path)
-width, height = image.size
 
-#%%
-# infer box
-box_input_xyxy = [[1, 240, 100.0, 340.0]]
-box_input_cxcywh = box_xyxy_to_cxcywh(torch.tensor(box_input_xyxy).view(-1,4))
-norm_boxes_cxcywh = normalize_bbox(box_input_cxcywh, width, height)
+def save_overlay(
+    image: Image.Image,
+    detections: list[tuple[int, dict]],
+    out_path: Path,
+) -> None:
+    """Save one overlay per input image: all (prompt_idx, predict state)
+    pairs drawn on the same full-pixel-size canvas."""
+    import matplotlib.pyplot as plt
 
-box_labels = [True]
+    width, height = image.size
+    fig = plt.figure(figsize=(width / 100, height / 100), dpi=100)
+    ax = fig.add_axes((0, 0, 1, 1))  # axis-less full-figure canvas
+    ax.axis("off")
+    ax.imshow(image)
+    # colour groups offset per prompt index so the same object id in
+    # different prompts does not share a colour
+    for prompt_idx, state in detections:
+        for i in range(len(state["scores"])):
+            color = COLORS[(prompt_idx * 16 + i) % len(COLORS)]
+            plot_mask(state["masks"][i].squeeze(0).cpu(), color=color, ax=ax)
+            plot_bbox(
+                height,
+                width,
+                state["boxes"][i].cpu(),
+                text=f"[{prompt_idx}] id={i}, {state['scores'][i].item():.2f}",
+                box_format="XYXY",
+                color=color,
+                relative_coords=False,
+                ax=ax,
+            )
+    fig.savefig(out_path, pad_inches=0)
+    plt.close(fig)
 
-img0 = Image.open(image_path)
-image_with_box = img0
-for i in range(len(box_input_xyxy)):
-    if box_labels[i] == 1:
-        color = (0, 255, 0)
-    else:
-        color = (255, 0, 0)
-    image_with_box = draw_box_on_image(image_with_box, box_input_xyxy[i], color)
-plt.imshow(image_with_box)
-plt.axis("off")  # Hide the axis
-plt.show()
 
-#%%
-# Box-only prompting: Sam3Processor.add_geometric_prompt auto-sets the
-# "visual" text prompt when no text is set — predict() handles preprocessing,
-# inference and post-processing end-to-end.
-inference_state = model.predict(
-    image,
-    text_prompt="brown cup",
-    boxes=norm_boxes_cxcywh,
-    labels=box_labels,
-)
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="SAM3 text-prompt segmentation on a folder of images "
+        "-> one overlay PNG per input image"
+    )
+    parser.add_argument(
+        "-i", "--input", required=True,
+        help="Input image folder (jpg/png/bmp/webp), or a single image path.",
+    )
+    parser.add_argument(
+        "--frame-idx", type=int, default=None,
+        help="0-based index into the sorted image list to process only that "
+             "frame; default: process all images.",
+    )
+    parser.add_argument(
+        "--prompts", nargs="+", required=True,
+        help="One or more text prompts; each prompt runs its own predict() "
+             "call and all detections are drawn on the image overlay.",
+    )
+    parser.add_argument(
+        "--conf", type=float, default=0.5,
+        help="Detection confidence threshold passed to predict().",
+    )
+    parser.add_argument(
+        "--pt2", type=str, default="weights/sam3/sam3_image_exported_bf16.pt2",
+        help="Path to the exported graph checkpoint.",
+    )
+    parser.add_argument("--device", type=str, default="cuda",
+                        help="Device (must be CUDA).")
+    parser.add_argument("--out_dir", type=str, default="./output/sam3")
+    return parser.parse_args()
 
-plot_results(img0, inference_state)
 
-#%%
-# Text prompt on the same image, after the box prompts (the notebook's
-text_inference_state = model.predict(image, text_prompt="brown cup")
+def main() -> None:
+    args = parse_args()
+    prompts = [p.strip() for p in args.prompts if p.strip()]
+    if not prompts:
+        raise SystemExit("--prompts needs at least one non-empty prompt")
 
-# Get the masks, bounding boxes, and scores
-print(text_inference_state["boxes"])
-print(text_inference_state["scores"])
+    # tfloat32 for Ampere GPUs (also done by the sam3 runtime on import)
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
 
-img1 = Image.open(image_path)
-plot_results(img1, text_inference_state)
-# %%
+    model = Sam3Image(args.pt2, device=args.device)
+    print(f"[model] {args.pt2}")
+
+    input_path = Path(args.input)
+    if not input_path.exists():
+        raise FileNotFoundError(f"No such file or directory: {input_path}")
+    images = list_images(input_path)
+    if args.frame_idx is not None:
+        if not 0 <= args.frame_idx < len(images):
+            raise SystemExit(
+                f"--frame-idx {args.frame_idx} out of range: "
+                f"{len(images)} image(s) from {input_path}"
+            )
+        images = [images[args.frame_idx]]
+    print(f"[input] {len(images)} image(s) from {input_path}")
+
+    out_dir = Path(args.out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    for image_path in images:
+        image = Image.open(image_path).convert("RGB")
+        print(f"\n[{image_path.name}] size={image.size[0]}x{image.size[1]}")
+        detections: list[tuple[int, dict]] = []
+        for prompt_idx, prompt in enumerate(prompts):
+            state = model.predict(
+                image, text_prompt=prompt, confidence_threshold=args.conf
+            )
+            n_objects = len(state["scores"])
+            print(f"  [{prompt_idx}] '{prompt}': {n_objects} object(s)")
+            if n_objects == 0:
+                continue
+            for i in range(n_objects):
+                box = [round(v, 1)
+                       for v in state["boxes"][i].cpu().tolist()]
+                print(f"      id={i} score={state['scores'][i].item():.2f} "
+                      f"box_xyxy={box}")
+            detections.append((prompt_idx, state))
+
+        if not detections:
+            print("  no object found for any prompt; nothing saved")
+            continue
+        out_path = out_dir / f"{image_path.stem}.png"
+        save_overlay(image, detections, out_path)
+        print(f"  saved: {out_path}")
+
+
+if __name__ == "__main__":
+    main()

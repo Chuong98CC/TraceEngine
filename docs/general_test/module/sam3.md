@@ -1,32 +1,56 @@
-# Promptable Segmentation — SAM3 (`tools/general_test/module/infer_sam3.py`)
+# Text-Prompt Segmentation — SAM3 (`tools/general_test/module/infer_sam3.py`)
 
-Runs the exported SAM3 image model (`sam3_image_exported_bf16.pt2`) on box
-and text prompts. This script is a **notebook-style example** (`#%%` cells,
-editable in any Python/Jupyter environment) rather than a configurable CLI:
-the image path and prompt boxes are hard-coded at the top, and the model is
-loaded with hard-coded relative paths (`../../weights/...`, run from
-`tools/general_test/`).
+Runs the exported SAM3 image model (`sam3_image_exported_bf16.pt2`, fixed
+1008 resolution) as a plain CLI on a **folder of images** (or a **single
+image file**) with a list of text prompts — one `predict()` call per prompt,
+and **one overlay PNG per input image** with all detected instances (masks +
+boxes + scores) drawn together.
 
-```python
-from det_seg_models.sam3 import Sam3Image
+```bash
+# Every image of the folder × every prompt -> one overlay per image
+python tools/general_test/module/infer_sam3.py \
+    -i assets/astribot_test_imgs/head_stereo_left \
+    --prompts "brown cup" "coffee machine" \
+    --out_dir ./output/sam3
 
-model = Sam3Image("../../weights/sam3/sam3_image_exported_bf16.pt2")
+# Single image file
+python tools/general_test/module/infer_sam3.py \
+    -i assets/astribot_test_imgs/head_stereo_left/frame_000210.jpg \
+    --prompts "brown cup" --out_dir ./output/sam3
 
-# Box prompts (xywh) + labels; predict() handles pre/infer/post end-to-end
-inference_state = model.predict(image, text_prompt="visual",
-                                boxes=norm_boxes_cxcywh, labels=[True, True])
-
-# Text-only prompt
-text_state = model.predict(image, text_prompt="brown cup")
+# Single frame of a folder only (frame-idx is a 0-based index into the
+# sorted file list, not a frame number)
+python tools/general_test/module/infer_sam3.py \
+    -i assets/astribot_test_imgs/head_stereo_left --frame-idx 2 \
+    --prompts "brown cup" --out_dir ./output/sam3
 ```
+
+| Argument | Default | Description |
+|---|---|---|
+| `--input`, `-i` | **required** | A single image file, or a folder of images (`.jpg/.jpeg/.png/.bmp/.webp`, sorted by filename) |
+| `--frame-idx` | `None` | 0-based index into the sorted image list — process only that frame; default: all images (a single-file input is a 1-element list, so only `0` is valid) |
+| `--prompts` | **required** | One or more text prompts (`nargs='+'`); each runs its own `predict()` call |
+| `--conf` | `0.5` | Detection confidence threshold passed to `predict()` |
+| `--pt2` | `weights/sam3/sam3_image_exported_bf16.pt2` | Exported graph checkpoint |
+| `--device` | `cuda` | Device (must be CUDA) |
+| `--out_dir` | `./output/sam3` | Output folder |
+
+**Output** — flat under `--out_dir`, one PNG per input image
+(`<stem>.png`, full input resolution, headless `Agg` backend): per-instance
+masks overlaid with the `COLORS` palette and box + score labels
+(`[p] id=i, score` — `p` is the prompt index, so the same object id under
+different prompts gets a different colour). No file is written when no
+prompt detects an object on that image; the per-image console log reports
+each prompt's object count and per-instance score + xyxy box.
 
 Key points:
 
-- `predict()` returns a state dict with `masks`, `boxes`, `scores`.
-- Box prompts are normalized to cxcywh (`box_xywh_to_cxcywh` +
-  `normalize_bbox`); `draw_box_on_image` / `plot_results` visualize.
+- `predict()` returns a state dict with `masks` (binarized, original
+  resolution), `boxes` (XYXY px), `scores`.
 - The graph is exported at a fixed 1008 resolution with a fixed number of
-  box-prompt slots; callers right-pad prompts.
+  box-prompt slots; text-only prompting needs no prompt packing.
+- Matplotlib is used only to compose the overlay PNG (no interactive
+  `plt.show()`); running images stay on GPU, viz tensors are moved to CPU.
 
 ## Usage in the pipeline
 
