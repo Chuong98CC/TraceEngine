@@ -1,45 +1,59 @@
 """Step 3 — high-level driver: extract the key-frames, then detections +
 init points.
 
-Runs pipeline Step 3 (Sampling Keypoints) end-to-end for the selected
-episodes, on the dataset: first Step 1 — extract_frames.py saves the
-sub-task key-frames to disk (--mode detect_subtask, then --mode key_frames;
-Step 3 only infers on a sparse set of frames, most commonly ~4 per sub-task,
-so they are persisted instead of decoding the episode videos online) — then
-Step 3a (run_object_detection.py — RexOmni detections, under
-.venv-rexomni) and Step 3b (run_object_init_points.py — SAM3 masks +
-RoMAv2 keypoints, main env).
+End-to-end driver of pipeline Step 3 (Sampling Keypoints), on the dataset,
+for the selected episodes. It runs the three pipeline steps sequentially as
+subprocesses: RexOmni (Step 3a) needs the separate .venv-rexomni env
+(Python 3.10 / torch 2.7) while Step 1 and the SAM3/RoMAv2 .pt2 runtimes
+(Step 3b) need the main env — launch it from the **main** environment.
 
-The dataset-independent tools live in tools/general_test/ and run on the
-saved key-frames alone (folder input — run_e2e_init_points.py is their
-standalone driver); this script is the high-level dataset layer that adds
-the extraction and drives the sub-steps, importing the shared key-frame
-helpers from general_test. The sub-steps cannot share a process (RexOmni
-needs Python 3.10 / torch 2.7 while the SAM3/RoMAv2 .pt2 runtimes need the
-main env), so they are launched sequentially as subprocesses. Run it from
-the **main** environment:
+The pipeline of one episode:
 
-    python tools/astribot/run_step3_init_points.py \
-        --repo-id Kronze157/astri_making_coffee_vlva \
-        --data-root /data/astri_making_coffee --episode-idxes 0
+    episode videos (dataset)
+               │
+               ▼  Step 1: extract_frames.py (detect_subtask, then key_frames)
+    ┌──────────────────────────────┐
+    │   key-frames on disk (.jpg)  │
+    └──────────────────────────────┘
+               │
+               ▼  Step 3a: run_object_detection.py (RexOmni)
+    ┌──────────────────────────────┐
+    │  detections JSON per episode │
+    └──────────────────────────────┘
+               │
+               ▼  Step 3b: run_object_init_points.py (SAM3 + RoMAv2)
+    ┌──────────────────────────────┐
+    │  init_points per prompt      │
+    └──────────────────────────────┘
+
+Object prompts are per sub-task: [object, manipulator] of the sub-task's row
+in the dataset's meta/subtasks.csv — there is no prompt flag. Step 3a
+records them in its JSON, Step 3b re-reads them from there. For a standalone
+key-frame folder (no dataset), run_e2e_init_points.py (tools/general_test/)
+drives the same 3a/3b tools. Usage:
+
+    python tools/astribot/run_step3_init_points.py
+        --repo-id Kronze157/astri_making_coffee_vlva
+        --data-root /data/astri_making_coffee_v1 --episode-idxes 0
 
 Examples
 --------
     # Full pipeline on episode 0: extract key-frames, 3a, 3b
-    python tools/astribot/run_step3_init_points.py \
-        --repo-id Kronze157/astri_making_coffee_vlva \
-        --data-root /data/astri_making_coffee --episode-idxes 0
+    python tools/astribot/run_step3_init_points.py
+        --repo-id Kronze157/astri_making_coffee_vlva
+        --data-root /data/astri_making_coffee_v1 --episode-idxes 0
 
     # Reuse the key-frames on disk: re-run only 3b (tuned params)
-    python tools/astribot/run_step3_init_points.py \
-        --repo-id Kronze157/astri_making_coffee_vlva \
-        --data-root /data/astri_making_coffee --episode-idxes 0 \
+    python tools/astribot/run_step3_init_points.py
+        --repo-id Kronze157/astri_making_coffee_vlva
+        --data-root /data/astri_making_coffee_v1 --episode-idxes 0
         --skip-extract --skip-3a --top-k 64
 
     # Skip RexOmni entirely: extract, then 3b with SAM3 text-only prompts
-    python tools/astribot/run_step3_init_points.py \
-        --repo-id Kronze157/astri_making_coffee_vlva \
-        --data-root /data/astri_making_coffee --episode-idxes 0 \
+    # read from meta/subtasks.csv
+    python tools/astribot/run_step3_init_points.py
+        --repo-id Kronze157/astri_making_coffee_vlva
+        --data-root /data/astri_making_coffee_v1 --episode-idxes 0
         --no-rexomni
 """
 
@@ -55,7 +69,6 @@ from utils.keyframe_utils import (
     keyframes_root,
 )
 
-DEFAULT_PROMPTS = ["brown coffee cup", "robot gripper"]
 DEFAULT_MAX_KEYFRAMES = 8
 DEFAULT_TOP_K = 128
 DEFAULT_BBOX_SCALE = 1.25
@@ -109,8 +122,6 @@ def parse_args(argv: list[str] | None = None):
     parser.add_argument("--detections-dir", default=None,
                         help="Step-3a detections root (Step 3b only; default: "
                              "<out-dir>/detections)")
-    parser.add_argument("--text-prompts", nargs="+", default=DEFAULT_PROMPTS,
-                        help="object prompts (default: %(default)s)")
     parser.add_argument("--max-keyframes", type=int, default=DEFAULT_MAX_KEYFRAMES,
                         help="cap the key-frames per sub-task (evenly spaced); "
                              "None disables the cap (default: %(default)s)")
@@ -144,7 +155,8 @@ def parse_args(argv: list[str] | None = None):
                           "JSON (Step 3b still reads it)")
     run.add_argument("--no-rexomni", action="store_true",
                      help="skip Step 3a and run Step 3b with SAM3 text-only "
-                          "prompts (no detections JSON)")
+                          "prompts from meta/subtasks.csv (no detections "
+                          "JSON)")
     parser.add_argument("--rexomni-env", default=REXOMNI_ENV_DIR,
                         help=f"RexOmni environment dir, relative to the repo "
                              f"root (default: {REXOMNI_ENV_DIR})")
@@ -211,8 +223,7 @@ def _build_3a_cmd(args, repo_root: Path) -> list[str]:
         cmd += ["--max-episodes", str(args.max_episodes)]
     if args.out_dir:
         cmd += ["--out-dir", args.out_dir]
-    cmd += ["--text-prompts", *args.text_prompts,
-            "--max-keyframes", str(args.max_keyframes)]
+    cmd += ["--max-keyframes", str(args.max_keyframes)]
     if args.skip_done:
         cmd += ["--skip-done"]
     return cmd
@@ -234,8 +245,7 @@ def _build_3b_cmd(args, repo_root: Path) -> list[str]:
         cmd += ["--out-dir", args.out_dir]
     if args.detections_dir:
         cmd += ["--detections-dir", args.detections_dir]
-    cmd += ["--text-prompts", *args.text_prompts,
-            "--max-keyframes", str(args.max_keyframes),
+    cmd += ["--max-keyframes", str(args.max_keyframes),
             "--top-k", str(args.top_k),
             "--bbox-scale", str(args.bbox_scale),
             "--num-corresp", str(args.num_corresp),

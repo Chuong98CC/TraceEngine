@@ -1,47 +1,36 @@
 """Step 3a — RexOmni object detection on the saved sub-task key-frames.
 
-Runs the open-vocabulary detection stage of pipeline Step 3 (Sampling
-Keypoints) over the key-frames of every sub-task of every selected episode.
-The key-frames are the jpgs that Step 1 saved to disk
-(tools/astribot/extract_frames.py --mode key_frames): Step 3 only runs
-inference on a sparse set of frames (most commonly a few per sub-task), so
-they are persisted instead of decoding the episode videos online — unlike
-Step 2, which streams every frame and cannot save them all. Nothing else is
-written to disk except the detection results: the raw RexOmni predictions
-are saved to **one JSON per episode** so Step 3b
-(run_object_init_points.py) can load and reuse them for SAM3 segmentation
-and RoMAv2 keypoint matching.
+Detection stage of pipeline Step 3: for every sub-task of every selected
+episode, runs the open-vocabulary detector on the key-frames that Step 1
+saved to disk, and writes the raw predictions to **one JSON per episode** —
+the input of Step 3b (run_object_init_points.py):
 
-RexOmni must run in its dedicated environment (Python 3.10, torch 2.7,
-transformers 4.51.3), so this script runs directly under .venv-rexomni. The
-sys.path bootstrap below exposes this project's ``tools/`` and ``src/`` to
-that environment.
+    key-frames on disk (sub-task x camera)
+               │
+               ▼  RexOmni (open-vocabulary detection)
+    ┌──────────────────────────────┐
+    │  detections JSON per episode │
+    └──────────────────────────────┘
 
-    .venv-rexomni/bin/python tools/general_test/pipeline/run_object_detection.py \
-        --data-root /data/astri_making_coffee --episode-idxes 0
-
-The model checkpoint is fixed (IDEA-Research/Rex-Omni) — no overrides.
-
-It can also run on a single folder of key-frame images (one sub-task of one
-camera) instead of the episode layout: pass ``--keyframes-dir`` — the folder
-is treated as sub-task 00 of a synthetic episode labelled ``--episode-idx``
-(default 0) and the folder name is the default camera key. run_e2e_init_points.py
-drives this mode end-to-end.
+Object prompts are per sub-task: the [object, manipulator] of the sub-task's
+row in the dataset's meta/subtasks.csv (episode mode), recorded in the JSON
+next to the detections; folder mode (--keyframes-dir, one sub-task of one
+camera) takes --text-prompts. RexOmni needs its own environment (Python
+3.10 / torch 2.7; checkpoint IDEA-Research/Rex-Omni), so run this script
+with .venv-rexomni's python — the sys.path bootstrap below exposes the repo
+to it.
 
 Examples
 --------
-    # All sub-tasks of episode 0, first RGB camera, default prompts
-    .venv-rexomni/bin/python tools/general_test/pipeline/run_object_detection.py \
-        --data-root /data/astri_making_coffee --episode-idxes 0
+    # Episode mode: all sub-tasks of episode 0, prompts from the dataset's
+    # meta/subtasks.csv
+    .venv-rexomni/bin/python tools/general_test/pipeline/run_object_detection.py
+        --data-root /data/astri_making_coffee_v1 --episode-idxes 0
 
-    # Custom object prompts, explicit camera subdir
-    .venv-rexomni/bin/python tools/general_test/pipeline/run_object_detection.py \
-        --data-root /data/astri_making_coffee --episode-idxes 0 \
-        --text-prompts "red mug" "left robot gripper" --camera-keys cam_head
-
-    # One sub-task's key-frame folder (sub-task 00 of episode 0)
-    .venv-rexomni/bin/python tools/general_test/pipeline/run_object_detection.py \
+    # One sub-task's key-frame folder: prompts passed explicitly
+    .venv-rexomni/bin/python tools/general_test/pipeline/run_object_detection.py
         --keyframes-dir .../subtask_00/cam_head --episode-idx 0
+        --text-prompts "red mug" "left robot gripper"
 """
 
 from __future__ import annotations
@@ -69,8 +58,10 @@ from utils.keyframe_utils import (
     discover_subtask_frames,
     keyframe_path,
     keyframes_root,
+    load_subtask_meta,
     select_camera,
     select_episodes,
+    subtask_prompts,
 )
 
 DEFAULT_PROMPTS = ["brown coffee cup", "robot gripper"]
@@ -118,7 +109,12 @@ def parse_args(argv: list[str] | None = None):
                         help="output root (default: <data-root>/eps_data); "
                              "detections land under <out-dir>/detections/")
     parser.add_argument("--text-prompts", nargs="+", default=DEFAULT_PROMPTS,
-                        help="object prompts to detect (default: %(default)s)")
+                        help="object prompts to detect (folder mode only — "
+                             "the single sub-task has no dataset "
+                             "annotations; episode mode reads "
+                             "object/manipulator per sub-task from "
+                             "meta/subtasks.csv instead; default: "
+                             "%(default)s)")
     parser.add_argument("--max-keyframes", type=int, default=8,
                         help="cap the key-frames per sub-task (evenly spaced); "
                              "None disables the cap (default: %(default)s)")
@@ -163,6 +159,12 @@ class SubtaskDetectExtract:
                     f"key-frames root {self.root} missing: run Step 1 first "
                     f"(python tools/astribot/extract_frames.py --mode detect_subtask "
                     f"then --mode key_frames --camera-idxes <camera>)")
+            try:
+                self.meta = load_subtask_meta(args.data_root)
+            except FileNotFoundError as e:
+                sys.exit(str(e))
+            print(f"sub-task prompts: {len(self.meta)} annotation(s) in "
+                  f"{args.data_root}/meta/subtasks.csv")
             self.ep_idxes = select_episodes(self.root, args.episode_idxes,
                                             args.max_episodes)
             self.out_dir = args.out_dir or (args.data_root + "/eps_data")
@@ -239,20 +241,21 @@ class SubtaskDetectExtract:
         if not keys:
             print(f"episode {ep_idx}: skip, no key-frame images in {self.folder}")
             return
+        prompts = list(self.args.text_prompts)
         print(f"\nepisode {ep_idx} (folder {self.folder.name}, camera {cam}): "
-              f"1 sub-task, {len(keys)} key-frames {keys}")
+              f"1 sub-task, {len(keys)} key-frames {keys}, prompts {prompts}")
         subtasks = {
             "0": {
                 "segment": [min(keys), max(keys) + 1],
                 "keyframes": keys,
-                "detections": self._detect_segment(cam, 0, keys),
+                "prompts": prompts,
+                "detections": self._detect_segment(cam, 0, keys, prompts),
             }
         }
         data = {
             "episode": int(ep_idx),
             "repo_id": self.args.repo_id,
             "camera_key": cam,
-            "prompts": list(self.args.text_prompts),
             "keyframes_dir": str(self.folder),
             "subtasks": subtasks,
         }
@@ -284,17 +287,23 @@ class SubtaskDetectExtract:
             if not keys:
                 print(f"  [subtask {k:02d}] skip: no key-frames")
                 continue
-            print(f"  [subtask {k:02d}] {len(keys)} key-frames {keys}")
+            prompts = subtask_prompts(self.meta.get(k))
+            if not prompts:
+                print(f"  [subtask {k:02d}] skip: no object/manipulator "
+                      f"row for it in meta/subtasks.csv")
+                continue
+            print(f"  [subtask {k:02d}] {len(keys)} key-frames {keys}, "
+                  f"prompts {prompts}")
             subtasks[str(k)] = {
                 "segment": [min(keys), max(keys) + 1],
                 "keyframes": keys,
-                "detections": self._detect_segment(cam, k, keys),
+                "prompts": prompts,
+                "detections": self._detect_segment(cam, k, keys, prompts),
             }
         data = {
             "episode": int(ep_idx),
             "repo_id": self.args.repo_id,
             "camera_key": cam,
-            "prompts": list(self.args.text_prompts),
             "subtasks": subtasks,
         }
         out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -302,7 +311,8 @@ class SubtaskDetectExtract:
             json.dump(data, f, indent=2)
         print(f"  saved {out_path}")
 
-    def _detect_segment(self, cam: str, k: int, keys: list[int]) -> dict:
+    def _detect_segment(self, cam: str, k: int, keys: list[int],
+                        prompts: list[str]) -> dict:
         """RexOmni detection over the segment's key-frames: one batched
         call; returns {frame_idx: extracted_predictions} (per-category lists
         of {"type": "box", "coords": [x0, y0, x1, y1]} in absolute pixels,
@@ -310,7 +320,7 @@ class SubtaskDetectExtract:
         model = self._ensure_model()
         imgs = [self._load_keyframe(cam, k, t) for t in keys]
         results = model.inference(images=imgs, task="detection",
-                                  categories=self.args.text_prompts)
+                                  categories=prompts)
         dets = {}
         for t, res in zip(keys, results):
             preds = res["extracted_predictions"] if res["success"] else {}

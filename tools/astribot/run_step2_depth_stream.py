@@ -1,57 +1,42 @@
-"""Stream per-sub-task depth + pose directly from a local LeRobotDataset,
-with optional per-chunk WAFT motion masks.
+"""Step 2 online — per-sub-task depth + pose streaming straight from a
+LeRobotDataset copy (nothing extracted to disk).
 
-Wraps ``DataExtract`` (tools/astribot/extract_frames.py) for dataset
-introspection, episode/camera selection and sub-task split-frame inference:
-``--episode-idxes`` picks the episodes and ``DataExtract._load_splits()``
-provides the split frames per episode (the ground-truth ``subtask_index``
-column when it exists, the gripper-inferred ``subtask_splits.json``
-otherwise).  Each sub-task segment ``[from_idx] + split_frames + [to_idx]``
-is streamed online — frames are decoded from the dataset one chunk at a
-time and never written to disk, so no per-subtask videos are needed.
+Streams each sub-task segment of the selected episodes through a chunked
+streaming backend — frames are decoded from the dataset one chunk at a time
+— and saves per-frame depth/pose outputs under
+<out-dir>/pipeline/<episode>/subtask_XX/ (visualize_subtask_stream.py
+renders them). The online counterpart of run_depth_stream.py:
 
-WAFT optical flow is **off by default** (``--with-optical-flow`` enables
-it).  When enabled it runs in per-batch interleave with the streaming
-model, not over the whole segment:
-for each streaming chunk (``num_views`` temporal frames) the chunk's frames
-are fetched, WAFT computes the motion masks of the chunk's steps (pairs
-``(t, t + stride)``), and the masks ground the chunk-to-chunk alignment.
-Masks are cached by absolute step index, so frames shared between
-overlapping chunks reuse the previous chunk's result instead of re-running
-WAFT; only the new frames of a chunk run through the model.
+    episode videos (dataset, sub-task segments)
+               │
+               ▼  chunked inference + SIM3 alignment (backend)
+    ┌──────────────────────────────┐
+    │  depth + pose per frame npz  │
+    └──────────────────────────────┘
 
-The streaming backend runs through an ``OnlineStreaming`` subclass of the
-concrete backend (``VGGT_OMG_Streaming`` / ``DA3_Streaming`` /
-``A2F_Streaming``): ``img_list`` holds virtual ``frame_%06d.jpg`` stems
-(output files are named after them, so saved frames keep their absolute
-dataset indices), and the chunk's image arrays are slice-swapped in for the
-model forward only.  Peak memory is one chunk of frames + masks.
-
-Three backends (``--backend``): RGB-only cameras run ``da3`` or
-``vggt_omega``; cameras with a paired raw-depth feature
-(``observation.depth.<name>``, uint16 mm) can run ``a2f``, which densifies
-the sensor depth with Any2Full.  For ``a2f`` the raw depth is decoded from
-the dataset alongside the RGB frames and slice-swapped into
-``depth_paths`` the same way — nothing is written to disk.
+Backends: da3 / vggt_omega for RGB-only cameras; a2f for cameras with a
+paired raw-depth feature (observation.depth.<name>, uint16 mm) — Any2Full
+densifies the sensor depth. --with-optical-flow (off by default) runs WAFT
+motion masks per chunk, which zero the moving pixels' confidence during
+chunk alignment only (the run_depth_stream.py --mask-dirs contract).
 
 Examples
 --------
-    # All sub-tasks of episode 0, cam_head, VGGT-Omega (WAFT off by default)
-    python tools/astribot/run_step2_depth_stream.py \
-        --repo-id Kronze157/astri_making_coffee_vlva \
+    # All sub-tasks of episode 0, first RGB camera, VGGT-Omega
+    python tools/astribot/run_step2_depth_stream.py
+        --repo-id Kronze157/astri_making_coffee_vlva
         --data-root /data/astri_making_coffee --episode-idxes 0
 
     # Stereo pair, DA3 backend, with WAFT motion masks
-    python tools/astribot/run_step2_depth_stream.py \
-        --repo-id Kronze157/astri_making_coffee_vlva \
-        --data-root /data/astri_making_coffee --episode-idxes 0 \
+    python tools/astribot/run_step2_depth_stream.py
+        --repo-id Kronze157/astri_making_coffee_vlva
+        --data-root /data/astri_making_coffee --episode-idxes 0
         --camera-idxes 4 5 --backend da3 --with-optical-flow
 
-    # RGB-D camera, a2f backend (Any2Full densifies the sensor depth;
-    # defaults to the first camera with a paired raw-depth feature)
-    python tools/astribot/run_step2_depth_stream.py \
-        --repo-id Kronze157/astri_making_coffee_vlva \
-        --data-root /data/astri_making_coffee --episode-idxes 0 \
+    # RGB-D camera, a2f backend (Any2Full densifies the sensor depth)
+    python tools/astribot/run_step2_depth_stream.py
+        --repo-id Kronze157/astri_making_coffee_vlva
+        --data-root /data/astri_making_coffee --episode-idxes 0
         --backend a2f
 """
 

@@ -1,83 +1,52 @@
-"""Extract sub-task splits, key frames and/or per-subtask frames and videos
-from a local LeRobotDataset copy.
+"""Step 1 — per-sub-task splits, key-frames, frames and videos of a local
+LeRobotDataset copy (four independent --mode runs).
 
-Four independent modes:
+Each mode splits the selected episodes into sub-task segments — from the
+dataset's ground-truth subtask_index column when it exists, else from the
+gripper-inferred splits of detect_subtask (--use-inferred-splits always
+prefers the inferred ones) — and writes under <out-dir>:
 
-- detect_subtask: detects the gripper key frames and infers the sub-task
-  split frames from the tabular observation.state only — no video is read, so
-  it also runs on datasets whose videos are not on disk. Saves the gripper
-  plot (raw + filtered state, key frames, split frames) and a
-  subtask_splits.json recording the key and split frames under
-  <out_dir>/subtask/<episode>/.
-- key_frames: saves one jpg per selected camera of the episode's first and
-  last frame, the key frames detected by detect_subtask, and the start and
-  end frame of every sub-task segment, each under the sub-task segment it
-  belongs to:
-  <out_dir>/key_frames/<episode>/subtask_XX/<camera>/.
-- videos: cuts one mp4 per sub-task segment (the episode split at the split
-  frames) per selected camera from the source videos with ffmpeg: each
-  segment is re-encoded with x264 at its exact split frames (no per-frame
-  Python decode; a decode+encode pass is unavoidable for frame-accurate
-  H.264 cuts), under <out_dir>/subtask_videos/<episode>/<camera>/.
-- frames: saves one jpg per selected camera of every --interval-th frame of
-  each sub-task segment (capped at --max-frames per sub-task), under
-  <out_dir>/subtask_frames/<episode>/subtask_XX/<camera>/. When a camera has
-  a paired depth feature stored as uint16 (mm), the raw depth array is saved
-  alongside as frame_<idx>.lz4 (see utils.astribot_dataloader.save_depth_lz4,
-  loadable by load_depth_lz4) under
-  <out_dir>/subtask_frames/<episode>/subtask_XX/depth_<camera>/.
+- ``detect_subtask``: key/split frames inferred from the tabular gripper
+  state alone — no videos needed → <out-dir>/subtask/<episode>/
+  subtask_splits.json + gripper plot.
+- ``key_frames``: jpgs of the episode's first/last frame, its gripper key
+  frames and each sub-task segment's boundary frames → <out-dir>/
+  key_frames/<episode>/subtask_XX/<camera>/frame_*.jpg (feeds Step 3).
+- ``videos``: one mp4 per sub-task segment per camera, cut from the episode
+  videos (ffmpeg re-encode at the exact split frames) → <out-dir>/
+  subtask_videos/<episode>/<camera>/.
+- ``frames``: every --interval-th frame of each sub-task segment (capped by
+  --max-frames) → <out-dir>/subtask_frames/<episode>/subtask_XX/<camera>/;
+  cameras with a paired uint16-mm depth feature also get
+  depth_<camera>/frame_*.lz4 (load_depth_lz4).
 
-Key frames are the first and last frame of an episode plus every frame where
-the gripper state crosses the KEY_FRAME_CHANGE open/close threshold, detected
-on the low-pass filtered signal; runs of closed state shorter than
-KEY_FRAME_MIN_CLOSE_S seconds are dropped first, so a noisy blip does not
-produce a key-frame pair. The sub-task split frames are the re-grasp
-midpoints of the combined 1 -> 0 -> 1 gripper pattern (see
-_subtask_split_idxes). The videos, frames and key_frames modes prefer the
-dataset's ground-truth subtask_index column when it exists — the split
-frames are then the first frame of each new sub-task segment (see
-_split_frames_from_ground_truth) — and fall back to subtask_splits.json only
-when the episode has fewer than two sub-tasks. The ground-truth labels are
-sometimes wrong; pass --use-inferred-splits to always prefer the split
-frames inferred by detect_subtask instead. The key_frames mode always uses
-the gripper-detected key frames of detect_subtask (ground truth has no key
-frames) and additionally saves the start and end frame of every sub-task
-segment (its boundaries under the chosen split source); each saved jpg
-lands in the sub-task segment its frame index belongs to.
-
-Depth pairing: a camera observation.images.cam_X is paired with the
-observation.depth.cam_X feature (uint16 mm) when present, else with the
-legacy <cam_key>_depth video. The video is only trusted when the dataset
-metadata flags it as a real depth map (video.is_depth_map) — the
-astri_making_coffee recording is flagged false and its depth is unusable
-(see the re-recorded astri_making_coffee_v1 dataset). The dataset videos
-must be present on disk for the key_frames, videos and frames modes
-(LeRobotDataset is opened with download_videos=False).
+The dataset videos must be local for every mode except detect_subtask
+(LeRobotDataset opens with download_videos=False).
 
 Examples
 --------
-    # 1) infer the key and sub-task split frames of every episode (no videos)
-    python tools/astribot/extract_frames.py \
-        --repo-id Kronze157/astri_making_coffee_vlva \
+    # 1) key/split frames inferred from the gripper state — no videos
+    python tools/astribot/extract_frames.py
+        --repo-id Kronze157/astri_making_coffee_vlva
         --data-root /data/astri_making_coffee_v1 --mode detect_subtask
 
-    # 2) save the first/last/key frames as jpgs for the first two cameras
-    python tools/astribot/extract_frames.py \
-        --repo-id Kronze157/astri_making_coffee_vlva \
-        --data-root /data/astri_making_coffee_v1 --mode key_frames \
+    # 2) first/last/key frames as jpgs, first two cameras
+    python tools/astribot/extract_frames.py
+        --repo-id Kronze157/astri_making_coffee_vlva
+        --data-root /data/astri_making_coffee_v1 --mode key_frames
         --camera-idxes 0 1
 
     # 3) one mp4 per sub-task segment, first two cameras
-    python tools/astribot/extract_frames.py \
-        --repo-id Kronze157/astri_making_coffee_vlva \
-        --data-root /data/astri_making_coffee_v1 --mode videos \
+    python tools/astribot/extract_frames.py
+        --repo-id Kronze157/astri_making_coffee_vlva
+        --data-root /data/astri_making_coffee_v1 --mode videos
         --camera-idxes 0 1
 
-    # 4) every 4th frame of each sub-task (capped at 50 per sub-task), head
-    #    camera; the paired uint16 depth lands in depth_cam_head/ as .lz4
-    python tools/astribot/extract_frames.py \
-        --repo-id Kronze157/astri_making_coffee_vlva \
-        --data-root /data/astri_making_coffee_v1 --mode frames \
+    # 4) every 4th frame of each sub-task (capped at 50), with the paired
+    #    uint16 depth saved as .lz4 alongside
+    python tools/astribot/extract_frames.py
+        --repo-id Kronze157/astri_making_coffee_vlva
+        --data-root /data/astri_making_coffee_v1 --mode frames
         --camera-idxes 0 --interval 4 --max-frames 50
 """
 

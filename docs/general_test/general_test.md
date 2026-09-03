@@ -70,8 +70,9 @@ flowchart LR
    densification). Optional WAFT motion masks (`infer_waft.py`) zero the
    confidence of moving pixels during chunk alignment. → **[Pipeline test:
    `pipeline/step2.md`](pipeline/step2.md)**
-3. **Step 3: Sampling keypoints** — for each interacted object, a text prompt from
-   the subtask description drives detection on the key-frames
+3. **Step 3: Sampling keypoints** — per sub-task, the object prompts come from
+   the dataset's `meta/subtasks.csv` annotations (the `manipulator`/`object`
+   columns of the sub-task's row) and drive detection on the key-frames
    (`run_object_detection.py`, Rex-Omni); the boxes + text prompt segment
    the object masks (`run_object_init_points.py`, SAM3); the enlarged box
    crops are matched across the key-frames (RoMAv2, mask-cropped so points are

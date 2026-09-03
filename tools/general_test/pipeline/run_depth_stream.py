@@ -1,35 +1,42 @@
 #!/usr/bin/env python3
-"""
-DA3 multi-camera streaming — unified entry point for all backends.
+"""Step 2 — streaming depth + pose over synchronized frame folders (da3 |
+a2f | vggt_omega, unified entry point for all backends).
 
-Usage:
-    python tools/general_test/pipeline/run_depth_stream.py \
-        --backend da3|vggt_omega \
-        --input-dirs /path/cam0 /path/cam1 \
-        [--mask-dirs /path/masks0 /path/masks1] \
-        --start-frame 0 --max-frames 60
+Streams the synchronized RGB frame folders (one per camera, matching frame
+stems) in chunks of the model's fixed num_views frames, aligns consecutive
+chunks via SIM3 and saves per camera and frame the depth + pose npz files:
+
+    camera folders (one per camera)
+               │
+               ▼  per-chunk inference + SIM3 alignment
+    ┌──────────────────────────────┐
+    │  depth + pose per frame npz  │
+    └──────────────────────────────┘
+
+A chunk spans the model's ``num_views`` frames, so it must divide evenly
+across the cameras; a short final chunk is padded at its start (copies of
+the previous chunk's tail) and the padding is discarded. Optional motion
+masks (--mask-dirs) zero the moving pixels' confidence during alignment
+only; --video renders the trajectory mp4 afterwards (visualize_stream.py).
 
 Backends:
-- ``da3``        two pre-exported DA3 torch.export programs (.pt2): the
-                 any-view graph (fixed num_views) + the metric-depth graph,
-                 composed by DA3NestedPT2 so the metric component can be
-                 swapped independently.
-- ``a2f``        DA3 any-view graph + Any2Full: one RGB input folder (plus
-                 --depth-dirs, the parallel raw-depth folder with .lz4 uint16
-                 mm maps); Any2Full densifies the sparse depth and the
-                 any-view depth is aligned to it (A2F_NestedPT2).
-- ``vggt_omega`` pre-exported VGGT-Omega torch.export program (.pt2/.pt)
-                 (fixed num_views).
+- ``vggt_omega`` — pre-exported VGGT-Omega torch.export program (.pt2),
+  fixed num_views.
+- ``da3``        — the two DA3 programs: the any-view graph + the
+                  metric-depth graph, composed by DA3NestedPT2 (metric
+                  component swappable).
+- ``a2f``        — RGB folders + parallel raw-depth folders (--depth-dirs,
+                  .lz4 uint16 mm): Any2Full densifies the sensor depth and
+                  the any-view depth is aligned to it.
 
-``chunk_size`` is derived from the model's fixed ``num_views`` (read from
-the export itself) and must be divisible by the number of input folders.
-A short final chunk is padded at its start with images from the previous
-chunk (or with duplicated images when the whole sequence is shorter than
-one chunk); the padded outputs are discarded.
+The online per-sub-task variant (frames decoded straight from the dataset,
+nothing extracted) is tools/astribot/run_step2_depth_stream.py.
 
-With ``--video``, a trajectory mp4 is rendered after the run: each frame
-shows that time step's coloured point cloud with its camera frustums, plus
-the growing camera path from the first frame to the current one.
+Usage:
+    python tools/general_test/pipeline/run_depth_stream.py --backend vggt_omega
+        --input-dirs <left_dir> <right_dir>
+        --start-frame 210 --max-frames 160 --interval 4
+        --output-dir output/stream_stereo_vggt_omega
 """
 
 from __future__ import annotations

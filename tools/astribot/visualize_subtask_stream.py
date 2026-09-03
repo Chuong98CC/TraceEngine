@@ -1,34 +1,28 @@
-"""Render the trajectory video of every sub-task segment of an episode,
-online — the visualization counterpart of ``run_step2_depth_stream.py``.
+"""Per-sub-task trajectory videos, online — the visualization counterpart of
+run_step2_depth_stream.py.
 
-Reuses ``DataExtract`` (tools/astribot/extract_frames.py) for dataset
-introspection, episode/camera selection and sub-task split-frame inference
-(identical flags to ``run_step2_depth_stream.py``), then for each sub-task
-segment renders the streaming trajectory video from the saved pipeline
-outputs: per-frame ``depth``/``extrinsics``/``intrinsics`` npz files under
-``<out-dir>/pipeline/<episode>/subtask_XX/`` (the same contract as
-``tools/general_test/pipeline/visualize_stream.py``, which is invoked under
-the
-hood) — but the colour images are **decoded online from the dataset** (one
-frame per rendered step) instead of read from frame folders, so no extracted
-frames or videos are needed on disk.
-
-Each video frame shows that step's coloured point cloud with its camera
-frustums and the growing camera path; the view is fixed per segment
-(aligned to the first camera, fitted to the union of the segment's clouds).
-Output: ``<seg_dir>/trajectory.mp4`` per segment.
+For each sub-task segment of the selected episodes, renders the trajectory
+video from the segment's saved streaming outputs (per-frame depth/pose npz
+under <out-dir>/pipeline/<episode>/subtask_XX/, the same contract as
+tools/general_test/pipeline/visualize_stream.py whose renderer is reused),
+decoding the colour frames online from the dataset — no extracted frames or
+videos needed on disk. Each video frame shows that step's coloured point
+cloud with its camera frustums and the growing camera path; the view is
+fixed per segment (aligned to its first camera). Output:
+<seg_dir>/trajectory.mp4. Episode/camera selection flags are identical to
+run_step2_depth_stream.py.
 
 Examples
 --------
-    # Render every sub-task of episode 0 (single camera, default fps/size)
-    python tools/astribot/visualize_subtask_stream.py \
-        --repo-id Kronze157/astri_making_coffee_vlva \
+    # Render every sub-task of episode 0 (first RGB camera)
+    python tools/astribot/visualize_subtask_stream.py
+        --repo-id Kronze157/astri_making_coffee_vlva
         --data-root /data/astri_making_coffee --episode-idxes 0
 
     # Stereo pair at 30 fps
-    python tools/astribot/visualize_subtask_stream.py \
-        --repo-id Kronze157/astri_making_coffee_vlva \
-        --data-root /data/astri_making_coffee --episode-idxes 0 \
+    python tools/astribot/visualize_subtask_stream.py
+        --repo-id Kronze157/astri_making_coffee_vlva
+        --data-root /data/astri_making_coffee --episode-idxes 0
         --camera-idxes 4 5 --fps 30
 """
 

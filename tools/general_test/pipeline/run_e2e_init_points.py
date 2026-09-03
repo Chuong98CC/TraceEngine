@@ -1,45 +1,44 @@
-"""Step 3 on a folder of key-frame images — full pipeline, one sub-task.
+"""Step 3 on a key-frame folder — driver of Step 3a + 3b, one sub-task.
 
-Runs pipeline Step 3 (Sampling Keypoints) end-to-end on a single folder of
-key-frame images (the key-frames of one sub-task of one camera, e.g. a
-cam_head/ folder saved by Step 1 — extract_frames.py --mode key_frames):
-first Step 3a (run_object_detection.py — RexOmni detections, under
-.venv-rexomni), then Step 3b (run_object_init_points.py — SAM3 masks +
-RoMAv2 keypoints, main env). This is the folder-input variant of
-run_step3_init_points.py: instead of an episode key-frames root, the folder is
-treated as sub-task 00 of a synthetic episode labelled --episode-idx
-(default 0) and the folder name is the default camera key.
+The folder-input variant of run_step3_init_points.py (tools/astribot/):
+runs pipeline Step 3 end-to-end on a single folder of key-frame images —
+the key-frames of one sub-task of one camera, e.g. a cam_head/ folder saved
+by extract_frames.py --mode key_frames. The folder plays sub-task 00 of a
+synthetic episode labelled --episode-idx (default 0); its name is the
+default camera key. As in the episode driver, the two sub-steps cannot
+share a process (RexOmni under .venv-rexomni, the SAM3/RoMAv2 .pt2 runtimes
+in the main env) — launch this driver from the **main** environment:
 
-The two sub-steps cannot share a process (RexOmni needs Python 3.10 /
-torch 2.7 while the SAM3/RoMAv2 .pt2 runtimes need the main env), so this
-driver launches the two standalone tools sequentially as subprocesses — the
-same commands the docs show, with the shared CLI flags passed through. Run
-it from the **main** environment:
+    key-frame folder (one sub-task)
+               │
+               ▼  Step 3a: run_object_detection.py (RexOmni)
+    ┌──────────────────────────────┐
+    │  detections JSON per episode │
+    └──────────────────────────────┘
+               │
+               ▼  Step 3b: run_object_init_points.py (SAM3 + RoMAv2)
+    ┌──────────────────────────────┐
+    │  init_points per prompt      │
+    └──────────────────────────────┘
 
-    python tools/general_test/pipeline/run_e2e_init_points.py \
-        --keyframes-dir /data/astri_making_coffee/eps_data/key_frames/ep000000/subtask_00/cam_head
-
-Outputs (default root: <keyframes-dir>/../step3_output):
-
-    <out-dir>/detections/ep{episode_idx:06d}.json   Step 3a
-    <out-dir>/init_points/ep{episode_idx:06d}/subtask_00/<prompt_slug>/
-        init_points.npz + masks_rle.json + init_points.json + viz.png
-
-Pass a distinct --episode-idx per folder to keep several folders' outputs
-separate under the same output root.
+There is no dataset annotation: the prompts come from --text-prompts.
+Outputs land under <keyframes-dir>/../step3_output (--out-dir to change):
+3a writes detections/ep{episode_idx:06d}.json, 3b the per-prompt
+init_points/... under the same episode label. Pass a distinct --episode-idx
+per folder to keep several folders' outputs separate under one output root.
 
 Examples
 --------
     # Full Step 3 on one sub-task's key-frame folder
-    python tools/general_test/pipeline/run_e2e_init_points.py \
+    python tools/general_test/pipeline/run_e2e_init_points.py
         --keyframes-dir .../subtask_00/cam_head
 
-    # Re-run only 3b with the existing detections JSON (tuned params)
-    python tools/general_test/pipeline/run_e2e_init_points.py \
+    # Re-run only 3b on the existing detections JSON (tuned params)
+    python tools/general_test/pipeline/run_e2e_init_points.py
         --keyframes-dir .../subtask_00/cam_head --skip-3a --top-k 64
 
-    # Skip RexOmni entirely: 3b with SAM3 text-only prompts
-    python tools/general_test/pipeline/run_e2e_init_points.py \
+    # Skip RexOmni: 3b with SAM3 text-only prompts
+    python tools/general_test/pipeline/run_e2e_init_points.py
         --keyframes-dir .../subtask_00/cam_head --no-rexomni
 """
 

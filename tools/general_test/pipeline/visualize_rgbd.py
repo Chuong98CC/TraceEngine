@@ -1,32 +1,24 @@
-"""Visualise RGB-D data: either the Astribot head RGB-D camera (ground-truth
-depth camera) or an explicit folder pair (RGB images + depth .lz4 files).
+"""Visualise RGB-D data — an Astribot head RGB-D frame (ground-truth depth)
+or an explicit RGB/depth folder pair. Exactly one input source:
 
-Two mutually exclusive input sources:
+- ``--camera_name``: the Astribot head RGB-D camera; metric depth is
+  recovered from the grey-scale depth image of ``--frame_index``.
+- ``--rgb_dir`` + ``--depth_npz_dir``: paired folders — RGB images
+  (``<stem>.jpg/.jpeg/.png``) with depth ``<stem>.lz4`` (raw uint16 mm,
+  see utils.astribot_dataloader.load_depth_lz4) and pose ``<stem>.npz``
+  (``extrinsics`` 3x4/4x4, ``intrinsics`` 3x3) per stem; ``--frame_index``
+  picks the position in the sorted stems.
 
-1. **Camera mode** (``--camera_name``): loads the head RGB frame and its
-   aligned depth frame via the astribot dataloader, recovers metric depth from
-   the grey-scale depth image.
-2. **Folder mode** (``--rgb_dir`` + ``--depth_npz_dir``): pairs RGB images
-   (``<stem>.jpg/.jpeg/.png``) with depth .lz4 files (``<stem>.lz4``, raw
-   uint16 mm — see utils.astribot_dataloader.load_depth_lz4) and pose NPZ
-   files (``<stem>.npz`` with ``extrinsics`` 3x4/4x4 and ``intrinsics`` 3x3
-   keys) by stem, and processes the pair at position ``--frame_index`` in
-   the sorted stems.
-
-Exactly one of the two sources must be set.
-
-Writes, per frame:
-
-1. Visualisation → side-by-side ``[RGB | colour-mapped depth]`` JPEG (save_depth_vis).
-2. Point cloud   → RGB-coloured ``.glb`` back-projected with the intrinsics
-   (export_glb).
+Per selected frame it writes a side-by-side ``[RGB | depth colour-map]``
+JPEG (--save_viz) and a coloured .glb point cloud (--save_glb). This is a
+debug/visualisation helper, not part of the depth-streaming pipeline.
 
 Usage
 -----
-python tools/general_test/pipeline/visualize_rgbd.py --camera_name head_rgbd \
-    --frame_index 0 --save_viz --save_glb
-python tools/general_test/pipeline/visualize_rgbd.py --rgb_dir path/to/rgb \
-    --depth_npz_dir path/to/depth --save_viz --save_glb
+    python tools/general_test/pipeline/visualize_rgbd.py
+        --camera_name head_rgbd --frame_index 0 --save_viz --save_glb
+    python tools/general_test/pipeline/visualize_rgbd.py
+        --rgb_dir path/to/rgb --depth_npz_dir path/to/depth --save_glb
 """
 
 import argparse

@@ -18,12 +18,21 @@ detections JSON, which Step 3b reads (the helpers only run again under
 
 from __future__ import annotations
 
+import csv
 import re
 from pathlib import Path
 
 _EP_RE = re.compile(r"^ep(\d{6})$")
 _SUB_RE = re.compile(r"^subtask_(\d+)$")
 _FRAME_RE = re.compile(r"^frame_(\d+)\.(?:jpg|jpeg|png)$")
+
+#: dataset subtask annotations (<data-root>/meta/subtasks.csv) — optional
+#: per-sub-task prompt columns hand-edited next to the parquet layout
+#: (see tools/modify_subtask_parque.py).
+SUBTASK_META_FILE = "subtasks.csv"
+#: prompt columns of the annotations, in output order: the manipulated
+#: object, then the manipulator acting on it.
+SUBTASK_PROMPT_COLUMNS = ("object", "manipulator")
 
 
 def keyframes_root(data_root: str) -> Path:
@@ -155,3 +164,59 @@ def discover_folder_frames(folder: str | Path) -> list[tuple[int, Path]]:
     if files and all(parsed):
         return [(int(m.group(1)), p) for m, p in zip(parsed, files)]
     return list(enumerate(files))
+
+
+def load_subtask_meta(data_root: str | Path) -> dict[int, dict[str, str]]:
+    """Subtask annotations of a dataset copy: {subtask_index: row} of
+    <data_root>/meta/subtasks.csv, row values keyed by column name.
+
+    The file is the spreadsheet-edited companion of the dataset-native
+    meta/subtasks.parquet, so headers and cells are stripped (header names
+    often keep spreadsheet spaces, e.g. ``" manipulator"``), unnamed columns
+    are dropped, and empty cells are absent from the row dict. Rows whose
+    subtask_index does not parse as an int are skipped. Raises
+    FileNotFoundError when the dataset has no annotations, ValueError when
+    the index column is missing."""
+    path = Path(data_root) / "meta" / SUBTASK_META_FILE
+    if not path.is_file():
+        raise FileNotFoundError(
+            f"{path} missing: the dataset must annotate every sub-task "
+            f"with object/manipulator prompts for Step 3; export "
+            f"meta/subtasks.parquet with tools/modify_subtask_parque.py "
+            f"--to-csv, edit the columns, then convert back with --to-parquet")
+    with open(path, newline="") as f:
+        lines = list(csv.reader(f))
+    if not lines:
+        return {}
+    cols: dict[str, int] = {}
+    for i, name in enumerate(lines[0]):
+        name = name.strip()
+        if name and name not in cols:  # first occurrence of a name wins
+            cols[name] = i
+    if "subtask_index" not in cols:
+        raise ValueError(f"{path}: no subtask_index column "
+                         f"(found: {sorted(cols)})")
+    meta: dict[int, dict[str, str]] = {}
+    for line in lines[1:]:
+        cells = [c.strip() for c in line]
+        idx_col = cols["subtask_index"]
+        if idx_col >= len(cells):
+            continue
+        try:
+            k = int(cells[idx_col])
+        except ValueError:
+            continue
+        if k in meta:
+            continue
+        row = {name: cells[i] for name, i in cols.items()
+               if name != "subtask_index" and i < len(cells) and cells[i]}
+        meta[k] = row
+    return meta
+
+
+def subtask_prompts(row: dict[str, str] | None) -> list[str]:
+    """RexOmni/SAM3 text prompts of one annotation row: the non-empty
+    [object, manipulator] values ([] when the row is missing or carries
+    neither)."""
+    row = row or {}
+    return [row[c] for c in SUBTASK_PROMPT_COLUMNS if row.get(c)]

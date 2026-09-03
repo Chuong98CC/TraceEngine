@@ -17,7 +17,8 @@ online (unlike Step 2, which streams every frame). The on-disk layout is:
 ## What the step does
 
 ```
-text prompt per interacted object (from the subtask description)
+text prompt per interacted object — dataset mode: the manipulator/object
+columns of the sub-task's row in meta/subtasks.csv; folder mode: --text-prompts
   → RexOmni     — detect the object in each key-frame            (Step 3a)
   → SAM3        — segment the object masks (bbox + text prompt)  (Step 3b)
   → RoMAv2      — match keypoints across key-frames on enlarged
@@ -25,6 +26,10 @@ text prompt per interacted object (from the subtask description)
                   points are sampled inside the object only)
   → top-k keypoints inside the object masks
 ```
+
+In dataset mode the prompts are **per sub-task** (recorded next to each
+sub-task's detections in the Step-3a JSON — there is no global prompt list),
+and the dataset must carry the `meta/subtasks.csv` annotations.
 
 Two sub-steps, two environments — they **cannot share a process**:
 
@@ -61,10 +66,11 @@ python tools/general_test/pipeline/run_e2e_init_points.py \
 # or the wrapper script (extra args pass through)
 bash scripts/general_test/infer_step3.sh <key-frames-dir> [extra args...]
 
-# Dataset mode (Case 2): episodes on the dataset, extraction included
+# Dataset mode (Case 2): episodes on the dataset, extraction included;
+# prompts come from <data-root>/meta/subtasks.csv (required)
 python tools/astribot/run_step3_init_points.py \
     --repo-id Kronze157/astri_making_coffee_vlva \
-    --data-root /data/astri_making_coffee --episode-idxes 0
+    --data-root /data/astri_making_coffee_v1 --episode-idxes 0
 
 # Re-run only 3b with tuned params, reusing the saved key-frames + detections
 python tools/general_test/pipeline/run_e2e_init_points.py \
@@ -77,7 +83,9 @@ python tools/general_test/pipeline/run_e2e_init_points.py \
 
 ## Expected output
 
-Step 3a — one JSON per episode, the raw RexOmni predictions (Step 3b reads it):
+Step 3a — one JSON per episode, the raw RexOmni predictions (Step 3b reads
+it). Every sub-task entry records its `prompts` next to its `detections`
+(the detections are keyed by prompt text):
 
 ```
 <out-dir>/detections/ep{episode_idx:06d}.json
@@ -102,7 +110,9 @@ uniform, so downstream consumers always find the same files.
 
 - [ ] Exit code 0.
 - [ ] Step 3a wrote `<out-dir>/detections/ep*.json` with one entry per
-      key-frame; the frame indexes inside match the `frame_<idx>` stems.
+      key-frame; the frame indexes inside match the `frame_<idx>` stems;
+      in dataset mode each sub-task entry carries its `prompts` from
+      `meta/subtasks.csv` ([object, manipulator] of the sub-task's row).
 - [ ] Step 3b wrote one `init_points/` folder per prompt with all four files
       (`init_points.npz`, `masks_rle.json`, `init_points.json`, `viz.png`).
 - [ ] `init_points.npz` keypoints are `(K, N, 2)` — K ≤ `--top-k` points

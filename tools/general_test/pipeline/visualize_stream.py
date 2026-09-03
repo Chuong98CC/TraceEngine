@@ -1,25 +1,21 @@
 #!/usr/bin/env python3
-"""
-Trajectory mp4 video for the streaming output.
+"""Trajectory mp4 of a streaming run, rendered from the saved outputs — no
+model inference (run_depth_stream.py --video exposes the same renderer).
 
-Each video frame shows one time step's coloured point cloud with its
-camera frustums, plus the growing camera path from the first frame to the
-current one.  The view is fixed for the whole video (aligned to the first
-camera, eye behind it along its optical axis, fitted to the union of all
-frame clouds); with ``--views 4`` each frame is a 2x2 grid of viewpoints
-(center / down / left / right), all looking at the scene centre.
+Each video frame shows one time step's coloured point cloud with its camera
+frustums and the growing camera path from the first frame to the current
+one.  Geometry comes from the per-camera depth/pose npz files under
+``--result-dir``, colours from the matching frame folders ``--input-dirs``
+(one per camera, same order and stems as the inference run).  The view is
+fixed for the whole video (aligned to the first camera); with ``--views 4``
+each frame is a 2x2 grid of viewpoints (center / down / left / right).
 
-CLI (no ``run_depth_stream.py`` needed — uses the already-saved NPZ outputs):
-    python da3_streaming/visualize_stream.py \
-        --input-dirs data/astribot_stereo_lrb/extract_frames/stereo_left \
-                      data/astribot_stereo_lrb/extract_frames/stereo_right \
-        --result-dir output/stream_stereo_pytorch \
-        --output output/stream_stereo_pytorch/trajectory.mp4
-
-Also exposed as the ``--video`` flag in ``run_depth_stream.py`` (rendered after
-the run) via :func:`render_stream_video`.  Single-step GLB export lives in
-``visualize_glb.py``; the shared NPZ/image loaders live in
-``stream_utils.py``.
+Usage
+-----
+    python tools/general_test/pipeline/visualize_stream.py
+        --input-dirs <left_dir> <right_dir>
+        --result-dir output/stream_stereo_vggt_omega
+        --output output/stream_stereo_vggt_omega/trajectory.mp4
 """
 
 from __future__ import annotations
