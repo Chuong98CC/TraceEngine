@@ -9,7 +9,7 @@ This is the **folder-mode** (Case 1) test: input is a folder of extracted
 images, dataset-independent. The dataset-mode variant that streams online
 from a LeRobotDataset without writing frames to disk is
 `tools/astribot/run_step2_depth_stream.py` (see
-[`docs/astribot/astribot_subtask_depth_stream.md`](../../astribot/astribot_subtask_depth_stream.md)).
+[`docs/astribot/astribot_subtask_stream.md`](../../astribot/astribot_subtask_stream.md)).
 The model-level details live in the module docs — this page is about the
 pipeline running end-to-end.
 

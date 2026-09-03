@@ -277,28 +277,54 @@ It will extract frames from cameras 0 and 1, you can select other camera indexes
 ### Case 2 — Large datasets: online / streaming from the dataset (`tools/astribot`)
 
 For large datasets, extracting every frame to jpg is impractical. The
-`tools/astribot` scripts instead stream **online, directly from the
+`tools/astribot` entry points instead stream **online, straight from the
 LeRobotDataset** — frames are decoded one chunk at a time and never written
 to disk, so no extracted frames or per-subtask videos are needed. Sub-task
-splits are taken from the ground-truth `subtask_index` column (gripper-based
-inference fallback).
+splits come from the dataset's ground-truth `subtask_index` column when it
+exists, or from the gripper-inferred `subtask_splits.json` of
+`--mode detect_subtask` (`--use-inferred-splits` prefers the inferred
+splits when both exist).
 
-- `run_step2_depth_stream.py` — per-sub-task depth + pose streaming (DA3 /
-  VGGT-Omega / Any2Full backends, optional per-chunk WAFT motion masks).
-- `run_subtask_a3f.py` — per-sub-task Any2Full RGB-D densification (RGB-D
-  cameras only).
-- `visualize_subtask_stream.py` — trajectory video per sub-task, rendered
-  online from the saved pipeline outputs (no re-inference).
-- `extract_frames.py` — shared dataset introspection + sub-task splitting
-  (also the frame-extraction script of case 1).
+One ready-to-run script per step under `scripts/astribot/` (same flags as
+the tools they wrap):
 
 ```bash
-python tools/astribot/run_step2_depth_stream.py \
-    --repo-id Kronze157/astri_making_coffee_vlva \
-    --data-root <dataset_dir> --episode-idxes 0 --backend vggt_omega
+# Step 1 — infer the sub-task split frames from the gripper state
+# (optional when the dataset's ground-truth subtask_index column is used)
+bash scripts/astribot/extract_frames.sh
+
+# Step 2 — depth + pose per sub-task segment (online streaming, WAFT masks)
+bash scripts/astribot/run_step2_stereo.sh    # RGB stereo: VGGT-Omega (or DA3), cameras 4+5
+bash scripts/astribot/run_step2_rgbd.sh      # RGB-D: Any2Full (a2f) densifies the sensor depth
+
+# Step 3 — key-point sampling: key-frame jpgs + RexOmni detections +
+# SAM3/RoMaV2 init points (prompts come from the dataset's meta/subtasks.csv)
+bash scripts/astribot/run_step3_init_points.sh
+
+# visualize — trajectory video per sub-task from the depth_pose outputs
+bash scripts/astribot/visualize_subtask_stream.sh
 ```
+
+All outputs land under `<data-root>/eps_data/` (`--out-dir`), one root per
+dataset:
+
+```
+/data/astri_making_coffee_v1/eps_data/
+├── subtask/         <- detect_subtask: subtask_splits.json + gripper plot per episode
+├── key_frames/      <- extract_frames --mode key_frames (first/last/key-frame jpgs)
+├── subtask_videos/  <- extract_frames --mode videos (one mp4 per sub-task segment)
+├── subtask_frames/  <- extract_frames --mode frames (sampled per-sub-task frames + depth .lz4)
+├── depth_pose/      <- Step 2 online streaming (run_step2_depth_stream.py)
+├── detections/      <- Step 3a (RexOmni)
+└── init_points/     <- Step 3b (SAM3/RoMaV2)
+```
+
+Depth + pose results live in
+`depth_pose/<episode>/subtask_XX/depth_<camera>/` (`frame_<idx>.lz4` raw
+uint16-mm depth + `frame_<idx>.npz` pose — the same contract as the
+disk-based `run_depth_stream.py`).
 
 The docs live in [`docs/astribot/`](docs/astribot/):
 [`astribot_extract_frames.md`](docs/astribot/astribot_extract_frames.md),
-[`astribot_subtask_depth_stream.md`](docs/astribot/astribot_subtask_depth_stream.md),
-[`astribot_visualize_subtask_depth_stream.md`](docs/astribot/astribot_visualize_subtask_depth_stream.md).
+[`astribot_subtask_stream.md`](docs/astribot/astribot_subtask_stream.md),
+[`astribot_visualize_subtask_stream.md`](docs/astribot/astribot_visualize_subtask_stream.md).

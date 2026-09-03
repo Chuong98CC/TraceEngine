@@ -4,7 +4,7 @@ LeRobotDataset copy (nothing extracted to disk).
 Streams each sub-task segment of the selected episodes through a chunked
 streaming backend — frames are decoded from the dataset one chunk at a time
 — and saves per-frame depth/pose outputs under
-<out-dir>/pipeline/<episode>/subtask_XX/ (visualize_subtask_stream.py
+<out-dir>/depth_pose/<episode>/subtask_XX/ (visualize_subtask_stream.py
 renders them). The online counterpart of run_depth_stream.py:
 
     episode videos (dataset, sub-task segments)
@@ -94,7 +94,7 @@ def parse_args(argv: list[str] | None = None):
                         help="cap the number of processed episodes")
     parser.add_argument("--out-dir", "-o", default=None,
                         help="output root (default: <data-root>/eps_data); per-sub-task "
-                             "results land under <out-dir>/pipeline/<episode>/subtask_XX/")
+                             "results land under <out-dir>/depth_pose/<episode>/subtask_XX/")
     parser.add_argument("--backend", choices=("vggt_omega", "da3", "a2f"),
                         default="vggt_omega",
                         help="streaming backend: RGB-only cameras run da3 or "
@@ -366,8 +366,12 @@ class SubtaskStreamExtract(DataExtract):
         args.mode = "videos"  # DataExtract needs one of its modes; only the
                              # output-dir/camera/episode machinery is reused
         super().__init__(args)
-        self.pipeline_dir = os.path.join(self.out_dir, "pipeline")
-        os.makedirs(self.pipeline_dir, exist_ok=True)
+        # self.out_dir stays DataExtract's extraction root (<data-root>/eps_data)
+        # — inherited lookups such as the detect_subtask subtask_splits.json
+        # (under <out>/subtask/) resolve against it — while the per-sub-task
+        # streaming results go one level down, under <out>/depth_pose/
+        self.depth_pose_dir = os.path.join(self.out_dir, "depth_pose")
+        os.makedirs(self.depth_pose_dir, exist_ok=True)
         self.waft_model = None
         self.stream = None
         # per-camera raw-depth feature keys (None for RGB-only cameras),
@@ -415,12 +419,12 @@ class SubtaskStreamExtract(DataExtract):
             input_dirs = [self._camera_subdir(k) for k in self.cam_keys.values()]
             if self.args.backend == "vggt_omega":
                 self.stream = OnlineVGGTStreaming(
-                    input_dirs=input_dirs, save_dir=self.pipeline_dir,
+                    input_dirs=input_dirs, save_dir=self.depth_pose_dir,
                     config=config, device=self.args.device,
                     model_path=self.args.model_path)
             elif self.args.backend == "da3":
                 self.stream = OnlineDA3Streaming(
-                    input_dirs=input_dirs, save_dir=self.pipeline_dir,
+                    input_dirs=input_dirs, save_dir=self.depth_pose_dir,
                     config=config, device=self.args.device,
                     anyview_model_path=self.args.anyview_model_path,
                     metric_model_path=self.args.metric_model_path)
@@ -429,7 +433,7 @@ class SubtaskStreamExtract(DataExtract):
                 # dataset per chunk (OnlineStreaming._load_depth_paths), the
                 # folders only satisfy the a2f input contract
                 self.stream = OnlineA2FStreaming(
-                    input_dirs=input_dirs, save_dir=self.pipeline_dir,
+                    input_dirs=input_dirs, save_dir=self.depth_pose_dir,
                     config=config, device=self.args.device,
                     anyview_model_path=self.args.anyview_model_path,
                     a2f_model_path=self.args.a2f_model_path,
@@ -464,7 +468,7 @@ class SubtaskStreamExtract(DataExtract):
             print(f"  episode {ep}: task {tid} ({self._task_description(tid)})")
         for ep_idx in tqdm(self.ep_idxes, desc="episodes"):
             self._process_episode(ep_idx)
-        print(f"\ndone: {len(self.ep_idxes)} episode(s) -> {self.pipeline_dir}")
+        print(f"\ndone: {len(self.ep_idxes)} episode(s) -> {self.depth_pose_dir}")
 
     def _process_episode(self, ep_idx: int) -> None:
         self.ep_idx = ep_idx
@@ -481,7 +485,7 @@ class SubtaskStreamExtract(DataExtract):
             self._process_segment(k, lo, hi)
 
     def _process_segment(self, k: int, lo: int, hi: int) -> None:
-        seg_dir = os.path.join(self.pipeline_dir, f"ep{self.ep_idx:06d}",
+        seg_dir = os.path.join(self.depth_pose_dir, f"ep{self.ep_idx:06d}",
                                f"subtask_{k:02d}")
         if self.args.skip_done and any(p for p in Path(seg_dir).glob("depth_*")
                                        if any(p.iterdir())):

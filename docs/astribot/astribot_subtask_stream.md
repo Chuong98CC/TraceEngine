@@ -104,7 +104,7 @@ python tools/astribot/run_step2_depth_stream.py \
 ## Output
 
 ```
-<out-dir>/pipeline/                     # <out-dir> defaults to <data-root>/eps_data
+<out-dir>/depth_pose/                  # <out-dir> defaults to <data-root>/eps_data
 └── ep000000/
     ├── subtask_00/
     │   ├── depth_cam_head/             # or depth_cam_head_stereo_left/ + _right/ …
@@ -133,7 +133,7 @@ the `extrinsics` (3×4, world→camera), `intrinsics` (3×3) and the depth
 | `--episode-idxes`, `-e` | all | only process these episode indices |
 | `--one-per-task` | off | select the first episode of each task (exclusive with `-e`) |
 | `--max-episodes`, `-x` | — | cap the number of processed episodes |
-| `--out-dir`, `-o` | `<data-root>/eps_data` | output root; results under `<out-dir>/pipeline/<episode>/subtask_XX/` |
+| `--out-dir`, `-o` | `<data-root>/eps_data` | output root; results under `<out-dir>/depth_pose/<episode>/subtask_XX/` |
 | `--backend` | `vggt_omega` | streaming backend: `vggt_omega` or `da3` |
 | `--stride` | 4 | subsample every N-th frame; with WAFT also the flow pair gap |
 | `--with-optical-flow` | off | enable WAFT optical-flow motion masks (default: off — full-confidence alignment) |
@@ -148,11 +148,11 @@ the `extrinsics` (3×4, world→camera), `intrinsics` (3×3) and the depth
 ## Visualization
 
 `tools/astribot/visualize_subtask_stream.py` renders one trajectory video per
-sub-task segment from the saved pipeline outputs — the visualization
+sub-task segment from the saved depth_pose outputs — the visualization
 counterpart of `run_step2_depth_stream.py`, built on
 `tools/general_test/pipeline/visualize_stream.py` but with the colour frames decoded
 **online from the dataset** (no extracted frames or videos on disk). Full
-usage and argument reference: `astribot_visualize_subtask_depth_stream.md`.
+usage and argument reference: `astribot_visualize_subtask_stream.md`.
 
 ```bash
 python tools/astribot/visualize_subtask_stream.py \

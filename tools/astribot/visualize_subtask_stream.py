@@ -3,7 +3,7 @@ run_step2_depth_stream.py.
 
 For each sub-task segment of the selected episodes, renders the trajectory
 video from the segment's saved streaming outputs (per-frame depth/pose npz
-under <out-dir>/pipeline/<episode>/subtask_XX/, the same contract as
+under <out-dir>/depth_pose/<episode>/subtask_XX/, the same contract as
 tools/general_test/pipeline/visualize_stream.py whose renderer is reused),
 decoding the colour frames online from the dataset — no extracted frames or
 videos needed on disk. Each video frame shows that step's coloured point
@@ -45,7 +45,7 @@ def parse_args(argv: list[str] | None = None):
     parser = argparse.ArgumentParser(
         description="Render the trajectory video of every sub-task segment "
                     "of an episode, online (images decoded from the "
-                    "LeRobotDataset; geometry from the saved pipeline NPZs)."
+                    "LeRobotDataset; geometry from the saved depth_pose NPZs)."
     )
     parser.add_argument("--repo-id", "-id", required=True,
                         help="dataset repo id as seen by LeRobotDataset")
@@ -55,7 +55,7 @@ def parse_args(argv: list[str] | None = None):
     parser.add_argument("--camera-idxes", "-c", nargs="+", type=int, default=None,
                         help="indices into the dataset's camera_keys to visualize "
                              "(default: the first camera whose key does not contain "
-                             "'depth'; must match the cameras used by run_subtask_stream)")
+                             "'depth'; must match the cameras used by run_step2_depth_stream.py)")
     select = parser.add_mutually_exclusive_group()
     select.add_argument("--episode-idxes", "-e", nargs="*", type=int, default=None,
                         help="only process these episode indices (default: all)")
@@ -65,7 +65,12 @@ def parse_args(argv: list[str] | None = None):
                         help="cap the number of processed episodes")
     parser.add_argument("--out-dir", "-o", default=None,
                         help="output root (default: <data-root>/eps_data); per-sub-task "
-                             "results are read from <out-dir>/pipeline/<episode>/subtask_XX/")
+                             "results are read from <out-dir>/depth_pose/<episode>/subtask_XX/")
+    parser.add_argument("--use-inferred-splits", action="store_true",
+                        help="prefer the sub-task split frames inferred by "
+                             "detect_subtask (subtask_splits.json) over the "
+                             "dataset's ground-truth subtask_index column "
+                             "when both exist")
     parser.add_argument("--stride", type=int, default=4,
                         help="subsample the sequence for the view fitting only; the "
                              "rendered steps are the npz stems actually saved "
@@ -123,7 +128,7 @@ class SubtaskStreamVisualize(DataExtract):
     Reuses DataExtract for dataset introspection, episode/camera selection
     and split-frame inference (same selection as ``run_step2_depth_stream.py``);
     the frames shown in the point clouds are decoded from the LeRobotDataset
-    on the fly, the geometry comes from the saved pipeline npz files.
+    on the fly, the geometry comes from the saved depth_pose npz files.
     """
 
     def __init__(self, args):
@@ -134,7 +139,9 @@ class SubtaskStreamVisualize(DataExtract):
         args.mode = "videos"  # DataExtract needs one of its modes; only the
                              # output-dir/camera/episode machinery is reused
         super().__init__(args)
-        self.pipeline_dir = os.path.join(self.out_dir, "pipeline")
+        # self.out_dir stays DataExtract's extraction root (<data-root>/eps_data)
+        # — the step-2 results it renders live one level down, under depth_pose/
+        self.depth_pose_dir = os.path.join(self.out_dir, "depth_pose")
         self.input_dirs = [self._camera_subdir(k) for k in self.cam_keys.values()]
 
     # --- frame access ---------------------------------------------------------
@@ -174,7 +181,7 @@ class SubtaskStreamVisualize(DataExtract):
             print(f"  episode {ep}: task {tid} ({self._task_description(tid)})")
         for ep_idx in tqdm(self.ep_idxes, desc="episodes"):
             self._process_episode(ep_idx)
-        print(f"\ndone: {len(self.ep_idxes)} episode(s) -> {self.pipeline_dir}")
+        print(f"\ndone: {len(self.ep_idxes)} episode(s) -> {self.depth_pose_dir}")
 
     def _process_episode(self, ep_idx: int) -> None:
         self.ep_idx = ep_idx
@@ -186,7 +193,7 @@ class SubtaskStreamVisualize(DataExtract):
             self._process_segment(k, lo, hi)
 
     def _process_segment(self, k: int, lo: int, hi: int) -> None:
-        seg_dir = os.path.join(self.pipeline_dir, f"ep{self.ep_idx:06d}",
+        seg_dir = os.path.join(self.depth_pose_dir, f"ep{self.ep_idx:06d}",
                                f"subtask_{k:02d}")
         npz_dir = os.path.join(seg_dir, f"depth_{Path(self.input_dirs[0]).name}")
         stems = sorted(p.stem for p in Path(npz_dir).glob("*.npz"))

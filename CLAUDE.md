@@ -87,11 +87,13 @@ tools/
 ├── general_test/               # Case 1 (README): general-purpose inference + viz entry points
 │   ├── module/                 # one tool per model — infer_<model>.py (test each component)
 │   │   ├── infer_any2full.py   # RGB-D depth densification (single frame → .glb)
+│   │   ├── infer_moge3.py      # MoGe v3 monocular metric depth + .glb mesh (single image)
 │   │   ├── infer_waft.py       # dense optical flow → motion masks
 │   │   ├── infer_rexomni.py    # open-vocabulary detection (.venv-rexomni)
 │   │   ├── infer_sam3.py       # promptable segmentation
 │   │   ├── infer_romav2.py     # cross-image keypoint matching
-│   │   └── infer_tapip3d.py    # 3D point tracking
+│   │   ├── infer_tapip3d.py    # 3D point tracking
+│   │   └── compare_image_inputs.py  # golden capture/compare of the image-preprocess entry points (refactor guard)
 │   └── pipeline/               # end-to-end README-step tools
 │       ├── run_depth_stream.py           # Step 2: streaming CLI (--backend da3|vggt_omega|a2f)
 │       ├── visualize_stream.py     # trajectory video renderer
@@ -102,15 +104,21 @@ tools/
 ├── astribot/                   # Case 2 (README): online streaming, no frame extraction
 │   ├── extract_frames.py       # sub-task splits, key-frame jpgs, per-subtask videos/frames (+ depth .lz4)
 │   ├── run_step2_depth_stream.py   # online per-sub-task depth+pose streaming (da3/vggt_omega/a2f)
-│   ├── run_step3_init_points.py    # Step 3 driver on episodes (extract key-frames + 3a + 3b)
-│   ├── run_subtask_a3f.py      # online per-sub-task Any2Full RGB-D densification
-│   └── visualize_subtask_stream.py  # per-sub-task trajectory videos, online (no re-inference)
+│   ├── run_step3_init_points.py    # Step 3 driver on episodes (key-frames + 3a + 3b)
+│   └── visualize_subtask_stream.py  # per-sub-task trajectory videos from the depth_pose outputs (no re-inference)
 ├── push_ckpt_2HF.py            # upload weights/ to Hugging Face (Chuong98vt/TraceEngine)
 └── hifi-umi/                   # HiFi-UMI dataset preprocessing (extract_frames, generate_masks)
 scripts/                        # ready-to-run pipeline scripts
-├── general_test/               # wrappers: infer_waft.sh, infer_stream_stereo/rgbd.sh,
-│                               #   infer_tapip3d.sh, infer_step3.sh, visualize_stream.sh
-└── astribot/                   # extract_frames.sh, run_subtask_stream.sh (+ visualize helper)
+├── general_test/               # Case-1 wrappers (mirror tools/general_test)
+│   ├── module/                 # one wrapper per model: infer_waft.sh, infer_romav2.sh, infer_moge3.sh
+│   ├── pipeline/               # end-to-end wrappers: infer_stream_stereo/rgbd.sh, infer_tapip3d.sh, infer_step3.sh
+│   └── (top level)             # visualize_stream.sh, visualize_rgbd.sh, setup_rexomni_env.sh
+└── astribot/                   # Case-2 per-step scripts (README §4 Case 2)
+    ├── extract_frames.sh       # Step 1: detect_subtask — sub-task splits from the gripper state
+    ├── run_step2_stereo.sh     # Step 2: RGB stereo depth+pose streaming (vggt_omega/da3)
+    ├── run_step2_rgbd.sh       # Step 2: RGB-D depth+pose streaming (a2f densifies the sensor depth)
+    ├── run_step3_init_points.sh  # Step 3: key-frames + detections + init points
+    └── visualize_subtask_stream.sh  # trajectory videos from the depth_pose outputs
 docs/
 ├── general_test/               # general_test.md master index (mermaid pipeline diagram) +
 │   │                           #   module/ per-model pages (streaming, any2full, waft,
@@ -184,11 +192,12 @@ per-view `depth` + warped `extrinsics` + `intrinsics` per frame.
 - Optional loop closure (`loop_enable`): a SALAD global-descriptor matcher
   detects revisited scenes and re-aligns via a loop SIM3 optimizer.
 - Entry point: `tools/general_test/pipeline/run_depth_stream.py --backend da3|vggt_omega|a2f`
-  (wrappers: `scripts/general_test/infer_stream_stereo.sh` /
-  `infer_stream_rgbd.sh` / `visualize_stream.sh`). The online per-sub-task
+  (wrappers: `scripts/general_test/pipeline/infer_stream_stereo.sh` /
+  `infer_stream_rgbd.sh`; trajectory videos via
+  `scripts/general_test/visualize_stream.sh`). The online per-sub-task
   variant that streams straight from the dataset (no frames on disk) is
   `tools/astribot/run_step2_depth_stream.py` (see
-  `docs/astribot/astribot_subtask_depth_stream.md`).
+  `docs/astribot/astribot_subtask_stream.md`).
 
 ## Any2Full (RGB-D depth densification)
 
@@ -234,17 +243,17 @@ python tools/general_test/pipeline/run_depth_stream.py --backend vggt_omega \
     --start-frame 210 --max-frames 160 --interval 4 \
     --output-dir output/stream_stereo_vggt_omega
 # or the DA3 backend (two .pt2 checkpoints, see
-# scripts/general_test/infer_stream_stereo.sh);
+# scripts/general_test/pipeline/infer_stream_stereo.sh);
 # or via the wrapper script:
-bash scripts/general_test/infer_stream_stereo.sh
+bash scripts/general_test/pipeline/infer_stream_stereo.sh
 
 # --- Any2Full RGB-D densification (single frame -> .glb point cloud) ---
 python tools/general_test/module/infer_any2full.py \
     --pt2 weights/any2full/Any2Full_vitl_bf16.pt2 --frame_idx 0 --out_dir ./output/a2f
 
 # --- WAFT motion masks / TAPIP3D traces ---
-bash scripts/general_test/infer_waft.sh
-bash scripts/general_test/infer_tapip3d.sh
+bash scripts/general_test/module/infer_waft.sh
+bash scripts/general_test/pipeline/infer_tapip3d.sh
 
 # --- Extract sample frames from a LeRobotDataset (feeds the general_test tools) ---
 python tools/astribot/extract_frames.py \
