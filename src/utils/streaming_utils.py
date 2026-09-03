@@ -65,7 +65,7 @@ def scan_image_folder(image_dir, start_frame=0, fps=1, max_frames=None):
 def load_stream_data(img_dir: str, result_dir: str, stem: str):
     """Load ``(depth, extrinsics, intrinsics)`` from one view's results.
 
-    Depth is raw uint16 mm in ``<stem>.lz4`` (see load_depth_lz4) and is
+    Depth is log-encoded uint8 in ``<stem>.lz4`` (see load_depth_lz4),
     returned as float32 metres; pose lives in ``<stem>.npz``
     (``extrinsics``, ``intrinsics``, ``shape`` — the depth shape the lz4
     buffer must be reshaped to).
@@ -77,7 +77,7 @@ def load_stream_data(img_dir: str, result_dir: str, stem: str):
         depth = load_depth_lz4(pose_path.with_suffix(".lz4"),
                                tuple(int(v) for v in data["shape"]))
         return (
-            (depth / 1000.0).astype(np.float32),  # (H, W) uint16 mm -> metres
+            depth,  # (H, W) float32 metres
             data["extrinsics"].astype(np.float32),  # (3, 4)
             data["intrinsics"].astype(np.float32),  # (3, 3)
         )
@@ -145,8 +145,8 @@ def load_batch_frames(file_list, start, end):
 def load_npz_batch(npz_dir, file_list, start, end):
     """Load geometry for a slice of frames by original frame index.
 
-    Depth is raw uint16 mm in ``frame_{idx:06d}.lz4`` (returned as float32
-    metres); pose lives in ``frame_{idx:06d}.npz`` (``extrinsic``,
+    Depth is log-encoded uint8 in ``frame_{idx:06d}.lz4`` (returned as
+    float32 metres); pose lives in ``frame_{idx:06d}.npz`` (``extrinsic``,
     ``intrinsic``, ``shape`` — the depth shape the lz4 buffer must be
     reshaped to).
     Returns dict with keys: depth (T,H,W), extrs (T,4,4), intrs (T,3,3).
@@ -159,7 +159,7 @@ def load_npz_batch(npz_dir, file_list, start, end):
             raise FileNotFoundError(f"Missing depth/pose: {lz4_path} / {pose_path}")
         with np.load(pose_path) as data:
             depth = load_depth_lz4(lz4_path, tuple(int(v) for v in data["shape"]))
-            depths.append((depth / 1000.0).astype(np.float32))
+            depths.append(depth)
             # repo pose-npz keys are plural (extrinsics 3x4 w2c / intrinsics);
             # accept the legacy singular 4x4 form too and pad 3x4 to 4x4
             extr = data["extrinsics"] if "extrinsics" in data else data["extrinsic"]
@@ -307,9 +307,9 @@ def load_resized_batch(file_list, npz_dir, start, end, inference_h, inference_w)
 def compute_global_depth_roi(npz_dir, file_list, inference_h, inference_w):
     """Pre-scan all frames' resized depths; return the global IQR depth ROI.
 
-    Depths are raw uint16 mm ``frame_{idx:06d}.lz4`` files with the depth
-    shape recorded in the companion ``frame_{idx:06d}.npz`` (see
-    load_npz_batch).
+    Depths are log-encoded uint8 ``frame_{idx:06d}.lz4`` files with the
+    depth shape recorded in the companion ``frame_{idx:06d}.npz`` (see
+    load_npz_batch), decoded to float32 metres by load_depth_lz4.
     Matches utils.inference_utils.inference(): roi = [1e-7, q75 + 1.5*iqr]
     computed over the resized depth maps of every frame.
     """
@@ -321,8 +321,7 @@ def compute_global_depth_roi(npz_dir, file_list, inference_h, inference_w):
             raise FileNotFoundError(f"Missing depth lz4: {lz4_path}")
         with np.load(pose_path) as data:
             depth = load_depth_lz4(lz4_path, tuple(int(v) for v in data["shape"]))
-        d = resize_depth_bilinear((depth / 1000.0).astype(np.float32),
-                                  (inference_w, inference_h))
+        d = resize_depth_bilinear(depth, (inference_w, inference_h))
         all_d.append(d[d > 0])
     d = torch.from_numpy(np.concatenate(all_d)).float()
     if len(d) < 4:

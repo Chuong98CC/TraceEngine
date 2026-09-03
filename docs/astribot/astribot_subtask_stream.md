@@ -109,16 +109,17 @@ python tools/astribot/run_step2_depth_stream.py \
     ├── subtask_00/
     │   ├── depth_cam_head/             # or depth_cam_head_stereo_left/ + _right/ …
     │   │   ├── frame_000000.lz4        # absolute dataset indices, stride-subsampled
-    │   │   ├── frame_000000.npz        # depth in .lz4 (raw uint16 mm), pose in .npz
+    │   │   ├── frame_000000.npz        # depth in .lz4 (log-encoded uint8), pose in .npz
     │   │   └── …
     │   └── timings.json
     ├── subtask_01/
     └── …
 ```
 
-Each `frame_<idx>.lz4` carries `depth` (raw uint16 mm, see
-`utils.depth_utils.load_depth_lz4`) and the paired `frame_<idx>.npz`
-the `extrinsics` (3×4, world→camera), `intrinsics` (3×3) and the depth
+Each `frame_<idx>.lz4` carries the depth as log-encoded uint8 — float
+metres over [0.001, 2.001] m, decoded by
+`utils.depth_utils.load_depth_lz4` — and the paired `frame_<idx>.npz`
+holds the `extrinsics` (3×4, world→camera), `intrinsics` (3×3) and the depth
 `shape` — the same contract as `run_depth_stream.py`'s output, consumable by
 `visualize_stream.py` and `infer_tapip3d.py`. `timings.json` holds
 `total_s`, `num_chunks` and `chunk_times_s`.

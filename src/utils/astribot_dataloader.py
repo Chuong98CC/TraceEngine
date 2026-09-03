@@ -173,12 +173,9 @@ def load_rgbd(frame_idx: int, camera_name: str) -> tuple[str, np.ndarray, np.nda
     rgb_path = f"{IMAGES_ROOT}/{camera_name}/color/img_{frame_idx:06d}.jpg"
     depth_path = f"{IMAGES_ROOT}/{camera_name}/depth/img_{frame_idx:06d}.lz4"
     depth_shape = CAMERA_DEPTH_CONFIG[camera_name]["depth_shape"]
-    depth_scale = CAMERA_DEPTH_CONFIG[camera_name]["depth_scale"]
 
-    depth_raw = load_depth_lz4(Path(depth_path), shape=depth_shape)
-    depth_metrics = depth_raw.astype(np.float32) * depth_scale
-    depth_metrics[depth_metrics <= 0.0] = 0.0
-    depth_metrics[depth_metrics > 1.0] = 0.0
+    # load_depth_lz4 decodes the log-encoded uint8 .lz4 straight to metres
+    depth_metrics = load_depth_lz4(Path(depth_path), shape=depth_shape)
 
     calib = load_calib(CALIB_PATH)
     exts, ixts, resolutions = get_camera_params(calib, [camera_name], sensor_type="color")

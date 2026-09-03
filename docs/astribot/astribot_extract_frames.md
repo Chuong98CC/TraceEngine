@@ -10,7 +10,7 @@ training / evaluation.
 detect_subtask  →  subtask_splits.json + gripper plot   (tabular only, no video)
 key_frames      →  one jpg per first/last/key frame, per sub-task (decodes videos)
 videos          →  one mp4 per sub-task segment         (ffmpeg cut, no decode)
-frames          →  sampled per-subtask jpgs + uint16 depth lz4 (decodes videos)
+frames          →  sampled per-subtask jpgs + log-encoded depth lz4 (decodes videos)
 ```
 
 The four modes are independent: `detect_subtask` only reads the tabular data
@@ -120,9 +120,11 @@ Output per sub-task segment:
 every `--interval`-th frame, capped at `--max-frames` per sub-task. When a
 camera has a paired depth feature stored as **uint16 (mm)** (here
 `observation.depth.cam_head` for `observation.images.cam_head`), the raw
-depth array is saved as
+depth array is log-encoded (mm units are auto-detected and converted to
+metres) and saved as
 `<out_dir>/subtask_frames/ep000000/subtask_00/depth_<camera>/frame_<idx>.lz4`
-(raw uint16 mm, loadable by `utils.depth_utils.load_depth_lz4`).
+(log-encoded uint8 — float metres over [0.001, 2.001] m — decoded to metres
+by `utils.depth_utils.load_depth_lz4`).
 Depth pairing prefers the raw `observation.depth.*` feature; the legacy
 `<cam_key>_depth` video is only trusted when the dataset metadata flags it as
 a real depth map (`video.is_depth_map`) — the `astri_making_coffee` recording

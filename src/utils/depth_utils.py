@@ -5,11 +5,10 @@ from typing import Optional
 import cv2
 import lz4.frame
 import numpy as np
-import torch
 
-MAX_DEPTH = 2.001  # Maximum depth in meters for encoding/decoding
+MAX_DEPTH = 1.501  # Maximum depth in meters for encoding/decoding
 MIN_DEPTH = 0.001  # Minimum depth in meters for encoding/decoding
-QUANT_MAX = 65535
+QUANT_MAX = 255  # 8-bit quantization levels of the log-depth codec
 
 def unproject_depth_map_to_point_map(
     depth_map: np.ndarray, extrinsic: np.ndarray, intrinsic: np.ndarray
@@ -165,46 +164,53 @@ def draw_measurement(
 
 
 # ---------------------------------------------------------------------------
-# Depth storage units: all .lz4 depth files store raw little-endian uint16
-# millimetres (see save_depth_lz4/load_depth_lz4 below); pose (extrinsics/
-# intrinsics) lives in a separate .npz per frame.
+# Depth storage units: all .lz4 depth files store float metres log-encoded
+# to uint8 over [MIN_DEPTH, MAX_DEPTH] (LogDepthToUint8Transform), lz4-frame
+# compressed; pose (extrinsics/intrinsics) lives in a separate .npz per frame.
 # ---------------------------------------------------------------------------
-def depth_m_to_uint16_mm(depth_m: np.ndarray | torch.Tensor) -> np.ndarray:
-    """float depth in metres -> uint16 millimetres (clamped to [0, 65535]),
-    the storage unit of all .lz4 depth files. Torch tensors are detached
-    and moved off-device first."""
-    if isinstance(depth_m, torch.Tensor):
-        depth_m = depth_m.detach().cpu().numpy()
-    return np.clip(np.round(np.asarray(depth_m) * 1000.0), 0, 65535).astype(np.uint16)
+def _depth_to_float_metres(depth) -> np.ndarray:
+    """Depth input -> float32 metres, units auto-detected.
+
+    uint16 arrays whose max exceeds MAX_DEPTH are raw millimetres (the
+    astribot storage convention) and are divided by 1000; float arrays are
+    taken as already in metres. Everything else is assumed to be metres.
+    """
+    arr = np.asarray(depth)
+    if arr.dtype == np.uint16 and arr.max() > MAX_DEPTH:
+        return arr.astype(np.float32) / 1000.0
+    return arr.astype(np.float32)
 
 
-def save_depth_lz4(depth: np.ndarray, path: Path) -> None:
-    """Compress a uint16 depth map (mm) into an .lz4 file readable by
-    load_depth_lz4: raw little-endian uint16 bytes, lz4-frame compressed."""
+def save_depth_lz4(depth, path: Path) -> None:
+    """Compress a depth map into an .lz4 file readable by load_depth_lz4.
+
+    The depth — float metres, or uint16 mm (auto-detected, see
+    LogDepthToUint8Transform.encode) — is log-encoded to uint8 over
+    [MIN_DEPTH, MAX_DEPTH] before lz4-frame compression."""
     Path(path).write_bytes(lz4.frame.compress(
-        np.asarray(depth).astype(np.uint16).tobytes()))
+        LogDepthToUint8Transform().encode(np.asarray(depth)).tobytes()))
 
 
-def save_depth_m_lz4(depth_m: np.ndarray, path: Path) -> None:
-    """Save a float depth map in metres as uint16 millimetres (.lz4)."""
-    save_depth_lz4(depth_m_to_uint16_mm(depth_m), path)
+def save_depth_m_lz4(depth_m, path: Path) -> None:
+    """Save a float depth map in metres as log-encoded uint8 (.lz4)."""
+    save_depth_lz4(depth_m, path)
 
 
 def load_depth_lz4(depth_path: Path, shape: tuple[int, int]) -> np.ndarray:
-    """Load a uint16 depth map (mm) from an lz4 file (see save_depth_lz4):
-    raw little-endian uint16 bytes, lz4-frame compressed. Accepts str or
+    """Load a depth map from an lz4 file (see save_depth_lz4): lz4-frame
+    compressed log-encoded uint8, decoded to float32 metres. Accepts str or
     Path (streaming_utils passes os.path.join strs)."""
     raw = Path(depth_path).read_bytes()
     try:
         decoded = lz4.frame.decompress(raw)
     except lz4.frame.LZ4FrameError as exc:
         raise RuntimeError(f"Failed to decompress depth file {depth_path}: {exc}") from exc
-    arr = np.frombuffer(decoded, dtype=np.uint16)
+    arr = np.frombuffer(decoded, dtype=np.uint8)
     expected = shape[0] * shape[1]
     if arr.size != expected:
         raise ValueError(f"Unexpected decoded depth size for {depth_path}: "
                          f"got {arr.size}, expected {expected}")
-    return arr.reshape(shape)
+    return LogDepthToUint8Transform().decode(arr.reshape(shape))
 
 def normalize_depth_for_display(depth: np.ndarray) -> np.ndarray:
     if depth.dtype == np.uint16 or depth.dtype == np.uint32:
@@ -223,3 +229,78 @@ def normalize_depth_for_display(depth: np.ndarray) -> np.ndarray:
 
     out = cv2.applyColorMap(out, cv2.COLORMAP_JET)
     return out
+
+
+class LogDepthToUint8Transform:
+    """Deterministic log-space depth codec: metres <-> uint8 [0, 255].
+
+    Depth in metres is log-transformed and quantized to 8 bits over
+    ``[min_depth_m, max_depth_m]``; values outside the range clip to the
+    range ends and 0 (invalid) is preserved as 0. ``encode``/``decode`` are
+    exact inverses up to the 8-bit quantization — the storage format of
+    every .lz4 depth file (see save_depth_lz4/load_depth_lz4).
+
+    Args:
+        min_depth_m: Minimum clip distance in meters.
+        max_depth_m: Maximum clip distance in meters.
+        shift_m: Small epsilon added before ``log`` so zero/invalid pixels
+            stay finite (they are zeroed afterwards).
+    """
+    def __init__(
+        self,
+        min_depth_m: float = MIN_DEPTH,
+        max_depth_m: float = MAX_DEPTH,
+        shift_m: float = 0.001,
+    ):
+        self.min_depth_m = min_depth_m
+        self.max_depth_m = max_depth_m
+        self.shift_m = shift_m
+
+        # Precompute log bounds
+        self.z_min = float(np.log(min_depth_m + shift_m))
+        self.z_max = float(np.log(max_depth_m + shift_m))
+
+    def encode(self, depth) -> np.ndarray:
+        """Depth -> (H, W) uint8 in [0, 255].
+
+        The input is float depth in metres, or uint16 in mm — units are
+        auto-detected (see ``_depth_to_float_metres``). Returns 0 for
+        zero/invalid pixels.
+
+        Args:
+            depth: (H, W) or (1, H, W) depth map (uint16 mm or float meters).
+        """
+        depth_m = _depth_to_float_metres(depth)
+        if depth_m.ndim == 3 and depth_m.shape[0] == 1:
+            depth_m = depth_m[0]
+
+        valid = depth_m > 0.0  # NaN / -inf / 0 -> False
+
+        # Log transform (masked pixels -> 0 first so NaN cannot poison the
+        # log/cast; +inf stays and clips to the max level below)
+        depth_m = np.where(valid, depth_m, 0.0)
+        z = np.log(depth_m + self.shift_m)
+
+        # Normalize to [0.0, 1.0] and scale to 8-bit [0, 255]
+        norm = np.clip((z - self.z_min) / (self.z_max - self.z_min), 0.0, 1.0)
+        encoded = (norm * QUANT_MAX).astype(np.uint8)
+
+        # Zero-out invalid/masked measurements
+        return np.where(valid, encoded, 0)
+
+    def decode(self, depth_uint8) -> np.ndarray:
+        """uint8 [0, 255] -> (H, W) float32 depth in metres.
+
+        Args:
+            depth_uint8: (H, W) or (1, H, W) uint8 image in [0, 255].
+        """
+        arr = np.asarray(depth_uint8, dtype=np.uint8)
+        if arr.ndim == 3 and arr.shape[0] == 1:
+            arr = arr[0]
+
+        # Normalize to [0.0, 1.0] and invert the log transform
+        norm = arr.astype(np.float32) / QUANT_MAX
+        depth_m = np.exp(norm * (self.z_max - self.z_min) + self.z_min) - self.shift_m
+
+        # Zero-out invalid measurements (where input was zero)
+        return np.where(arr > 0, depth_m, 0.0).astype(np.float32)

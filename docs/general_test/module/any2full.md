@@ -32,6 +32,7 @@ camera intrinsics), `frame_<idx>.npy` (metric depth), `<stem>.png`
 ## Usage in the pipeline
 
 Any2Full is the **`a2f` streaming backend**: `run_depth_stream.py --backend a2f`
-feeds the raw sensor depth (`.lz4`, uint16 mm) of each RGB camera as the
+feeds the raw sensor depth (`.lz4`, log-encoded uint8 — decoded to float
+metres over [0.001, 2.001] m by `load_depth_lz4`) of each RGB camera as the
 prompt and outputs densified metric depth + pose (see
 [`streaming.md`](streaming.md)).

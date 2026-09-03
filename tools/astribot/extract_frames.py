@@ -805,7 +805,7 @@ class DataExtract:
                                          os.path.join(cam_dirs[ci],
                                                       f"frame_{t:06d}.jpg"))
                 for ci, dkey in depth_keys.items():
-                    # raw uint16 mm depth as .lz4 (see save_depth_lz4)
+                    # raw uint16 mm depth, log-encoded by save_depth_lz4
                     save_depth_lz4(
                         np.asarray(frame[dkey]).astype(np.uint16),
                         os.path.join(depth_dirs[ci], f"frame_{t:06d}.lz4"),

@@ -16,9 +16,10 @@ Unified entry point for three backends:
 - `a2f` — RGB-D: the DA3 any-view graph + Any2Full (RGB + raw sensor depth →
   densified depth, `A2F_NestedPT2`). `--input-dirs` are the RGB camera
   folders; each has a parallel raw-depth folder in `--depth-dirs` (`.lz4`
-  uint16 mm maps, loaded via `load_depth_lz4`, scaled to metres by
-  `--depth-scale`, 0 = invalid). Any2Full densifies the sparse sensor depth
-  and the any-view depth is aligned to it (see [`any2full.md`](any2full.md)).
+  log-encoded uint8 maps, 0 = invalid, decoded to float metres over
+  [0.001, 2.001] m by `load_depth_lz4`). Any2Full densifies the sparse
+  sensor depth and the any-view depth is aligned to it (see
+  [`any2full.md`](any2full.md)).
   Only the RGB folders emit output (`depth_<name>/`) — the depth folders are
   inputs only. With `--no-depth-enhance` Any2Full is not loaded and the raw
   sensor depth feeds the alignment directly.
@@ -53,8 +54,7 @@ python tools/general_test/pipeline/run_depth_stream.py \
 | `--backend` | **required** | `da3`, `vggt_omega`, or `a2f` (RGB-D) |
 | `--input-dirs` | **required** | Can be 1 or several Image folders, one per camera; all must contain the same synchronized frame stems. For `a2f`, the RGB camera folders — the raw depth goes in `--depth-dirs` |
 | `--mask-dirs` | — | Optional binary motion-mask folders (one per `--input-dirs`, same order). Pixels above 127 are moving; their confidence is zeroed **during chunk alignment only** — depth outputs are unaffected (masks from `infer_waft.py`, see [`waft.md`](waft.md)) |
-| `--depth-dirs` | — | `a2f` only: raw-depth folders (one per `--input-dirs`, same order and frame stems; `.lz4` uint16 mm maps, 0 = invalid), loaded via `load_depth_lz4` |
-| `--depth-scale` | `0.001` | `a2f` only: metres per unit of the raw depth (uint16 mm → metres) |
+| `--depth-dirs` | — | `a2f` only: raw-depth folders (one per `--input-dirs`, same order and frame stems; `.lz4` log-encoded uint8 maps, 0 = invalid, decoded to float metres over [0.001, 2.001] m by `load_depth_lz4`) |
 | `--start-frame` | `0` | First frame to process |
 | `--max-frames` | all | Max frames per camera to process |
 | `--interval` | `1` | Subsample the sequence (every N-th frame) |
@@ -69,7 +69,8 @@ python tools/general_test/pipeline/run_depth_stream.py \
 | `--video` / `--video-out` / `--video-fps` / `--video-size` / `--video-max-points` | off | Render a trajectory mp4 after the run (default `<output-dir>/trajectory.mp4`, 10 fps, 960x540, ≤100k points/frame) |
 
 **Output** — per camera: `<output-dir>/depth_<camera_name>/frame_<idx>.lz4`
-(depth, raw uint16 mm) + `frame_<idx>.npz` (pose: `extrinsics` 3×4
+(log-encoded uint8 depth — float metres over [0.001, 2.001] m, decoded to
+metres by `load_depth_lz4`) + `frame_<idx>.npz` (pose: `extrinsics` 3×4
 world→camera, `intrinsics` 3×3, plus `shape` — the depth shape the lz4 buffer
 is reshaped to), plus `timings.json`. For `--backend a2f` only the RGB
 folders emit `depth_<name>/` — the depth folders are inputs only. The run

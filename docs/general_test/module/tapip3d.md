@@ -66,7 +66,7 @@ sampled query points).
 | Argument | Default | Description |
 |---|---|---|
 | `--image_dir` | **required** | Folder of frames to track in |
-| `--depth_dir` | **required** | Geometry folder: per-frame `frame_<idx>.lz4` (depth, raw uint16 mm) + `frame_<idx>.npz` with `extrinsics` (3×4 or 4×4, world→camera), `intrinsics` (3×3), `shape` |
+| `--depth_dir` | **required** | Geometry folder: per-frame `frame_<idx>.lz4` (log-encoded uint8 depth — float metres over [0.001, 2.001] m, decoded to metres by `load_depth_lz4`) + `frame_<idx>.npz` with `extrinsics` (3×4 or 4×4, world→camera), `intrinsics` (3×3), `shape` |
 | `--output_dir`, `-o` | `output/stream_tracks_pt2` | Output directory |
 | `--encoder` | `weights/tapip3d/tapip3d_encoder_480x640_bf16.pt2` | Encoder `.pt2` (image size asserted against `--image_size`) |
 | `--iteration` | `weights/tapip3d/tapip3d_iteration_1088_bf16.pt2` | Fused corr+updater `.pt2` (query count auto-detected from the graph) |

@@ -76,7 +76,8 @@ To get sample frame folders, extract them from a LeRobotDataset first
 
 Per camera: `<output-dir>/depth_<camera_name>/` with, per frame
 
-- `frame_<idx>.lz4` — depth, raw **uint16 mm**
+- `frame_<idx>.lz4` — depth, log-encoded uint8 (float metres over
+  [0.001, 2.001] m after `load_depth_lz4` decoding)
 - `frame_<idx>.npz` — pose: `extrinsics` (3×4 world→camera), `intrinsics`
   (3×3), plus `shape` (the depth shape the lz4 buffer is reshaped to)
 
@@ -96,8 +97,9 @@ tracing and what `visualize_rgbd.py` / `visualize_stream.py` render.
       `frame_<idx>.npz` for every processed frame (all cameras emit the same
       frame stems — synchronized).
 - [ ] `frame_<idx>.npz` contains `extrinsics` (3×4), `intrinsics` (3×3) and
-      `shape`; `frame_<idx>.lz4` reshaped to `shape` is a non-empty uint16 map
-      (metric depth in mm, 0 = invalid).
+      `shape`; `frame_<idx>.lz4` reshaped to `shape` is a non-empty
+      log-encoded uint8 map, decoded to float metres over [0.001, 2.001] m
+      by `load_depth_lz4` (0 = invalid).
 - [ ] Depth values look sane for the scene (e.g. valid pixels ≈ the observed
       distances, no large all-zero frames).
 - [ ] Consecutive frames' `extrinsics` are continuous (no per-chunk jumps) —

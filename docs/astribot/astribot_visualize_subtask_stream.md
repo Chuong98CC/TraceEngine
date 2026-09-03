@@ -28,8 +28,9 @@ no extracted frames or videos need to exist on disk.
 
 **Inputs.** Geometry comes from `run_step2_depth_stream.py`'s outputs:
 `<out-dir>/depth_pose/<episode>/subtask_XX/depth_<camera>/frame_<idx>.lz4`
-(absolute dataset indices, stride-subsampled). Each `.lz4` holds the depth as
-raw uint16 mm and is reshaped with the `shape` recorded in the paired
+(absolute dataset indices, stride-subsampled). Each `.lz4` holds the depth
+as log-encoded uint8 — float metres over [0.001, 2.001] m, decoded by
+`load_depth_lz4` — reshaped with the `shape` recorded in the paired
 `frame_<idx>.npz` (`extrinsics` 3×4 world→camera, `intrinsics` 3×3) — the
 same contract as `utils.streaming_utils.load_stream_data`. Segments without
 saved results are skipped with a message.

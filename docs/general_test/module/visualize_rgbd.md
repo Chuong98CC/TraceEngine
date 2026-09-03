@@ -7,8 +7,9 @@ Visualizes RGB-D data from **one of two mutually exclusive sources**:
    recovered from the greyscale depth image (clip at `--max_depth_m`).
    Sample data are in `assets/astribot_test_imgs`.
 2. **Folder mode** (`--rgb_dir` + `--depth_npz_dir`) — pairs RGB images
-   (`<stem>.jpg/.jpeg/.png`) by stem with a depth `<stem>.lz4` (raw uint16 mm,
-   see `utils.depth_utils.load_depth_lz4`, reshaped to the RGB frame
+   (`<stem>.jpg/.jpeg/.png`) by stem with a depth `<stem>.lz4`
+   (log-encoded uint8 — decoded to float metres over [0.001, 2.001] m by
+   `utils.depth_utils.load_depth_lz4`, reshaped to the RGB frame
    size) and a pose `<stem>.npz` (`extrinsics` 3×4/4×4, `intrinsics` 3×3) —
    the format written by `run_depth_stream.py` ([`streaming.md`](streaming.md)).
    `--frame_index` selects the pair at that position in the sorted matching

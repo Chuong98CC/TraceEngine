@@ -25,9 +25,11 @@ stays put while per-frame content moves inside it.
 ## How it works
 
 **Inputs.** Per camera, `<result-dir>/depth_<camera_name>/` contains
-`<stem>.lz4` (depth, raw uint16 mm) + `<stem>.npz` (`extrinsics` 3×4
-world→camera, `intrinsics` 3×3, `shape` — the depth shape the lz4 buffer
-is reshaped to), loaded via `utils.streaming_utils.load_stream_data`.
+`<stem>.lz4` (depth, log-encoded uint8 — float metres over
+[0.001, 2.001] m after `load_depth_lz4` decoding) + `<stem>.npz`
+(`extrinsics` 3×4 world→camera, `intrinsics` 3×3, `shape` — the depth
+shape the lz4 buffer is reshaped to), loaded via
+`utils.streaming_utils.load_stream_data`.
 The colour images (`<stem>.jpg/.jpeg/.png`) come from the `--input-dirs`
 folders and are resized to the depth resolution. Time order = the sorted
 NPZ stems of the first camera's output folder.

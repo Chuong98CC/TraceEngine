@@ -60,8 +60,8 @@ flowchart LR
 ```
 
 1. **Step 1: Key-frame extracting** — `tools/astribot/extract_frames.py` turns the
-   LeRobotDataset into synchronized per-camera frame folders (paired with raw
-   uint16 depth `.lz4` where the camera has a depth feature); each subtask has
+   LeRobotDataset into synchronized per-camera frame folders (paired with
+   log-encoded uint8 depth `.lz4` where the camera has a depth feature); each subtask has
    a start, an end and several key-frames (ground-truth indexes, gripper-state,
    or uniform sampling — see the repo README §3).
 2. **Step 2: Camera depth + pose estimation** — `run_depth_stream.py` streams the frame

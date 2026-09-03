@@ -6,12 +6,12 @@ The a3f counterpart of ``DA3_Streaming``: streams N synchronized RGB views
 plus their raw sensor depth through ``A2F_NestedPT2`` (the DA3 any-view graph
 composed with Any2Full, which densifies the sparse depth).  The RGB folders
 are the ``input_dirs``; the parallel raw-depth folders (one per RGB folder,
-``.lz4`` uint16 mm maps with matching frame stems, e.g. ``cam_head`` →
-``depth_cam_head``) are passed as ``depth_dirs`` and loaded via
-``load_depth_lz4`` (metres = mm x ``depth_scale``, 0 = invalid).  The
+``.lz4`` log-encoded uint8 depth maps with matching frame stems, e.g.
+``cam_head`` → ``depth_cam_head``) are passed as ``depth_dirs`` and loaded
+via ``load_depth_lz4`` (decoded straight to metres, 0 = invalid).  The
 online streamer (``tools/astribot/run_step2_depth_stream.py --backend a2f``)
-supplies the depth as raw uint16 ndarrays instead — ``_process_chunk`` and
-``_load_depth`` accept both.
+supplies the depth as raw uint16 ndarrays (metres = raw x ``depth_scale``)
+instead — ``_process_chunk`` and ``_load_depth`` accept both.
 
 ``chunk_size`` is the any-view export's fixed ``num_views``: every chunk
 carries ``num_views`` RGB images and ``num_views`` raw-depth maps (the
@@ -103,7 +103,8 @@ class A2F_Streaming(BaseStreaming):
         if self.depth_dirs is None:
             raise ValueError(
                 "The a2f backend requires one --depth-dirs folder per "
-                "--input-dirs folder (raw sensor depth, .lz4 uint16 mm)."
+                "--input-dirs folder (raw sensor depth, .lz4 log-encoded "
+                "uint8 maps)."
             )
         print("A2F_Streaming init done.")
 
@@ -135,9 +136,9 @@ class A2F_Streaming(BaseStreaming):
         print(f"  image size : {self.model.target_h}x{self.model.target_w}")
         print(f"  camera input: none (image-only; poses + intrinsics predicted by the graph)")
         if self.use_depth_enhance:
-            print(f"  depth_dirs: raw depth .lz4 (uint16 mm x {self.depth_scale} -> metres); Any2Full densifies it")
+            print("  depth_dirs: raw depth .lz4 (log-encoded uint8 -> metres); Any2Full densifies it")
         else:
-            print(f"  depth_dirs: raw depth .lz4 (uint16 mm x {self.depth_scale} -> metres); fed directly to the alignment")
+            print("  depth_dirs: raw depth .lz4 (log-encoded uint8 -> metres); fed directly to the alignment")
 
     def _process_chunk(self, start: int, end: int) -> dict:
         # img_list holds one RGB path per time step; depth_paths is the
@@ -175,15 +176,15 @@ class A2F_Streaming(BaseStreaming):
 
     @staticmethod
     def _load_depth(path_or_arr, shape: tuple[int, int], scale: float) -> np.ndarray:
-        """Raw sensor depth -> (H, W) float32 metres.
+        """Depth input -> (H, W) float32 metres; 0 = invalid -> 0.0.
 
-        Accepts an .lz4 uint16 mm path (disk flow) or a raw uint16 ndarray
-        (online mode; see tools/astribot/run_step2_depth_stream.py); 0 = invalid
-        -> 0.0 metres."""
+        Disk flow: an .lz4 path (log-encoded uint8 map, see load_depth_lz4)
+        decoded straight to metres — ``scale`` is not applied. Online flow: a
+        raw uint16 ndarray (see tools/astribot/run_step2_depth_stream.py)
+        whose raw units need ``scale`` (metres/unit) to become metres."""
         if isinstance(path_or_arr, (str, Path)):
-            depth = load_depth_lz4(Path(path_or_arr), shape).astype(np.float32)
+            depth = load_depth_lz4(Path(path_or_arr), shape)
         else:
-            depth = np.asarray(path_or_arr).astype(np.float32)
-        depth *= scale
+            depth = np.asarray(path_or_arr, dtype=np.float32) * scale
         depth[depth <= 0.0] = 0.0
         return depth

@@ -320,9 +320,10 @@ dataset:
 ```
 
 Depth + pose results live in
-`depth_pose/<episode>/subtask_XX/depth_<camera>/` (`frame_<idx>.lz4` raw
-uint16-mm depth + `frame_<idx>.npz` pose — the same contract as the
-disk-based `run_depth_stream.py`).
+`depth_pose/<episode>/subtask_XX/depth_<camera>/` (`frame_<idx>.lz4`
+log-encoded uint8 depth — float metres over [0.001, 2.001] m, decoded to
+metres by `load_depth_lz4` — + `frame_<idx>.npz` pose, the same contract
+as the disk-based `run_depth_stream.py`).
 
 The docs live in [`docs/astribot/`](docs/astribot/):
 [`astribot_extract_frames.md`](docs/astribot/astribot_extract_frames.md),

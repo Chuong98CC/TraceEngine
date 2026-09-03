@@ -26,7 +26,8 @@ Backends:
                   metric-depth graph, composed by DA3NestedPT2 (metric
                   component swappable).
 - ``a2f``        — RGB folders + parallel raw-depth folders (--depth-dirs,
-                  .lz4 uint16 mm): Any2Full densifies the sensor depth and
+                  .lz4 log-encoded uint8 depth maps, decoded to metres by
+                  load_depth_lz4): Any2Full densifies the sensor depth and
                   the any-view depth is aligned to it.
 
 The online per-sub-task variant (frames decoded straight from the dataset,
@@ -150,15 +151,8 @@ def main(argv: list[str] | None = None) -> int:
         nargs="+",
         default=None,
         help="a2f backend only: raw-depth folders (one per --input-dirs, same "
-        "order and frame stems; .lz4 uint16 mm maps, 0 = invalid).  Loaded "
-        "via load_depth_lz4 and scaled to metres by --depth-scale",
-    )
-    parser.add_argument(
-        "--depth-scale",
-        type=float,
-        default=0.001,
-        help="a2f backend only: metres per unit of the raw depth (default "
-        "0.001 = uint16 mm -> metres)",
+        "order and frame stems; .lz4 log-encoded uint8 depth maps, 0 = "
+        "invalid).  Loaded via load_depth_lz4, decoded to metres",
     )
     parser.add_argument("--start-frame", type=int, default=0)
     parser.add_argument(
@@ -271,7 +265,6 @@ def main(argv: list[str] | None = None) -> int:
         kwargs["compile"] = not args.no_compile
         kwargs["use_depth_enhance"] = not args.no_depth_enhance
         kwargs["depth_dirs"] = args.depth_dirs
-        kwargs["depth_scale"] = args.depth_scale
     elif args.backend == "vggt_omega":
         kwargs["model_path"] = args.model_path
 

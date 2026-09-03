@@ -12,9 +12,9 @@ zero the confidence of moving pixels during chunk alignment only — depth
 outputs are unaffected.
 
 Optional ``depth_dirs`` (one raw-depth folder per input folder, ``.lz4``
-uint16 mm maps with matching frame stems) feed RGB-D backends like A2F:
-the depth files are loaded on demand by the backend (via
-``load_depth_lz4``) as paths parallel to ``img_list``.
+log-encoded uint8 depth maps with matching frame stems) feed RGB-D
+backends like A2F: the depth files are loaded on demand by the backend
+(via ``load_depth_lz4``) as paths parallel to ``img_list``.
 
 A short final chunk is padded at its start — with copies of the previous
 chunk's tail, or with duplicated images when the whole sequence fits in a
@@ -140,9 +140,9 @@ class BaseStreaming:
         self.mask_dirs = [os.path.normpath(d) for d in mask_dirs] if mask_dirs else None
 
         # Optional per-camera raw-depth folders (one per input_dir, same
-        # order and frame stems; .lz4 uint16 mm maps).  Paths are built
-        # parallel to img_list by _load_depth_paths; backends (A2F) load the
-        # maps on demand via load_depth_lz4.
+        # order and frame stems; .lz4 log-encoded uint8 depth maps).  Paths
+        # are built parallel to img_list by _load_depth_paths; backends (A2F)
+        # load the maps on demand via load_depth_lz4.
         if depth_dirs is not None and len(depth_dirs) != self.num_cams:
             raise ValueError(
                 f"depth_dirs ({len(depth_dirs)} folders) must match the number "
@@ -530,13 +530,14 @@ class BaseStreaming:
 
             # Save depth per view using the source image stem; leading padding
             # images are discarded here (but were used for alignment below).
-            # Depth is stored as raw uint16 mm .lz4 (see save_depth_m_lz4);
-            # the aligned pass below rewrites it with the SIM3 scale and adds
-            # the warped pose as a separate .npz per frame.  pad_imgs counts
-            # images; each time step has self.num_cams images and len(slots)
-            # outputs, so the loop iterates steps and maps step -> img_list
-            # position and step -> data offset separately (for the default
-            # slots == num_cams these coincide).
+            # Depth is stored as log-encoded uint8 metres .lz4 (see
+            # save_depth_m_lz4); the aligned pass below rewrites it with the
+            # SIM3 scale and adds the warped pose as a separate .npz per
+            # frame.  pad_imgs counts images; each time step has
+            # self.num_cams images and len(slots) outputs, so the loop
+            # iterates steps and maps step -> img_list position and step ->
+            # data offset separately (for the default slots == num_cams these
+            # coincide).
             pad_steps = pad_imgs // self.num_cams
             for local_step in range(pad_steps, n_imgs // len(slots)):
                 base = local_step * len(slots)
@@ -578,12 +579,9 @@ class BaseStreaming:
 
             for v in slots:
                 depth_path = os.path.join(out_dirs[v], f"{stem}.lz4")
-                depth_mm = load_depth_lz4(Path(depth_path), depth_shape)
-                # SIM3 scale applied in mm
-                save_depth_lz4(
-                    np.clip(np.round(depth_mm * s), 0, 65535).astype(np.uint16),
-                    depth_path,
-                )
+                depth_m = load_depth_lz4(Path(depth_path), depth_shape)
+                # SIM3 scale applied in metres (re-encoding clips to MAX_DEPTH)
+                save_depth_lz4(depth_m * s, depth_path)
                 np.savez_compressed(
                     os.path.join(out_dirs[v], f"{stem}.npz"),
                     extrinsics=ext_warped[v],

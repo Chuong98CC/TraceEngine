@@ -4,10 +4,10 @@ or an explicit RGB/depth folder pair. Exactly one input source:
 - ``--camera_name``: the Astribot head RGB-D camera; metric depth is
   recovered from the grey-scale depth image of ``--frame_index``.
 - ``--rgb_dir`` + ``--depth_npz_dir``: paired folders — RGB images
-  (``<stem>.jpg/.jpeg/.png``) with depth ``<stem>.lz4`` (raw uint16 mm,
-  see utils.depth_utils.load_depth_lz4) and pose ``<stem>.npz``
-  (``extrinsics`` 3x4/4x4, ``intrinsics`` 3x3) per stem; ``--frame_index``
-  picks the position in the sorted stems.
+  (``<stem>.jpg/.jpeg/.png``) with depth ``<stem>.lz4`` (log-encoded
+  uint8 depth, decoded to metres by utils.depth_utils.load_depth_lz4) and
+  pose ``<stem>.npz`` (``extrinsics`` 3x4/4x4, ``intrinsics`` 3x3) per
+  stem; ``--frame_index`` picks the position in the sorted stems.
 
 Per selected frame it writes a side-by-side ``[RGB | depth colour-map]``
 JPEG (--save_viz) and a coloured .glb point cloud (--save_glb). This is a
@@ -53,9 +53,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--depth_npz_dir", type=str, default=None,
-        help="Folder of depth .lz4 files (<stem>.lz4, raw uint16 mm) and pose "
-             "NPZ files (<stem>.npz with 'extrinsics' and 'intrinsics' keys). "
-             "Mutually exclusive with --camera_name.",
+        help="Folder of depth .lz4 files (<stem>.lz4, log-encoded uint8 "
+             "depth -> metres) and pose NPZ files (<stem>.npz with "
+             "'extrinsics' and 'intrinsics' keys). Mutually exclusive with "
+             "--camera_name.",
     )
     parser.add_argument(
         "--frame_index", default=0, type=int,
@@ -88,11 +89,12 @@ def build_parser() -> argparse.ArgumentParser:
 def _load_folder_pair(rgb_dir: Path, npz_dir: Path, stem: str):
     """Load ``(rgb, depth_m, ext, ixt)`` for one stem from the folder pair.
 
-    ``<npz_dir>/<stem>.lz4`` holds the raw uint16 mm depth (see
-    utils.depth_utils.load_depth_lz4), reshaped to the RGB frame
-    size; ``<npz_dir>/<stem>.npz`` holds ``extrinsics`` (3x4/4x4) and
-    ``intrinsics`` (3x3). The intrinsics are recorded at the depth
-    resolution, so resizing RGB to the depth resolution needs no intrinsic
+    ``<npz_dir>/<stem>.lz4`` holds the log-encoded uint8 depth (see
+    utils.depth_utils.load_depth_lz4), decoded to float32 metres and
+    reshaped to the RGB frame size; ``<npz_dir>/<stem>.npz`` holds
+    ``extrinsics`` (3x4/4x4) and ``intrinsics`` (3x3). The intrinsics are
+    recorded at the depth resolution, so resizing RGB to the depth
+    resolution needs no intrinsic
     rescaling here.
     """
     img_path = None
@@ -111,7 +113,7 @@ def _load_folder_pair(rgb_dir: Path, npz_dir: Path, stem: str):
     lz4_path = npz_dir / f"{stem}.lz4"
     if not lz4_path.exists():
         raise FileNotFoundError(f"No depth lz4 with stem {stem!r}: {lz4_path}")
-    depth_m = (load_depth_lz4(lz4_path, shape=rgb.shape[:2]) / 1000.0).astype(np.float32)
+    depth_m = load_depth_lz4(lz4_path, shape=rgb.shape[:2])
 
     npz_path = npz_dir / f"{stem}.npz"
     if not npz_path.exists():
