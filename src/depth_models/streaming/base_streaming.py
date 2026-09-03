@@ -48,7 +48,7 @@ from depth_models.streaming.loop_utils.sim3utils import (
     accumulate_sim3_transforms,
     weighted_align_point_maps,
 )
-from utils.astribot_dataloader import load_depth_lz4, save_depth_lz4, save_depth_m_lz4
+from utils.depth_utils import load_depth_lz4, save_depth_lz4, save_depth_m_lz4
 
 
 # ---------------------------------------------------------------------------

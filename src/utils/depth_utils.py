@@ -1,13 +1,16 @@
 import sys
-import numpy as np
+from pathlib import Path
 from typing import Optional
+
 import cv2
+import lz4.frame
 import numpy as np
 import torch
 
 MAX_DEPTH = 2.001  # Maximum depth in meters for encoding/decoding
 MIN_DEPTH = 0.001  # Minimum depth in meters for encoding/decoding
 QUANT_MAX = 65535
+
 def unproject_depth_map_to_point_map(
     depth_map: np.ndarray, extrinsic: np.ndarray, intrinsic: np.ndarray
 ) -> np.ndarray:
@@ -163,8 +166,8 @@ def draw_measurement(
 
 # ---------------------------------------------------------------------------
 # Depth storage units: all .lz4 depth files store raw little-endian uint16
-# millimetres (see utils.astribot_dataloader.save_depth_lz4/load_depth_lz4);
-# pose (extrinsics/intrinsics) lives in a separate .npz per frame.
+# millimetres (see save_depth_lz4/load_depth_lz4 below); pose (extrinsics/
+# intrinsics) lives in a separate .npz per frame.
 # ---------------------------------------------------------------------------
 def depth_m_to_uint16_mm(depth_m: np.ndarray | torch.Tensor) -> np.ndarray:
     """float depth in metres -> uint16 millimetres (clamped to [0, 65535]),
@@ -173,3 +176,50 @@ def depth_m_to_uint16_mm(depth_m: np.ndarray | torch.Tensor) -> np.ndarray:
     if isinstance(depth_m, torch.Tensor):
         depth_m = depth_m.detach().cpu().numpy()
     return np.clip(np.round(np.asarray(depth_m) * 1000.0), 0, 65535).astype(np.uint16)
+
+
+def save_depth_lz4(depth: np.ndarray, path: Path) -> None:
+    """Compress a uint16 depth map (mm) into an .lz4 file readable by
+    load_depth_lz4: raw little-endian uint16 bytes, lz4-frame compressed."""
+    Path(path).write_bytes(lz4.frame.compress(
+        np.asarray(depth).astype(np.uint16).tobytes()))
+
+
+def save_depth_m_lz4(depth_m: np.ndarray, path: Path) -> None:
+    """Save a float depth map in metres as uint16 millimetres (.lz4)."""
+    save_depth_lz4(depth_m_to_uint16_mm(depth_m), path)
+
+
+def load_depth_lz4(depth_path: Path, shape: tuple[int, int]) -> np.ndarray:
+    """Load a uint16 depth map (mm) from an lz4 file (see save_depth_lz4):
+    raw little-endian uint16 bytes, lz4-frame compressed. Accepts str or
+    Path (streaming_utils passes os.path.join strs)."""
+    raw = Path(depth_path).read_bytes()
+    try:
+        decoded = lz4.frame.decompress(raw)
+    except lz4.frame.LZ4FrameError as exc:
+        raise RuntimeError(f"Failed to decompress depth file {depth_path}: {exc}") from exc
+    arr = np.frombuffer(decoded, dtype=np.uint16)
+    expected = shape[0] * shape[1]
+    if arr.size != expected:
+        raise ValueError(f"Unexpected decoded depth size for {depth_path}: "
+                         f"got {arr.size}, expected {expected}")
+    return arr.reshape(shape)
+
+def normalize_depth_for_display(depth: np.ndarray) -> np.ndarray:
+    if depth.dtype == np.uint16 or depth.dtype == np.uint32:
+        max_value = float(depth.max()) if depth.size else 1.0
+        if max_value <= 0:
+            max_value = 1.0
+        out = (depth.astype(np.float32) / max_value * 255.0).astype(np.uint8)
+    elif depth.dtype == np.float32 or depth.dtype == np.float64:
+        min_val = float(depth.min()) if depth.size else 0.0
+        max_val = float(depth.max()) if depth.size else 1.0
+        if max_val - min_val <= 1e-6:
+            max_val = min_val + 1.0
+        out = ((depth - min_val) / (max_val - min_val) * 255.0).astype(np.uint8)
+    else:
+        out = cv2.convertScaleAbs(depth)
+
+    out = cv2.applyColorMap(out, cv2.COLORMAP_JET)
+    return out

@@ -122,7 +122,7 @@ camera has a paired depth feature stored as **uint16 (mm)** (here
 `observation.depth.cam_head` for `observation.images.cam_head`), the raw
 depth array is saved as
 `<out_dir>/subtask_frames/ep000000/subtask_00/depth_<camera>/frame_<idx>.lz4`
-(raw uint16 mm, loadable by `utils.astribot_dataloader.load_depth_lz4`).
+(raw uint16 mm, loadable by `utils.depth_utils.load_depth_lz4`).
 Depth pairing prefers the raw `observation.depth.*` feature; the legacy
 `<cam_key>_depth` video is only trusted when the dataset metadata flags it as
 a real depth map (`video.is_depth_map`) — the `astri_making_coffee` recording

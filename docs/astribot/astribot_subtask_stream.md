@@ -117,7 +117,7 @@ python tools/astribot/run_step2_depth_stream.py \
 ```
 
 Each `frame_<idx>.lz4` carries `depth` (raw uint16 mm, see
-`utils.astribot_dataloader.load_depth_lz4`) and the paired `frame_<idx>.npz`
+`utils.depth_utils.load_depth_lz4`) and the paired `frame_<idx>.npz`
 the `extrinsics` (3×4, world→camera), `intrinsics` (3×3) and the depth
 `shape` — the same contract as `run_depth_stream.py`'s output, consumable by
 `visualize_stream.py` and `infer_tapip3d.py`. `timings.json` holds

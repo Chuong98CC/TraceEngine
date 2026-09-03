@@ -5,7 +5,7 @@ or an explicit RGB/depth folder pair. Exactly one input source:
   recovered from the grey-scale depth image of ``--frame_index``.
 - ``--rgb_dir`` + ``--depth_npz_dir``: paired folders — RGB images
   (``<stem>.jpg/.jpeg/.png``) with depth ``<stem>.lz4`` (raw uint16 mm,
-  see utils.astribot_dataloader.load_depth_lz4) and pose ``<stem>.npz``
+  see utils.depth_utils.load_depth_lz4) and pose ``<stem>.npz``
   (``extrinsics`` 3x4/4x4, ``intrinsics`` 3x3) per stem; ``--frame_index``
   picks the position in the sorted stems.
 
@@ -27,7 +27,8 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from utils.astribot_dataloader import _scale_intrinsics_matrix, load_depth_lz4, load_rgbd
+from utils.astribot_dataloader import _scale_intrinsics_matrix, load_rgbd
+from utils.depth_utils import load_depth_lz4
 from utils.visualize.visualize_depth import export_glb, save_depth_vis
 
 
@@ -88,7 +89,7 @@ def _load_folder_pair(rgb_dir: Path, npz_dir: Path, stem: str):
     """Load ``(rgb, depth_m, ext, ixt)`` for one stem from the folder pair.
 
     ``<npz_dir>/<stem>.lz4`` holds the raw uint16 mm depth (see
-    utils.astribot_dataloader.load_depth_lz4), reshaped to the RGB frame
+    utils.depth_utils.load_depth_lz4), reshaped to the RGB frame
     size; ``<npz_dir>/<stem>.npz`` holds ``extrinsics`` (3x4/4x4) and
     ``intrinsics`` (3x3). The intrinsics are recorded at the depth
     resolution, so resizing RGB to the depth resolution needs no intrinsic

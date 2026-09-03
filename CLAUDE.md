@@ -80,7 +80,8 @@ src/
     ├── cam_structure.py         # CameraIntrinsics, CameraExtrinsics, read_calib_file
     ├── astribot_dataloader.py   # Astribot dataset: load_rgbd, CAMERA_SETS, depth configs
     ├── keyframe_utils.py        # Step-3 key-frame discovery (episode + folder layouts)
-    ├── depth_utils.py, streaming_utils.py
+    ├── depth_utils.py           # .lz4 uint16-mm depth I/O (save/load) + point-map helpers
+    ├── streaming_utils.py       # image-folder pipeline helpers (load_stream_data, load_batch_frames)
     ├── file_io/                 # image_io (ImageInput, letterbox…), video_io, mask_rle
     └── visualize/               # depth / flow / mask / tapip3d visualizers + export_glb
 tools/
@@ -279,8 +280,10 @@ symlink points here): `astribot_test_imgs/` (per-camera RGB-D frames) +
   stereo L/R), `set2` (4 views, + torso_rgbd).
 - `CAMERA_DEPTH_CONFIG` — per-camera depth shape + scale (e.g. head_rgbd
   960×1280 @ 0.001 m/unit; wrists 360×640 @ 0.0001).
-- `load_calib()` scales all intrinsics to 640×480 on load; depth is loaded
-  from lz4-compressed uint16 files (`load_depth_lz4`).
+- `load_calib()` scales all intrinsics to 640×480 on load. Depth is loaded
+  from lz4-compressed raw-uint16-mm files via `utils.depth_utils.load_depth_lz4`
+  — the shared `.lz4` depth I/O helpers (`save_depth_lz4` / `save_depth_m_lz4`
+  / `load_depth_lz4` / `normalize_depth_for_display`) live in `utils/depth_utils.py`.
 
 ## Model input/output conventions
 

@@ -39,7 +39,7 @@ import numpy as np
 from .base_streaming import BaseStreaming
 
 from depth_models.a3f.a2fnested import A2F_NestedPT2
-from utils.astribot_dataloader import load_depth_lz4
+from utils.depth_utils import load_depth_lz4
 
 # ---------------------------------------------------------------------------
 # Default model paths (any-view fixed num_views = 64, no extrinsics input)
