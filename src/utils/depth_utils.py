@@ -6,8 +6,8 @@ import cv2
 import lz4.frame
 import numpy as np
 
-MAX_DEPTH = 1.501  # Maximum depth in meters for encoding/decoding
-MIN_DEPTH = 0.001  # Minimum depth in meters for encoding/decoding
+MAX_DEPTH = 1.25  # Maximum depth in meters for encoding/decoding
+MIN_DEPTH = 0.25  # Minimum depth in meters for encoding/decoding
 QUANT_MAX = 255  # 8-bit quantization levels of the log-depth codec
 
 def unproject_depth_map_to_point_map(
