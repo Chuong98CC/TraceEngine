@@ -19,11 +19,10 @@ Per prompt, under <out-dir>/init_points/ep{ep:06d}/subtask_{k:02d}/
 <prompt_slug>/: init_points.npz (top-k keypoints), masks_rle.json (SAM3
 masks as COCO RLE), viz.png (key-frames + masks + tracks).
 
-Prompts are read per sub-task from the Step-3a JSON (where Step 3a recorded
-them from the dataset's meta/subtasks.csv). Without a detections JSON,
---no-rexomni runs SAM3 text-only: prompts from meta/subtasks.csv in episode
-mode, --text-prompts in folder mode (--keyframes-dir, one sub-task of one
-camera). All checkpoints are the repo defaults.
+Prompts are read per sub-task from the Step-3a detections JSON (Step 3a
+recorded them from the dataset's meta/subtasks.csv in episode mode, or from
+its --text-prompts in folder mode). There is no JSON-less fallback — run
+Step 3a first. All checkpoints are the repo defaults.
 
 Examples
 --------
@@ -31,15 +30,10 @@ Examples
     python tools/general_test/pipeline/run_object_init_points.py
         --data-root /data/astri_making_coffee_v1 --episode-idxes 0
 
-    # SAM3 text-only (no Step-3a JSON), prompts from meta/subtasks.csv
-    python tools/general_test/pipeline/run_object_init_points.py
-        --data-root /data/astri_making_coffee_v1 --episode-idxes 0
-        --no-rexomni
-
-    # One sub-task's key-frame folder: prompts passed explicitly
+    # One sub-task's key-frame folder (the prompts are the ones a Step 3a
+    # run on the same folder recorded in its JSON)
     python tools/general_test/pipeline/run_object_init_points.py
         --keyframes-dir .../subtask_00/cam_head --episode-idx 0
-        --text-prompts "red mug" "left robot gripper"
 """
 
 from __future__ import annotations
@@ -66,19 +60,15 @@ from utils.keyframe_utils import (
     cap_keyframes,
     discover_episodes,
     discover_folder_frames,
-    discover_subtask_frames,
     keyframe_path,
     keyframes_root,
-    load_subtask_meta,
     select_camera,
     select_episodes,
-    subtask_prompts,
 )
 from utils.file_io.mask_rle import encode_rle
 
 DEFAULT_SAM3_CKPT = "weights/sam3/sam3_image_exported_bf16.pt2"
 DEFAULT_ROMAV2_CKPT = "weights/romav2/romav2.pt2"
-DEFAULT_PROMPTS = ["brown coffee cup", "robot gripper"]
 #: fixed box-prompt slots of the exported SAM3 graph (callers truncate).
 SAM3_BOXES_MAX = 8
 #: max round-trip warp error in normalized coords (RoMAv2 cycle mode).
@@ -129,13 +119,6 @@ def parse_args(argv: list[str] | None = None):
     parser.add_argument("--out-dir", "-o", default=None,
                         help="output root (default: <data-root>/eps_data); "
                              "results land under <out-dir>/init_points/")
-    parser.add_argument("--text-prompts", nargs="+", default=DEFAULT_PROMPTS,
-                        help="object prompts (folder mode only — the single "
-                             "sub-task has no dataset annotations; with a "
-                             "dataset the per-sub-task prompts recorded in "
-                             "the Step-3a JSON (or meta/subtasks.csv under "
-                             "--no-rexomni) are used instead; one output "
-                             "folder per prompt; default: %(default)s)")
     parser.add_argument("--top-k", type=int, default=128,
                         help="final keypoints kept per prompt per sub-task "
                              "(default: %(default)s)")
@@ -149,10 +132,6 @@ def parse_args(argv: list[str] | None = None):
     parser.add_argument("--strategy", choices=("reference", "cycle"),
                         default="reference",
                         help="RoMAv2 matching strategy (default: %(default)s)")
-    parser.add_argument("--no-rexomni", action="store_true",
-                        help="skip the Step-3a detections JSON: SAM3 uses "
-                             "text-only prompts and the key-frames are "
-                             "discovered from disk directly")
     parser.add_argument("--detections-dir", default=None,
                         help="Step-3a detections root (default: "
                              "<out-dir>/detections)")
@@ -176,9 +155,8 @@ class InitPointsExtract:
     The key-frames are the jpgs written by extract_frames.py --mode
     key_frames (sub-task segments and frame indices come from the folder and
     file names) — no dataset or video access is needed. The Step-3a
-    detections JSON provides the per-key-frame object boxes (SAM3 prompt)
-    and the key-frame indices; without it (--no-rexomni) the frames are
-    discovered from disk directly.
+    detections JSON provides the per-key-frame object boxes (SAM3 prompt),
+    the key-frame indices and the per-sub-task prompts.
     """
 
     def __init__(self, args):
@@ -221,20 +199,6 @@ class InitPointsExtract:
                                        else "cpu")
         self.sam3 = None
         self.romav2 = None
-        #: subtask annotations of the dataset, loaded lazily for the
-        #: episode --no-rexomni path (see _prompts_for).
-        self.meta: dict[int, dict[str, str]] | None = None
-
-    def _prompts_for(self, k: int) -> list[str]:
-        """Episode-mode prompts without a Step-3a JSON (--no-rexomni): the
-        dataset annotations — [object, manipulator] of the row whose
-        subtask_index is k (meta/subtasks.csv is required)."""
-        if self.meta is None:
-            try:
-                self.meta = load_subtask_meta(self.args.data_root)
-            except FileNotFoundError as e:
-                sys.exit(str(e))
-        return subtask_prompts(self.meta.get(k))
 
     # --- model setup --------------------------------------------------------
 
@@ -281,8 +245,7 @@ class InitPointsExtract:
             raise FileNotFoundError(
                 f"{path} missing: run Step 3a first "
                 "(.venv-rexomni/bin/python tools/general_test/"
-                "run_object_detection.py ...), or pass --no-rexomni to use "
-                "SAM3 text-only prompts")
+                "run_object_detection.py ...)")
         with open(path) as f:
             return json.load(f)
 
@@ -423,12 +386,10 @@ class InitPointsExtract:
             self._process_folder(ep_idx)
             return
         self.ep_idx = ep_idx
-        detections = None
-        if not self.args.no_rexomni:
-            detections = self._load_detections(ep_idx)
-            print(f"\nepisode {ep_idx}: detections loaded from "
-                  f"{self._detections_path(ep_idx)}")
-        # camera: the one Step 3a used when its JSON is loaded, else an
+        detections = self._load_detections(ep_idx)
+        print(f"\nepisode {ep_idx}: detections loaded from "
+              f"{self._detections_path(ep_idx)}")
+        # camera: the one Step 3a used (its JSON records it), else an
         # explicit --camera-keys entry or the first RGB camera on disk
         cam = (detections or {}).get("camera_key")
         if cam is None:
@@ -441,43 +402,27 @@ class InitPointsExtract:
         self.cam_key = cam
         print(f"episode {ep_idx} (camera {cam})")
 
-        if detections is not None:
-            # key-frames come from the Step-3a JSON so both steps agree; the
-            # per-sub-task prompts are the ones Step 3a recorded next to the
-            # detections (they are keyed by prompt text)
-            items = []
-            for k, sub in sorted(detections.get("subtasks", {}).items(),
-                                 key=lambda kv: int(kv[0])):
-                keys = cap_keyframes(
-                    [int(t) for t in sub.get("keyframes", [])],
-                    self.args.max_keyframes)
-                if not keys:
-                    print(f"  [subtask {k:02d}] skip: no key-frames in the "
-                          f"Step-3a JSON")
-                    continue
-                prompts = sub.get("prompts") or []
-                if not prompts:
-                    print(f"  [subtask {k:02d}] skip: no prompts recorded "
-                          f"in the Step-3a JSON (re-run Step 3a — prompts "
-                          f"are per-sub-task now)")
-                    continue
-                items.append((int(k), keys,
-                              sub.get("detections") or {}, prompts))
-        else:
-            # --no-rexomni: discover the saved key-frames directly; the
-            # prompts come from the dataset annotations
-            frames_by_sub = discover_subtask_frames(self.root, ep_idx, cam)
-            items = []
-            for k, frames in sorted(frames_by_sub.items()):
-                keys = cap_keyframes(frames, self.args.max_keyframes)
-                prompts = self._prompts_for(k)
-                if not keys or not prompts:
-                    reason = ("no key-frames" if not keys else
-                              "no object/manipulator row for it in "
-                              "meta/subtasks.csv")
-                    print(f"  [subtask {k:02d}] skip: {reason}")
-                    continue
-                items.append((k, keys, None, prompts))
+        # key-frames come from the Step-3a JSON so both steps agree; the
+        # per-sub-task prompts are the ones Step 3a recorded next to the
+        # detections (they are keyed by prompt text)
+        items = []
+        for k, sub in sorted(detections.get("subtasks", {}).items(),
+                             key=lambda kv: int(kv[0])):
+            keys = cap_keyframes(
+                [int(t) for t in sub.get("keyframes", [])],
+                self.args.max_keyframes)
+            if not keys:
+                print(f"  [subtask {k:02d}] skip: no key-frames in the "
+                      f"Step-3a JSON")
+                continue
+            prompts = sub.get("prompts") or []
+            if not prompts:
+                print(f"  [subtask {k:02d}] skip: no prompts recorded "
+                      f"in the Step-3a JSON (re-run Step 3a — prompts "
+                      f"are per-sub-task now)")
+                continue
+            items.append((int(k), keys,
+                          sub.get("detections") or {}, prompts))
         for k, keys, seg_dets, prompts in items:
             self._process_segment(k, keys, seg_dets, prompts)
 
@@ -486,51 +431,40 @@ class InitPointsExtract:
         synthetic episode labelled --episode-idx; same outputs as the episode
         mode."""
         self.ep_idx = ep_idx
-        detections = None
-        if not self.args.no_rexomni:
-            detections = self._load_detections(ep_idx)
-            print(f"\nepisode {ep_idx}: detections loaded from "
-                  f"{self._detections_path(ep_idx)}")
-        # camera: the one Step 3a recorded (when its JSON is loaded), else an
+        detections = self._load_detections(ep_idx)
+        print(f"\nepisode {ep_idx}: detections loaded from "
+              f"{self._detections_path(ep_idx)}")
+        # camera: the one Step 3a recorded (its JSON records it), else an
         # explicit --camera-key, else the folder name
         cam = (detections or {}).get("camera_key") or \
             self.args.camera_key or self.folder.name
         self.cam_key = cam
         print(f"episode {ep_idx} (folder {self.folder.name}, camera {cam})")
-        if detections is not None:
-            # key-frames come from the Step-3a JSON so both steps agree; they
-            # must still be files of the input folder. The prompts are the
-            # ones Step 3a recorded for the sub-task.
-            sub = (detections.get("subtasks") or {}).get("0")
-            if sub is None:
-                raise FileNotFoundError(
-                    f"no subtask \"0\" in {self._detections_path(ep_idx)}")
-            keys = cap_keyframes([int(t) for t in sub.get("keyframes", [])],
-                                 self.args.max_keyframes)
-            if not keys:
-                print(f"  skip: no key-frames in the Step-3a JSON")
-                return
-            missing = [t for t in keys if t not in self.folder_map]
-            if missing:
-                raise FileNotFoundError(
-                    f"key-frame(s) {missing} of the Step-3a JSON not in "
-                    f"{self.folder} (indices {sorted(self.folder_map)})")
-            prompts = sub.get("prompts") or []
-            if not prompts:
-                print("  skip: no prompts recorded for sub-task 0 in the "
-                      "Step-3a JSON (re-run Step 3a — prompts are "
-                      "per-sub-task now)")
-                return
-            items = [(0, keys, sub.get("detections") or {}, prompts)]
-        else:
-            # --no-rexomni: discover the folder's images directly; the
-            # prompts are the explicit --text-prompts list of the folder
-            keys = cap_keyframes([i for i, _ in self.folder_frames],
-                                 self.args.max_keyframes)
-            if not keys:
-                print(f"  skip: no key-frame images in {self.folder}")
-                return
-            items = [(0, keys, None, list(self.args.text_prompts))]
+
+        # key-frames come from the Step-3a JSON so both steps agree; they
+        # must still be files of the input folder. The prompts are the ones
+        # Step 3a recorded for the sub-task.
+        sub = (detections.get("subtasks") or {}).get("0")
+        if sub is None:
+            raise FileNotFoundError(
+                f"no subtask \"0\" in {self._detections_path(ep_idx)}")
+        keys = cap_keyframes([int(t) for t in sub.get("keyframes", [])],
+                             self.args.max_keyframes)
+        if not keys:
+            print(f"  skip: no key-frames in the Step-3a JSON")
+            return
+        missing = [t for t in keys if t not in self.folder_map]
+        if missing:
+            raise FileNotFoundError(
+                f"key-frame(s) {missing} of the Step-3a JSON not in "
+                f"{self.folder} (indices {sorted(self.folder_map)})")
+        prompts = sub.get("prompts") or []
+        if not prompts:
+            print("  skip: no prompts recorded for sub-task 0 in the "
+                  "Step-3a JSON (re-run Step 3a — prompts are "
+                  "per-sub-task now)")
+            return
+        items = [(0, keys, sub.get("detections") or {}, prompts)]
         for k, keys, seg_dets, prompts in items:
             self._process_segment(k, keys, seg_dets, prompts)
 
@@ -659,8 +593,7 @@ class InitPointsExtract:
             "match_top_k": self.args.top_k * 4,
             "in_mask_min_frames": int(in_mask_need),
             "strategy": self.args.strategy,
-            "detections_file": str(self._detections_path(self.ep_idx))
-                                if not self.args.no_rexomni else None,
+            "detections_file": str(self._detections_path(self.ep_idx)),
             "sam3_checkpoint": DEFAULT_SAM3_CKPT,
             "romav2_checkpoint": DEFAULT_ROMAV2_CKPT,
             "empty_reason": empty_reason,

@@ -106,6 +106,7 @@ tools/
 │   ├── extract_frames.py       # sub-task splits, key-frame jpgs, per-subtask videos/frames (+ depth .lz4)
 │   ├── run_step2_depth_stream.py   # online per-sub-task depth+pose streaming (da3/vggt_omega/a2f)
 │   ├── run_step3_init_points.py    # Step 3 driver on episodes (key-frames + 3a + 3b)
+│   ├── run_step4_traces.py     # Step 4: TAPIP3D 3D point tracking of the Step-3 keypoints (per-role passes) over the Step-2 depth+pose, online frames
 │   └── visualize_subtask_stream.py  # per-sub-task trajectory videos from the depth_pose outputs (no re-inference)
 ├── push_ckpt_2HF.py            # upload weights/ to Hugging Face (Chuong98vt/TraceEngine)
 └── hifi-umi/                   # HiFi-UMI dataset preprocessing (extract_frames, generate_masks)
@@ -119,6 +120,7 @@ scripts/                        # ready-to-run pipeline scripts
     ├── run_step2_stereo.sh     # Step 2: RGB stereo depth+pose streaming (vggt_omega/da3)
     ├── run_step2_rgbd.sh       # Step 2: RGB-D depth+pose streaming (a2f densifies the sensor depth)
     ├── run_step3_init_points.sh  # Step 3: key-frames + detections + init points
+    ├── run_step4_traces.sh   # Step 4: TAPIP3D 3D point tracking over the step-2/3 results -> eps_data/traces
     └── visualize_subtask_stream.sh  # trajectory videos from the depth_pose outputs
 docs/
 ├── general_test/               # general_test.md master index (mermaid pipeline diagram) +
@@ -127,7 +129,7 @@ docs/
 │   │                           #   pipeline/ step tests (step2, step3)
 │   ├── module/                 # one doc per model component
 │   └── pipeline/               # end-to-end README-step tests (step2, step3)
-└── astribot/                   # extract_frames / subtask-streaming / visualization guides
+└── astribot/                   # extract_frames / subtask-streaming / traces / visualization guides
 ```
 
 Model weights are expected under `weights/` (git-ignored): `any2full/`, `da3/`,

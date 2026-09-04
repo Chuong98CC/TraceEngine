@@ -9,4 +9,5 @@ DATA_ROOT=/data/astri_making_coffee_v1
 python tools/astribot/run_step3_init_points.py \
     --repo-id $REPO_ID \
     --data-root $DATA_ROOT --episode-idxes 0 \
-    --out-dir $DATA_ROOT/eps_data
+    --out-dir $DATA_ROOT/eps_data \
+    --use-inferred-splits

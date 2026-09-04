@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Step 2 — streaming depth + pose over synchronized frame folders (da3 |
-a2f | vggt_omega, unified entry point for all backends).
+a2f | moge3 | vggt_omega, unified entry point for all backends).
 
 Streams the synchronized RGB frame folders (one per camera, matching frame
 stems) in chunks of the model's fixed num_views frames, aligns consecutive
@@ -29,6 +29,10 @@ Backends:
                   .lz4 log-encoded uint8 depth maps, decoded to metres by
                   load_depth_lz4): Any2Full densifies the sensor depth and
                   the any-view depth is aligned to it.
+- ``moge3``      — RGB folders only (no depth inputs): MoGe v3's monocular
+                  metric depth (fixed 640x480 graph, per view) replaces
+                  Any2Full as the metric component the any-view depth is
+                  aligned to.
 
 The online per-sub-task variant (frames decoded straight from the dataset,
 nothing extracted) is tools/astribot/run_step2_depth_stream.py.
@@ -55,11 +59,13 @@ import torch
 from depth_models.streaming.a2f_streaming import A2F_Streaming
 from depth_models.streaming.da3_streaming import DA3_Streaming
 from depth_models.streaming.loop_utils.config_utils import load_config
+from depth_models.streaming.moge3_streaming import Moge3_Streaming
 from depth_models.streaming.vggt_omg_streaming import VGGT_OMG_Streaming
 
 _BACKENDS = {
     "a2f": A2F_Streaming,
     "da3": DA3_Streaming,
+    "moge3": Moge3_Streaming,
     "vggt_omega": VGGT_OMG_Streaming,
 }
 
@@ -127,7 +133,7 @@ def main(argv: list[str] | None = None) -> int:
         "--backend",
         required=True,
         choices=sorted(_BACKENDS),
-        help="Inference backend: a2f, da3, vggt_omega",
+        help="Inference backend: a2f, da3, moge3, vggt_omega",
     )
     parser.add_argument(
         "--input-dirs",
@@ -187,6 +193,18 @@ def main(argv: list[str] | None = None) -> int:
         "backend's default",
     )
     parser.add_argument(
+        "--moge3-model-path",
+        default=None,
+        help="MoGe v3 model artifact path (.pt2); overrides the moge3 "
+        "backend's default",
+    )
+    parser.add_argument(
+        "--moge3-refiner-path",
+        default=None,
+        help="MoGe v3 sparse-refiner companion checkpoint (.pt); defaults "
+        "to the .pt2 path with _refiner.pt",
+    )
+    parser.add_argument(
         "--no-depth-enhance",
         action="store_true",
         help="a2f backend only: skip the Any2Full depth-enhance model and feed "
@@ -195,9 +213,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--no-compile",
         action="store_true",
-        help="DA3/a2f only: run the exported programs without wrapping them in "
-        "torch.compile (Inductor).  Slower, but useful for debugging numeric "
-        "differences.",
+        help="DA3/a2f/moge3 only: run the exported any-view program without "
+        "wrapping it in torch.compile (Inductor).  Slower, but useful for "
+        "debugging numeric differences.",
     )
     parser.add_argument("--config", default="src/depth_models/streaming/configs/base_config.yaml")
     parser.add_argument("--output-dir", default=None)
@@ -265,6 +283,11 @@ def main(argv: list[str] | None = None) -> int:
         kwargs["compile"] = not args.no_compile
         kwargs["use_depth_enhance"] = not args.no_depth_enhance
         kwargs["depth_dirs"] = args.depth_dirs
+    elif args.backend == "moge3":
+        kwargs["anyview_model_path"] = args.anyview_model_path
+        kwargs["moge3_model_path"] = args.moge3_model_path
+        kwargs["refiner_path"] = args.moge3_refiner_path
+        kwargs["compile"] = not args.no_compile
     elif args.backend == "vggt_omega":
         kwargs["model_path"] = args.model_path
 

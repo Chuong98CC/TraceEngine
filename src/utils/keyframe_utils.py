@@ -12,13 +12,20 @@ with <camera> the camera-subdir name (e.g. cam_head) and <idx> the absolute
 dataset frame index. Both Step 3a (run_object_detection.py) and Step 3b
 (run_object_init_points.py) must agree on those frames, so the discovery
 helpers live here; Step 3a also records the frame indices in its per-episode
-detections JSON, which Step 3b reads (the helpers only run again under
---no-rexomni).
+detections JSON, which Step 3b reads.
+
+The key_frames mode additionally writes subtask_labels.json per episode (see
+SUBTASK_LABELS_FILE): the canonical dataset subtask label of every saved
+segment, matched by ground-truth execution order — the canonical ids need
+not equal the segment ordinals (the frame-table subtask_index of an episode
+can run e.g. [0, 2, 1, 3, 5, 4]). Step 3a reads the file to fetch the
+[object, manipulator] prompts of the right sub-task of every segment.
 """
 
 from __future__ import annotations
 
 import csv
+import json
 import re
 from pathlib import Path
 
@@ -33,6 +40,19 @@ SUBTASK_META_FILE = "subtasks.csv"
 #: prompt columns of the annotations, in output order: the manipulated
 #: object, then the manipulator acting on it.
 SUBTASK_PROMPT_COLUMNS = ("object", "manipulator")
+#: dataset-native per-episode sub-task order annotation
+#: (<data-root>/meta/lerobot_annotations.json): each episode lists its
+#: sub-tasks in execution order (start/end times + label text). The
+#: ground-truth sub-task order of an episode; extract_frames.py falls back
+#: to it when the frame table has no subtask_index column.
+SUBTASK_ORDER_FILE = "lerobot_annotations.json"
+#: per-episode segment-label map written by extract_frames.py --mode
+#: key_frames next to the key-frames: <episode>/subtask_labels.json holds
+#: {segment ordinal: canonical subtask label} — the ordinal-to-label match
+#: is by ground-truth execution order (the frame-table subtask_index runs
+#: need not equal the ordinals), so Step 3a can fetch the [object,
+#: manipulator] prompts of the right sub-task of every segment.
+SUBTASK_LABELS_FILE = "subtask_labels.json"
 
 
 def keyframes_root(data_root: str) -> Path:
@@ -99,6 +119,30 @@ def keyframe_path(root: str | Path, ep_idx: int, cam_subdir: str,
     --mode key_frames)."""
     return (episode_dir(root, ep_idx) / f"subtask_{subtask_k:02d}"
             / cam_subdir / f"frame_{frame_idx:06d}.jpg")
+
+
+def subtask_labels_path(root: str | Path, ep_idx: int) -> Path:
+    """subtask_labels.json of the episode's key-frames (written by
+    extract_frames.py --mode key_frames next to the frames)."""
+    return episode_dir(root, ep_idx) / SUBTASK_LABELS_FILE
+
+
+def load_subtask_labels(root: str | Path,
+                        ep_idx: int) -> dict[int, int | None]:
+    """{segment ordinal: canonical subtask label} of the episode's saved
+    key-frames — the ordinal-to-label match of the key_frames extraction
+    (None marks a segment beyond the ground-truth order, i.e. unlabelled).
+    Raises FileNotFoundError when the key-frames carry no labels file (an
+    extraction that predates it)."""
+    path = subtask_labels_path(root, ep_idx)
+    if not path.is_file():
+        raise FileNotFoundError(
+            f"{path} missing: the key-frames carry no ground-truth "
+            f"sub-task labels — re-run extract_frames.py --mode key_frames "
+            f"(or run run_step3_init_points.py without --skip-extract)")
+    data = json.loads(path.read_text())
+    return {int(k): (int(v) if v is not None else None)
+            for k, v in (data.get("segments") or {}).items()}
 
 
 def cap_keyframes(keys: list[int], max_keyframes: int | None) -> list[int]:

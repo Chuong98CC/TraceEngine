@@ -204,7 +204,7 @@ can be extracted from the subtask description. Given the text prompt:
    included).
 
    <p align="center">
-     <img src="docs/assets/rexomni_detection.jpg" alt="RexOmni object detection on a key-frame" width="800"/>
+     <img src="docs/assets/rexomni_detection.png" alt="RexOmni object detection on a key-frame" width="800"/>
    </p>
 
 2. The bounding boxes and their corresponding text prompts are used as the
@@ -301,6 +301,12 @@ bash scripts/astribot/run_step2_rgbd.sh      # RGB-D: Any2Full (a2f) densifies t
 # SAM3/RoMaV2 init points (prompts come from the dataset's meta/subtasks.csv)
 bash scripts/astribot/run_step3_init_points.sh
 
+# Step 4 — 3D traces: track the Step-3 keypoints with TAPIP3D over the
+# Step-2 depth + pose outputs (one pass per role: the object keypoints from
+# its first usable key-frame, the manipulator keypoints from the sub-task's
+# first frame) -> eps_data/traces/
+bash scripts/astribot/run_step4_traces.sh
+
 # visualize — trajectory video per sub-task from the depth_pose outputs
 bash scripts/astribot/visualize_subtask_stream.sh
 ```
@@ -316,7 +322,8 @@ dataset:
 ├── subtask_frames/  <- extract_frames --mode frames (sampled per-sub-task frames + depth .lz4)
 ├── depth_pose/      <- Step 2 online streaming (run_step2_depth_stream.py)
 ├── detections/      <- Step 3a (RexOmni)
-└── init_points/     <- Step 3b (SAM3/RoMaV2)
+├── init_points/     <- Step 3b (SAM3/RoMaV2)
+└── traces/          <- Step 4 3D point tracking (run_step4_traces.py)
 ```
 
 Depth + pose results live in
@@ -328,4 +335,5 @@ as the disk-based `run_depth_stream.py`).
 The docs live in [`docs/astribot/`](docs/astribot/):
 [`astribot_extract_frames.md`](docs/astribot/astribot_extract_frames.md),
 [`astribot_subtask_stream.md`](docs/astribot/astribot_subtask_stream.md),
+[`astribot_traces.md`](docs/astribot/astribot_traces.md),
 [`astribot_visualize_subtask_stream.md`](docs/astribot/astribot_visualize_subtask_stream.md).

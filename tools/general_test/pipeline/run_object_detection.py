@@ -2,8 +2,8 @@
 
 Detection stage of pipeline Step 3: for every sub-task of every selected
 episode, runs the open-vocabulary detector on the key-frames that Step 1
-saved to disk, and writes the raw predictions to **one JSON per episode** —
-the input of Step 3b (run_object_init_points.py):
+saved to disk, and writes the hard-filtered predictions to **one JSON per
+episode** — the input of Step 3b (run_object_init_points.py):
 
     key-frames on disk (sub-task x camera)
                │
@@ -12,10 +12,23 @@ the input of Step 3b (run_object_init_points.py):
     │  detections JSON per episode │
     └──────────────────────────────┘
 
+Per category per frame the raw predictions are hard-filtered (see
+``_refine_detections``): boxes that duplicate one instance (same image
+half, close centers) merge into their union — one hand occasionally fires
+twice — and when the category's prompt names a side (left/right robot arm),
+only that side's box is kept — the model often returns both arms for a
+side prompt. The JSON therefore holds at most one box per side-named
+category per frame.
+
 Object prompts are per sub-task: the [object, manipulator] of the sub-task's
-row in the dataset's meta/subtasks.csv (episode mode), recorded in the JSON
-next to the detections; folder mode (--keyframes-dir, one sub-task of one
-camera) takes --text-prompts. RexOmni needs its own environment (Python
+row in the dataset's meta/subtasks.csv, recorded in the JSON next to the
+detections. In episode mode the segment's row is found through its canonical
+label in subtask_labels.json — Step 1 (key_frames) matches the segments to
+the ground-truth sub-tasks by execution order, and the canonical labels need
+not equal the segment ordinals, so every key-frame extraction must carry the
+labels file (missing -> error). Folder mode (--keyframes-dir, one sub-task
+of one camera) takes --text-prompts instead. RexOmni needs its own
+environment (Python
 3.10 / torch 2.7; checkpoint IDEA-Research/Rex-Omni), so run this script
 with .venv-rexomni's python — the sys.path bootstrap below exposes the repo
 to it.
@@ -37,7 +50,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -58,15 +73,130 @@ from utils.keyframe_utils import (
     discover_subtask_frames,
     keyframe_path,
     keyframes_root,
+    load_subtask_labels,
     load_subtask_meta,
     select_camera,
     select_episodes,
+    subtask_labels_path,
     subtask_prompts,
 )
 
 DEFAULT_PROMPTS = ["brown coffee cup", "robot gripper"]
 #: RexOmni checkpoint (Hugging Face model id); the default is always used.
 REXOMNI_MODEL = "IDEA-Research/Rex-Omni"
+#: duplicate-merge radius: two boxes of one category whose centers fall on
+#: the same image half and lie within this fraction of the image width are
+#: duplicates of the same instance and merge into their union box.
+DUP_MERGE_FRACTION = 0.2
+
+_SIDE_RE = re.compile(r"\b(left|right)\b")
+
+
+# --- post-detection hard filters ----------------------------------------------
+#
+# RexOmni struggles with the dataset's side-named arm prompts: a prompt like
+# "left robot arm's black grippers" sometimes returns one box per arm, and
+# one hand occasionally returns two nearby boxes. These helpers run per
+# category per frame, so the detections JSON only ever holds the refined
+# boxes: duplicates first collapse into their union, then a side prompt with
+# several remaining boxes keeps only the one on its side.
+
+def _box_center(coords: list[float]) -> tuple[float, float]:
+    """Center (x, y) of an absolute-pixel box."""
+    x0, y0, x1, y1 = coords
+    return (x0 + x1) / 2, (y0 + y1) / 2
+
+
+def _union_box(a: dict, b: dict) -> dict:
+    """Bounding union of two boxes (same {"type": "box", "coords"} schema)."""
+    x0, y0, x1, y1 = a["coords"]
+    x2, y2, x3, y3 = b["coords"]
+    return {"type": a.get("type", "box"),
+            "coords": [min(x0, x2), min(y0, y2), max(x1, x3), max(y1, y3)]}
+
+
+def _merge_duplicate_boxes(boxes: list[dict], width: int) -> list[dict]:
+    """Collapse duplicates of the same instance within one category.
+
+    Two boxes merge into their union when both centers fall on the same
+    image half (both < width/2 or both >= width/2) and lie no farther apart
+    than ``DUP_MERGE_FRACTION`` of the image width — the signature of one
+    object double-detected (the dataset's gripper duplicates sit ~15% of
+    the width apart, while opposite arms are ~80% apart and on opposite
+    halves). Repeats until no qualifying pair remains, so a tight 3-box
+    cluster collapses too.
+    """
+    boxes = list(boxes)
+    radius = DUP_MERGE_FRACTION * width
+    mid = width / 2
+    changed = True
+    while changed:
+        changed = False
+        for i in range(len(boxes)):
+            for j in range(i + 1, len(boxes)):
+                xi, yi = _box_center(boxes[i]["coords"])
+                xj, yj = _box_center(boxes[j]["coords"])
+                if (xi < mid) == (xj < mid) and \
+                        math.hypot(xi - xj, yi - yj) <= radius:
+                    boxes[i] = _union_box(boxes[i], boxes[j])
+                    del boxes[j]
+                    changed = True
+                    break
+            if changed:
+                break
+    return boxes
+
+
+def _category_side(category: str) -> int | None:
+    """Image side a category's prompt commits to: -1 for a "left" token,
+    +1 for a "right" token, None when the prompt carries neither or both
+    (no single side to enforce)."""
+    sides = set(_SIDE_RE.findall(category.lower()))
+    if sides == {"left"}:
+        return -1
+    if sides == {"right"}:
+        return +1
+    return None
+
+
+def _keep_side_box(boxes: list[dict], side: int) -> list[dict]:
+    """Hard side filter: of several boxes of a side-prompted category, keep
+    only the leftmost (-1) / rightmost (+1) by box-center x. A lone box
+    passes through — with a single detection there is no wrong arm to drop."""
+    if len(boxes) <= 1:
+        return boxes
+    if side < 0:
+        best = min(boxes, key=lambda b: _box_center(b["coords"])[0])
+    else:
+        best = max(boxes, key=lambda b: _box_center(b["coords"])[0])
+    return [best]
+
+
+def _refine_detections(preds: dict, width: int) -> tuple[dict, dict]:
+    """Hard-filter one frame's detections, per category: collapse duplicate
+    boxes of the same instance first, then — when the category's prompt
+    names a side and several boxes still remain (one per arm) — keep only
+    the box on that side. Returns the refined predictions and
+    {category: description} of the filters that fired, for the per-frame
+    logs ({} when nothing changed).
+    """
+    refined: dict = {}
+    notes: dict = {}
+    for category, boxes in preds.items():
+        merged = _merge_duplicate_boxes(boxes, width)
+        note = f"merge {len(boxes)}->{len(merged)}" \
+            if len(merged) != len(boxes) else ""
+        side = _category_side(category)
+        if side is not None and len(merged) > 1:
+            kept = _keep_side_box(merged, side)
+            label = "left" if side < 0 else "right"
+            note += f"{', ' if note else ''}{label}-keep " \
+                    f"{len(merged)}->{len(kept)}"
+            merged = kept
+        refined[category] = merged
+        if note:
+            notes[category] = note
+    return refined, notes
 
 
 def parse_args(argv: list[str] | None = None):
@@ -222,6 +352,14 @@ class SubtaskDetectExtract:
         print(f"\n{len(self.ep_idxes)} episode(s) selected:")
         for ep in self.ep_idxes:
             print(f"  episode {ep}")
+        missing = [e for e in self.ep_idxes
+                   if not subtask_labels_path(self.root, e).is_file()]
+        if missing:
+            sys.exit(f"episode(s) {missing}: their key-frames carry no "
+                     f"subtask_labels.json under {self.root} (an extraction "
+                     f"predating the labels) — re-run extract_frames.py "
+                     f"--mode key_frames so every segment is prompted by "
+                     f"its ground-truth label")
         for ep_idx in tqdm(self.ep_idxes, desc="episodes"):
             self._process_episode(ep_idx)
         print(f"\ndone: {len(self.ep_idxes)} episode(s) -> {self.detections_dir}")
@@ -279,22 +417,31 @@ class SubtaskDetectExtract:
             print(f"episode {ep_idx}: skip, no key-frames saved for camera "
                   f"{cam} (run extract_frames.py --mode key_frames)")
             return
+        labels = load_subtask_labels(self.root, ep_idx)
         print(f"\nepisode {ep_idx} (camera {cam}): {len(frames_by_sub)} "
-              f"sub-task segment(s)")
+              f"sub-task segment(s), labels "
+              f"{dict(sorted(labels.items()))}")
         subtasks = {}
         for k in sorted(frames_by_sub):
             keys = cap_keyframes(frames_by_sub[k], self.args.max_keyframes)
             if not keys:
                 print(f"  [subtask {k:02d}] skip: no key-frames")
                 continue
-            prompts = subtask_prompts(self.meta.get(k))
+            label = labels.get(k)
+            if label is None:
+                print(f"  [subtask {k:02d}] skip: no ground-truth label in "
+                      f"subtask_labels.json (segment beyond the sub-task "
+                      f"order?)")
+                continue
+            prompts = subtask_prompts(self.meta.get(label))
             if not prompts:
                 print(f"  [subtask {k:02d}] skip: no object/manipulator "
-                      f"row for it in meta/subtasks.csv")
+                      f"row for label {label} in meta/subtasks.csv")
                 continue
-            print(f"  [subtask {k:02d}] {len(keys)} key-frames {keys}, "
-                  f"prompts {prompts}")
+            print(f"  [subtask {k:02d}] label {label}: {len(keys)} "
+                  f"key-frames {keys}, prompts {prompts}")
             subtasks[str(k)] = {
+                "subtask_index": label,
                 "segment": [min(keys), max(keys) + 1],
                 "keyframes": keys,
                 "prompts": prompts,
@@ -314,19 +461,25 @@ class SubtaskDetectExtract:
     def _detect_segment(self, cam: str, k: int, keys: list[int],
                         prompts: list[str]) -> dict:
         """RexOmni detection over the segment's key-frames: one batched
-        call; returns {frame_idx: extracted_predictions} (per-category lists
-        of {"type": "box", "coords": [x0, y0, x1, y1]} in absolute pixels,
-        no scores)."""
+        call; returns {frame_idx: extracted_predictions} — per-category
+        lists of {"type": "box", "coords": [x0, y0, x1, y1]} in absolute
+        pixels, no scores — hard-filtered by ``_refine_detections``
+        (duplicates merged; side prompts keep their side's box only)."""
         model = self._ensure_model()
         imgs = [self._load_keyframe(cam, k, t) for t in keys]
         results = model.inference(images=imgs, task="detection",
                                   categories=prompts)
         dets = {}
-        for t, res in zip(keys, results):
+        for i, (t, res) in enumerate(zip(keys, results)):
             preds = res["extracted_predictions"] if res["success"] else {}
+            notes = {}
+            if preds:
+                preds, notes = _refine_detections(preds, imgs[i].width)
             dets[str(t)] = preds
             n = sum(len(boxes) for boxes in preds.values())
-            print(f"    key-frame {t}: {n} detection(s)")
+            fired = ", ".join(f"{c}: {v}" for c, v in notes.items())
+            print(f"    key-frame {t}: {n} detection(s)"
+                  + (f"  [{fired}]" if fired else ""))
         return dets
 
 

@@ -33,13 +33,11 @@ Examples
     python tools/general_test/pipeline/run_e2e_init_points.py
         --keyframes-dir .../subtask_00/cam_head
 
-    # Re-run only 3b on the existing detections JSON (tuned params)
+    # Re-run only 3b on the existing detections JSON (tuned params).
+    # --skip-3a skips the RexOmni pass and reuses the detections JSON —
+    # ep{episode_idx:06d}.json must already be on disk (missing -> error)
     python tools/general_test/pipeline/run_e2e_init_points.py
         --keyframes-dir .../subtask_00/cam_head --skip-3a --top-k 64
-
-    # Skip RexOmni: 3b with SAM3 text-only prompts
-    python tools/general_test/pipeline/run_e2e_init_points.py
-        --keyframes-dir .../subtask_00/cam_head --no-rexomni
 """
 
 from __future__ import annotations
@@ -113,13 +111,11 @@ def parse_args(argv: list[str] | None = None):
                              "Step-3b prompt output already exists")
     parser.add_argument("--no-viz", action="store_true",
                         help="skip the Step-3b viz.png rendering")
-    run = parser.add_mutually_exclusive_group()
-    run.add_argument("--skip-3a", action="store_true",
-                     help="do not run Step 3a: reuse the existing detections "
-                          "JSON (Step 3b still reads it)")
-    run.add_argument("--no-rexomni", action="store_true",
-                     help="skip Step 3a and run Step 3b with SAM3 text-only "
-                          "prompts (no detections JSON)")
+    parser.add_argument("--skip-3a", action="store_true",
+                        help="do not run Step 3a: reuse the detections JSON "
+                             "of a previous run — the JSON must exist under "
+                             "--detections-dir / <out-dir>/detections "
+                             "(missing -> error)")
     parser.add_argument("--rexomni-env", default=REXOMNI_ENV_DIR,
                         help=f"RexOmni environment dir, relative to the repo "
                              f"root (default: {REXOMNI_ENV_DIR})")
@@ -170,14 +166,11 @@ def _build_3b_cmd(args, repo_root: Path) -> list[str]:
     cmd += ["--episode-idx", str(args.episode_idx)]
     if args.camera_key:
         cmd += ["--camera-key", args.camera_key]
-    cmd += ["--text-prompts", *args.text_prompts,
-            "--max-keyframes", str(args.max_keyframes),
+    cmd += ["--max-keyframes", str(args.max_keyframes),
             "--top-k", str(args.top_k),
             "--bbox-scale", str(args.bbox_scale),
             "--num-corresp", str(args.num_corresp),
             "--strategy", args.strategy]
-    if args.no_rexomni:
-        cmd += ["--no-rexomni"]
     if args.device:
         cmd += ["--device", args.device]
     if args.skip_done:
@@ -185,6 +178,18 @@ def _build_3b_cmd(args, repo_root: Path) -> list[str]:
     if args.no_viz:
         cmd += ["--no-viz"]
     return cmd
+
+
+def _detections_path(args) -> Path:
+    """The Step-3a detections JSON of the labelled episode (the path Step 3b
+    reads): ep{episode_idx:06d}.json under --detections-dir, else
+    <out-dir>/detections (default: <keyframes-dir>/../step3_output/
+    detections)."""
+    out = Path(args.out_dir) if args.out_dir \
+        else Path(args.keyframes_dir).parent / "step3_output"
+    det = Path(args.detections_dir) if args.detections_dir \
+        else out / "detections"
+    return det / f"ep{args.episode_idx:06d}.json"
 
 
 def _run(cmd: list[str], step_name: str) -> None:
@@ -206,9 +211,12 @@ def main() -> None:
     if not folder.is_dir():
         sys.exit(f"--keyframes-dir {folder} is not a directory")
     repo_root = Path(__file__).resolve().parents[3]
-    if not args.skip_3a and not args.no_rexomni:
+    if not args.skip_3a:
         _run(_build_3a_cmd(args, repo_root),
              "Step 3a — RexOmni detections (key-frame folder)")
+    elif not (det := _detections_path(args)).is_file():
+        sys.exit(f"--skip-3a: {det} missing — run Step 3a first (or drop "
+                 f"--skip-3a to run it now)")
     _run(_build_3b_cmd(args, repo_root),
          "Step 3b — SAM3 masks + RoMAv2 init points")
     print("\nstep 3 done", flush=True)

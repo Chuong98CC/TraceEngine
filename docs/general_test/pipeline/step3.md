@@ -29,7 +29,15 @@ columns of the sub-task's row in meta/subtasks.csv; folder mode: --text-prompts
 
 In dataset mode the prompts are **per sub-task** (recorded next to each
 sub-task's detections in the Step-3a JSON — there is no global prompt list),
-and the dataset must carry the `meta/subtasks.csv` annotations.
+and the dataset must carry the `meta/subtasks.csv` annotations. A sub-task's
+row is found through its **canonical label**, not its segment ordinal:
+Step 1 (`key_frames`) matches every segment to the ground-truth execution
+order and writes `subtask_labels.json` next to the key-frames (the
+canonical ids can run e.g. `[0, 2, 1, 3, 5, 4]` while the segments are
+numbered `subtask_00…`), and Step 3a reads that file — a key-frame
+extraction without it is refused (no silent ordinal fallback). See
+[`astribot_extract_frames.md`](../../astribot/astribot_extract_frames.md)
+for the label resolution.
 
 Two sub-steps, two environments — they **cannot share a process**:
 
@@ -55,7 +63,7 @@ run_e2e_init_points.py / run_step3_init_points.py  (drivers)
 | `scripts/general_test/infer_step3.sh` | wrapper of `run_e2e_init_points.py` | `python tools/general_test/pipeline/run_e2e_init_points.py --keyframes-dir "$1" "$@"` |
 | `tools/astribot/run_step3_init_points.py` | **episodes on the dataset** | Step 1 (extract the sub-task key-frames) + 3a + 3b; the dataset layer that drives the same tools (see [`docs/astribot/`](../../astribot/)) |
 | `tools/general_test/pipeline/run_object_detection.py` | 3a alone | episode layout or `--keyframes-dir` |
-| `tools/general_test/pipeline/run_object_init_points.py` | 3b alone | episode layout or `--keyframes-dir`; `--no-rexomni` for SAM3 text-only prompts (no 3a JSON) |
+| `tools/general_test/pipeline/run_object_init_points.py` | 3b alone | episode layout or `--keyframes-dir`; reads the prompts + key-frames from the Step-3a detections JSON (no JSON-less fallback) |
 
 ## Quickstart
 
@@ -73,19 +81,33 @@ python tools/astribot/run_step3_init_points.py \
     --data-root /data/astri_making_coffee_v1 --episode-idxes 0
 
 # Re-run only 3b with tuned params, reusing the saved key-frames + detections
+# (--skip-3a requires the detections JSON on disk — missing -> error, in
+# both drivers: no silent text-only fallback)
 python tools/general_test/pipeline/run_e2e_init_points.py \
     --keyframes-dir .../subtask_00/cam_head --skip-3a --top-k 64
 
-# Skip RexOmni entirely: 3b with SAM3 text-only prompts
-python tools/general_test/pipeline/run_e2e_init_points.py \
-    --keyframes-dir .../subtask_00/cam_head --no-rexomni
+# Dataset-mode re-runs additionally gate --skip-extract: the reused
+# key-frames must carry their Step-1 subtask_labels.json per episode
+# (missing -> error, in the episode driver: no ordinal fallback)
+python tools/astribot/run_step3_init_points.py \
+    --repo-id Kronze157/astri_making_coffee_vlva \
+    --data-root /data/astri_making_coffee_v1 --episode-idxes 0 \
+    --skip-extract --skip-3a --top-k 64
 ```
 
 ## Expected output
 
-Step 3a — one JSON per episode, the raw RexOmni predictions (Step 3b reads
-it). Every sub-task entry records its `prompts` next to its `detections`
-(the detections are keyed by prompt text):
+Step 3a — one JSON per episode, the hard-filtered RexOmni predictions
+(Step 3b reads it). Every sub-task entry records its `prompts` next to its
+`detections` (the detections are keyed by prompt text). Per category per
+frame two hard filters run after inference (see `_refine_detections` in
+the tool): boxes that duplicate one instance — same image half, centers
+within 20% of the image width — merge into their union (one hand
+occasionally fires twice), and when the prompt names a side (`left`/`right`
+robot arm) only that side's box is kept (the model often returns both arms
+for a side prompt). The JSON therefore holds at most one box per
+side-named category per frame; the tool's per-key-frame log notes what
+fired (`merge 2->1`, `left-keep 2->1`):
 
 ```
 <out-dir>/detections/ep{episode_idx:06d}.json
@@ -111,8 +133,11 @@ uniform, so downstream consumers always find the same files.
 - [ ] Exit code 0.
 - [ ] Step 3a wrote `<out-dir>/detections/ep*.json` with one entry per
       key-frame; the frame indexes inside match the `frame_<idx>` stems;
-      in dataset mode each sub-task entry carries its `prompts` from
-      `meta/subtasks.csv` ([object, manipulator] of the sub-task's row).
+      in dataset mode each sub-task entry carries its `subtask_index`
+      (its canonical label from `subtask_labels.json`) and the `prompts`
+      of that label's row in `meta/subtasks.csv` ([object, manipulator] —
+      e.g. segment `subtask_01` labelled `2` gets row 2's prompts, not
+      row 1's).
 - [ ] Step 3b wrote one `init_points/` folder per prompt with all four files
       (`init_points.npz`, `masks_rle.json`, `init_points.json`, `viz.png`).
 - [ ] `init_points.npz` keypoints are `(K, N, 2)` — K ≤ `--top-k` points
@@ -122,8 +147,12 @@ uniform, so downstream consumers always find the same files.
       (mask-constrained RoMAv2 sampling).
 - [ ] Re-run with `--skip-3a` reuses the detections JSON (no new detection
       pass — 3a is skipped).
-- [ ] With `--no-rexomni`, 3b runs on SAM3 text-only prompts and still
-      produces the same output layout.
+- [ ] `--skip-3a` without the detections JSON on disk exits with an error
+      naming the missing episode(s) — no silent text-only fallback.
+- [ ] Episode driver: `--skip-extract` without the key-frames or their
+      `subtask_labels.json` on disk exits with an error asking to drop
+      `--skip-extract` — Step 3a never falls back to segment-ordinal
+      prompts.
 
 ## Module pointers
 

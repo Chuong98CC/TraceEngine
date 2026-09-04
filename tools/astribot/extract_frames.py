@@ -11,7 +11,9 @@ prefers the inferred ones) — and writes under <out-dir>:
   subtask_splits.json + gripper plot.
 - ``key_frames``: jpgs of the episode's first/last frame, its gripper key
   frames and each sub-task segment's boundary frames → <out-dir>/
-  key_frames/<episode>/subtask_XX/<camera>/frame_*.jpg (feeds Step 3).
+  key_frames/<episode>/subtask_XX/<camera>/frame_*.jpg (feeds Step 3), plus
+  subtask_labels.json mapping every segment to its canonical sub-task label
+  (by ground-truth execution order — Step 3a reads it for the prompts).
 - ``videos``: one mp4 per sub-task segment per camera, cut from the episode
   videos (ffmpeg re-encode at the exact split frames) → <out-dir>/
   subtask_videos/<episode>/<camera>/.
@@ -62,6 +64,8 @@ from lerobot.datasets import LeRobotDataset, LeRobotDatasetMetadata
 from tqdm import tqdm
 
 from utils.depth_utils import save_depth_lz4
+from utils.keyframe_utils import SUBTASK_LABELS_FILE, SUBTASK_ORDER_FILE
+from utils.keyframe_utils import load_subtask_meta
 from utils.visualize.visualize_mask import to_pil
 
 # gripper values above this threshold count as 1 (closed), otherwise 0
@@ -651,6 +655,92 @@ class DataExtract:
                 return {"split_frames": splits}
         return self._load_splits_json()
 
+    def _ordered_subtask_ids(self, df):
+        """Canonical subtask ids of the episode in execution order: the
+        distinct values of the frame table's subtask_index column in time
+        order. [] when the dataset has no subtask_index column. The ids are
+        the subtasks.csv keys — they need not equal the segment ordinals,
+        the episode executes them in this order (e.g. [0, 2, 1, 3, 5, 4])."""
+        if "subtask_index" not in df.columns:
+            return []
+        v = df["subtask_index"].to_numpy()
+        keep = np.concatenate(([True], v[1:] != v[:-1]))
+        return [int(x) for x in v[keep]]
+
+    def _annotation_subtask_order(self):
+        """Canonical subtask ids of the current episode in execution order
+        from the dataset's lerobot_annotations.json (meta/): every ordered
+        entry's label text is matched against the subtask column of the
+        hand-edited subtasks.csv companion to recover its canonical id
+        (None when no row carries the label). [] when the dataset has no
+        annotations file or it lists no sub-tasks for the episode."""
+        path = os.path.join(self.args.data_root, "meta", SUBTASK_ORDER_FILE)
+        if not os.path.isfile(path):
+            return []
+        with open(path) as f:
+            data = json.load(f)
+        labels = [str(s.get("label", "")).strip()
+                  for s in (data.get("episodes") or {})
+                  .get(str(self.ep_idx), {}).get("subtasks") or []]
+        if not labels:
+            return []
+        meta = load_subtask_meta(self.args.data_root)
+        ids = []
+        for label in labels:
+            hits = [i for i, r in meta.items()
+                    if str(r.get("subtask", "")).strip() == label]
+            if not hits:
+                print(f"  [labels] annotation sub-task {label!r} matches no "
+                      f"meta/subtasks.csv row — its segment stays unlabelled")
+                ids.append(None)
+            else:
+                ids.append(hits[0])
+        return ids
+
+    def _label_keyframe_segments(self, bounds, df):
+        """Resolve the canonical dataset label of every key-frame segment —
+        segment j is the j-th ground-truth sub-task in execution order — and
+        write them as subtask_labels.json next to the frames (the file Step
+        3a reads to prompt each segment with its own sub-task's object/
+        manipulator). The order comes from the subtask_index column runs
+        when the dataset has one, else from the lerobot_annotations.json
+        order, else the segment ordinal is assumed. Prints the per-episode
+        resolution and any order mismatches (segments beyond the order stay
+        unlabelled; unused ground-truth sub-tasks are reported)."""
+        order = self._ordered_subtask_ids(df)
+        source = "ground_truth"
+        if not order:
+            order = self._annotation_subtask_order()
+            source = "annotations"
+        if not order:
+            order = list(range(len(bounds)))
+            source = "ordinal"
+            print("  [labels] no ground-truth order (no subtask_index "
+                  "column / lerobot_annotations.json) — assuming the "
+                  "segment ordinal is the canonical sub-task label")
+        labels = [order[j] if j < len(order) else None
+                  for j in range(len(bounds))]
+        if len(labels) > len(order):
+            print(f"  [labels] {len(labels) - len(order)} segment(s) beyond "
+                  f"the ground-truth order of {len(order)} sub-task(s): "
+                  f"unlabelled")
+        elif len(labels) < len(order):
+            print(f"  [labels] ground-truth sub-task(s) {order[len(labels):]}"
+                  f" have no segment (missed split?)")
+        print(f"  [labels] segment labels ({source}): {labels}")
+        self._save_subtask_labels(labels, source)
+
+    def _save_subtask_labels(self, labels, source):
+        """Record the per-segment canonical labels as subtask_labels.json in
+        the episode's key_frames folder: {segment ordinal: label}, null for
+        a segment beyond the ground-truth order."""
+        data = {"episode": self.ep_idx, "source": source,
+                "segments": {str(k): (int(lb) if lb is not None else None)
+                             for k, lb in enumerate(labels)}}
+        path = os.path.join(self._episode_dir(), SUBTASK_LABELS_FILE)
+        with open(path, "w") as f:
+            json.dump(data, f, indent=2)
+
     def _plot_gripper_state(self, frames, vals, subtask_idxes, smooth,
                             key_idxes, split_idxes):
         """Plot the per-frame gripper state columns, raw and low-pass
@@ -933,12 +1023,15 @@ class DataExtract:
             # boundaries under the chosen split source, ground-truth unless
             # --use-inferred-splits) plus the key frames detected by
             # detect_subtask, each saved under the sub-task segment it
-            # belongs to (see _save_frames)
+            # belongs to (see _save_frames); the segment labels resolved by
+            # ground-truth execution order land in subtask_labels.json (see
+            # _label_keyframe_segments)
             splits = self._load_splits()["split_frames"]
             bounds = self._segment_bounds(splits)
             seg_frames = [lo for lo, _ in bounds] + [hi - 1 for _, hi in bounds]
             frame_idxes = sorted(set(seg_frames + self._load_key_frames()))
             self._save_frames(frame_idxes, splits)
+            self._label_keyframe_segments(bounds, df)
         elif self.args.mode == "videos":
             self._write_subtask_videos(self._load_splits()["split_frames"])
         elif self.args.mode == "frames":

@@ -270,8 +270,21 @@ def unproject_bbox_queries(x0, y0, x1, y1, grid_x, grid_y, depth0, intr0, extr0,
     return unproject_xy_queries(xy, depth0, intr0, extr0, device=device)
 
 
-def load_resized_batch(file_list, npz_dir, start, end, inference_h, inference_w):
-    """Load frames [start, end), resize to the inference resolution, scale intrinsics.
+def resize_batch_to_inference(video_u8: torch.Tensor, geo: dict,
+                              inference_h: int, inference_w: int):
+    """Resize an already-loaded batch to the inference resolution.
+
+    The resize/batch math of ``load_resized_batch``, split out so callers
+    that decode their frames online (no image files on disk, e.g. the
+    Astribot step-4 tracker) can reuse it: same bilinear frame resize to
+    (inference_h, inference_w), same valid-depth-preserving depth resize,
+    same (inf - 1)/(orig - 1) intrinsics scaling.
+
+    Args:
+        video_u8: (T, 3, H0, W0) uint8 CPU frames (torchvision tensor-space).
+        geo: load_npz_batch-style dict with ``depth`` (T, H0, W0),
+            ``intrs`` (T, 3, 3) and ``extrs`` (T, 4, 4) at the frame scale.
+        inference_h, inference_w: target resolution.
 
     Returns CPU tensors:
       video: (T, 3, H, W) float32 in [0, 1]
@@ -279,14 +292,11 @@ def load_resized_batch(file_list, npz_dir, start, end, inference_h, inference_w)
       intrs: (T, 3, 3) float32, fx/fy/cx/cy scaled to the inference resolution
       extrs: (T, 4, 4) float32
     """
-    video = load_batch_frames(file_list, start, end)          # (T,3,H0,W0) uint8
-    geo = load_npz_batch(npz_dir, file_list, start, end)
-    orig_h, orig_w = video.shape[1:3]
-
+    orig_h, orig_w = video_u8.shape[1:3]
     video_rs = torch.stack([
-        F_resize(video[t], (inference_h, inference_w),
+        F_resize(video_u8[t], (inference_h, inference_w),
                  interpolation=_v2.InterpolationMode.BILINEAR, antialias=False)
-        for t in range(video.shape[0])])
+        for t in range(video_u8.shape[0])])
     depths_rs = np.stack([
         resize_depth_bilinear(geo["depth"][t], (inference_w, inference_h))
         for t in range(geo["depth"].shape[0])])
@@ -302,6 +312,20 @@ def load_resized_batch(file_list, npz_dir, start, end, inference_h, inference_w)
     intrs_t = torch.from_numpy(intrs).float()
     extrs_t = torch.from_numpy(geo["extrs"]).float()
     return video_t, depths_t, intrs_t, extrs_t
+
+
+def load_resized_batch(file_list, npz_dir, start, end, inference_h, inference_w):
+    """Load frames [start, end), resize to the inference resolution, scale intrinsics.
+
+    Returns CPU tensors:
+      video: (T, 3, H, W) float32 in [0, 1]
+      depths: (T, H, W) float32
+      intrs: (T, 3, 3) float32, fx/fy/cx/cy scaled to the inference resolution
+      extrs: (T, 4, 4) float32
+    """
+    video = load_batch_frames(file_list, start, end)          # (T,3,H0,W0) uint8
+    geo = load_npz_batch(npz_dir, file_list, start, end)
+    return resize_batch_to_inference(video, geo, inference_h, inference_w)
 
 
 def compute_global_depth_roi(npz_dir, file_list, inference_h, inference_w):

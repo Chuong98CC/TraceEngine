@@ -44,6 +44,44 @@ The four modes are independent: `detect_subtask` only reads the tabular data
   saved under the sub-task segment its frame belongs to (an episode without
   splits lands everything in `subtask_00`).
 
+## How the segment labels are resolved
+
+The segment folders are numbered by **ordinal** (`subtask_00`, `subtask_01`,
+… in time order), but the canonical dataset sub-task ids need not equal the
+ordinals — the frame-table `subtask_index` of an episode can run e.g.
+`[0, 2, 1, 3, 5, 4]` (that is the episode's ground-truth execution order).
+The `key_frames` mode therefore resolves the canonical label of every
+segment and writes it as `subtask_labels.json` next to the frames:
+
+```
+<out_dir>/key_frames/ep000000/subtask_labels.json
+{ "episode": 0,
+  "source": "ground_truth",                 # ground_truth | annotations | ordinal
+  "segments": { "0": 0, "1": 2, "2": 1, "3": 3, "4": 5, "5": 4 } }
+```
+
+Segment `j` gets the label of the *j-th ground-truth sub-task in execution
+order* (matching by order, never by frame overlap — under
+`--use-inferred-splits` the inferred boundaries may not line up with the
+ground truth, but the order does). The label sources, in preference order:
+
+1. **`ground_truth`** — the distinct values of the `subtask_index` column
+   in time order (exact canonical ids, no joins).
+2. **`annotations`** — the per-episode order of the dataset's
+   `meta/lerobot_annotations.json`, each entry's label text matched against
+   the `subtask` column of the hand-edited `meta/subtasks.csv` to recover
+   its canonical id. Used only when the dataset has no `subtask_index`
+   column; an entry matching no CSV row stays unlabelled.
+3. **`ordinal`** — the segment ordinal is assumed to be the label (printed
+   note) when neither source exists.
+
+Segments beyond the ground-truth order (extra inferred splits) are recorded
+as `null` and reported, as are ground-truth sub-tasks with no segment.
+Step 3a (`run_object_detection.py`) requires `subtask_labels.json` and reads
+the `[object, manipulator]` prompts through it — without the file it
+refuses to run, because prompting by ordinal would silently pick the wrong
+sub-task's prompts.
+
 ## Requirements
 
 - A **local copy** of the dataset (LeRobotDataset layout: `meta/`, per-episode
@@ -86,7 +124,9 @@ python tools/astribot/extract_frames.py \
 
 Output: `<out_dir>/key_frames/ep000000/subtask_XX/<camera>/frame_<idx>.jpg`
 of the episode's first, last and key frames (key frames from
-`detect_subtask`), grouped by the sub-task segment each frame belongs to.
+`detect_subtask`), grouped by the sub-task segment each frame belongs to,
+plus the per-segment `subtask_labels.json` (see “How the segment labels are
+resolved” above).
 
 ### 3. Cut one mp4 per sub-task segment
 
