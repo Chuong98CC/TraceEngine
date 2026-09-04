@@ -1,0 +1,7 @@
+subtask_index,subtask," manipulator"," object"," destination"
+0,use the left hand to pick the brown cup and place it on the drip tray beneath the coffee maker's dispensing spout,"left robot arm's black grippers"," brown cup"," drip tray of coffee maker"
+1,use the left hand to pick the brown cup and place the cup to the middle of the table,"left robot arm's black grippers"," brown cup"," middle of table"
+2,use the left hand to press the middle button on the coffee maker's control panel,"left robot arm's black grippers"," coffee maker's control panel",coffee maker's control panel
+3,use the right hand to pick the brown cup and place it beneath the emerald green beverage dispenser,"right robot arm's black grippers"," brown cup"," beneath the emerald green beverage dispenser"
+4,use the right hand to pick up the brown cup and place it onto the tray,"right robot arm's black grippers"," brown cup"," transparent plastic tray"
+5,use the right hand to press the black lever on the emerald green beverage dispenser,"right robot arm's black grippers"," black lever of the emerald green beverage dispenser",emerald green beverage dispenser
