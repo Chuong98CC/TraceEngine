@@ -286,7 +286,7 @@ exists, or from the gripper-inferred `subtask_splits.json` of
 splits when both exist).
 
 One ready-to-run script per step under `scripts/astribot/` (same flags as
-the tools they wrap). Note you need to create a [subtasks.csv](assets/subtasks.csv) to define the text prompt for objects before running.
+the tools they wrap). Note you need to create a [subtasks.csv](assets/subtasks.csv) in <data_root>/meta/subtasks.csv to define the text prompt for objects before running.
 
 ```bash
 # Step 1 — infer the sub-task split frames from the gripper state
