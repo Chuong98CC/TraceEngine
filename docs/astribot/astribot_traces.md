@@ -21,21 +21,31 @@ The tracking counterpart of `tools/general_test/module/infer_tapip3d.py`:
 **Two roles, two passes.** The sub-task's prompts are split by role —
 matching the prompt text to the [object, manipulator] entries of the
 sub-task's row in the dataset's `meta/subtasks.csv` (the same source Step
-3a/3b use). Each role is tracked in its **own independent TAPIP3D pass**,
-anchored differently:
+3a/3b use). Each role is tracked in its **own independent TAPIP3D pass**.
+Step 3b samples the **object** keypoints only between the sub-task's 2nd
+and 2nd-to-last key-frame (the gripper close/open pair that carries the
+object), and each pass traces the Step-2 stems inside its prompts'
+key-frame envelope:
 
-| Role | Anchor | Tracked sequence |
+| Role | Step-3 key-frames | Tracked sequence (Step-2 stems) |
 |---|---|---|
-| **manipulator** (e.g. the gripper) | the sub-task's **first frame** (its first Step-2 stem) | first frame → sub-task end |
-| **object** (e.g. the cup) | the sub-task's **first key-frame that carries usable object keypoints** | that key-frame → sub-task end (leading stems skipped when the sub-task start has none) |
+| **manipulator** (e.g. the gripper) | all (sub-task start → last frame) | sub-task's first stem → last stem |
+| **object** (e.g. the cup) | close → open (2nd → 2nd-to-last) | last stem ≤ close → first stem ≥ open |
+
+The window rule is role-agnostic (`span_stems` in `utils/keyframe_utils.py`):
+from the last stem at-or-before the earliest first key-frame to the first
+stem at-or-after the latest last key-frame. The object therefore starts on
+the stem **right before the close key-frame** — the object is static until
+the close, so its close-frame pixels are exact there (and the gripper has
+not occluded them yet) — and ends on the stem **right after the open**.
 
 A keypoint is *usable* on a key-frame when it is a surviving Step-3
 keypoint lying inside that key-frame's SAM3 mask (no mask on the frame ->
 unconstrained) with **valid depth** at its pixel. When no key-frame of the
 sub-task yields any usable point for a role, the role is skipped with the
 reason recorded (prompt `metadata.json`, `status: "empty"`). Prompts whose
-text matches neither annotation column are tracked too (warned, anchored
-like the object).
+text matches neither annotation column are tracked too (warned), in a
+separate unlabelled pass over their own key-frames.
 
 **Query budget (exact-N).** The shipped iteration program
 (`weights/tapip3d/tapip3d_iteration_1088_bf16.pt2`) has a **fixed query
@@ -63,13 +73,14 @@ anchor queries are unprojected with the anchor stem's saved depth + pose.
 recorded (`camera_key` in each prompt's `init_points.json`), and the
 geometry folder must exist for it (`depth_pose/.../subtask_XX/depth_<cam>`
 — run `run_step2_depth_stream.py` for that camera; a stereo-only Step-2
-run does not cover a mono Step-3 camera). A key-frame can only anchor a
-pass when it is a Step-2 stem (has geometry): the anchor scan runs over
-the role's key-frames that are stems, starting from the sub-task's first
-stem. The tracked sequence is *whatever Step-2 stems are saved* from the
-anchor on — if Step 2 is later modified to stream other per-sub-task
-frame ranges (e.g. at the key-frame indices), this tool follows the saved
-stems automatically.
+run does not cover a mono Step-3 camera). A pass traces only Step-2
+stems (geometry exists there). Its window is the stems inside its
+prompts' key-frame envelope — the last stem at-or-before the earliest
+first key-frame through the first stem at-or-after the latest last
+key-frame (`span_stems`) — and the anchor is the window's first stem
+where a prompt has usable keypoints. If Step 2 is later modified to
+stream other per-sub-task frame ranges (e.g. at the key-frame indices),
+this tool follows the saved stems automatically.
 
 ## Usage
 
@@ -105,9 +116,9 @@ TAPIP3D encoder/iteration graphs load once per run.
             └── …
 ```
 
-`T` = the number of tracked stems (the sub-task's Step-2 steps from the
-anchor on, absolute indices listed in the prompt `metadata.json` under
-`steps`), `Q` = the prompt's tracked keypoints (<= 64). The pass arrays
+`T` = the number of tracked stems (the trace window's Step-2 stems from
+the anchor on, absolute indices listed in the prompt `metadata.json`
+under `steps`), `Q` = the prompt's tracked keypoints (<= 64). The pass arrays
 (including the support queries) are sliced to each prompt's own queries;
 prompts skipped by a role carry a `metadata.json` with
 `status: "empty"` + `empty_reason` only (the Step-3b convention).
@@ -146,12 +157,15 @@ prompts skipped by a role carry a `metadata.json` with
   e.g. in order `[0, 2, 1, 3, 5, 4]`); a segment whose JSON carries no
   label is tracked unlabelled (anchored like the object) with a warning —
   never role-matched by the segment ordinal.
-- **Anchor key-frames must be Step-2 stems.** Step-1 key-frames include
-  the sub-task boundary frames, and Step-2 streams from the sub-task's
-  first frame at `--stride` 4 — in the current pipeline only the
-  sub-task's first frame (a boundary key-frame) is generally a stem, so
-  both roles usually anchor there (the object rule only advances when its
-  start key-frame carries no usable points but a later stem does).
+- **Anchors sit on the stem grid; boundary key-frames usually don't.**
+  Step-2 streams at `--stride` 4, so a prompt's key-frames are generally
+  *not* stems — except the sub-task's first frame (a boundary key-frame),
+  which is always a stem. The manipulator pass therefore anchors on the
+  sub-task's first stem as before; the object pass anchors on the stem
+  right before the close key-frame, where the object is still static (its
+  close-frame pixels are exact there, and the approach has not occluded
+  them). When that stem carries no usable keypoints the anchor advances to
+  the next window stem that does.
 - **Sequences shorter than the 16-frame window** (`seq_len` of the
   exported encoder) run no real window: the output stays at the anchor
   points with all `visibs` false — a warning is printed.

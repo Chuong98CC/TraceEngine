@@ -82,6 +82,10 @@ RoMAv2 is the **keypoint-matching stage of Step 3 (Sampling Keypoints)** of
 the repo README pipeline: for each subtask, the objects detected by RexOmni
 and segmented by SAM3 on the key-frames are cropped (bounding box enlarged by
 a scale), and `infer_romav2.py` finds the keypoints that match consistently
-**across the key-frames** of the subtask. Only the top-k keypoints that fall
-inside the object masks are kept; TAPIP3D then tracks them over the whole
-subtask (Step 4, see [`tapip3d.md`](tapip3d.md)).
+**across the key-frames** of the subtask (dataset mode: an object prompt is
+matched across its gripper close/open key-frames only — the sub-task's
+2nd..2nd-to-last — while the manipulator spans all of them; folder mode,
+which records no roles, always spans all of them). Only the top-k keypoints
+that fall inside the object masks are kept; TAPIP3D then tracks them (Step
+4, see [`tapip3d.md`](tapip3d.md)): the manipulator over the whole subtask,
+the object over its close/open transport.

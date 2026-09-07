@@ -125,7 +125,10 @@ Rex-Omni is the **object-detection stage of Step 3 (Sampling Keypoints)** of
 the repo README pipeline: for each subtask, the text prompts (the
 manipulator/object of the subtask's row in the dataset's
 `meta/subtasks.csv`, e.g. `["brown cup", "left robot arm's grippers"]`)
-drive the detection on the key-frames (start / end frames included). The
+drive the detection on the key-frames (start / end frames included). In
+dataset mode each prompt is recorded in the detections JSON with its role
+(`prompt_roles` — the csv column it was read from), which Step 3b uses to
+sample object keypoints only between the close/open key-frames. The
 resulting bounding boxes, together with their text prompts, are passed to
 SAM3 to segment the object masks (see [`sam3.md`](sam3.md)). Folder-mode
 runs without a dataset pass the prompts explicitly with `--text-prompts`.
