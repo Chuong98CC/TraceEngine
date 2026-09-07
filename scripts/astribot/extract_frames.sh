@@ -10,4 +10,6 @@ python tools/astribot/extract_frames.py \
     --repo-id $REPO_ID \
     --data-root $DATA_ROOT \
     --episode-idxes 0 \
-    --mode detect_subtask
+    --use-inferred-splits \
+    --mode frames --interval 4 --max-frames 32 -c 0 \
+    # --mode detect_subtask
