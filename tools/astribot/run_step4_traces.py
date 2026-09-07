@@ -16,14 +16,20 @@ the geometry comes from the saved depth_pose npz/lz4 files:
     │  coords + visibs per prompt  │
     └──────────────────────────────┘
 
-The two roles anchor differently:
+Each role pass traces its prompts over the Step-2 stems inside a window
+bounded by the prompts' Step-3 key-frames (span_stems): from the last
+stem at-or-before the earliest first key-frame to the first stem
+at-or-after the latest last key-frame.
 
-- the **manipulator** keypoints are tracked from the first frame of the
-  sub-task (its first Step-2 stem);
-- the **object** keypoints are tracked from the sub-task's first key-frame
-  that carries usable object keypoints (leading stems are skipped when the
-  sub-task start has none, and the role is skipped when no key-frame of the
-  sub-task has any).
+- the **manipulator** key-frames span the whole sub-task ([start frame ..
+  last frame]), so its pass tracks from the sub-task's first stem to its
+  last, as before;
+- the **object** key-frames span only the transport ([gripper close ..
+  gripper open] — Step 3b samples between the sub-task's 2nd and 2nd-to-
+  last key-frame), so its pass tracks the stems from just before the
+  close to just after the open; the object is static outside that span,
+  so its close-frame keypoints stay exact on the stem right before the
+  close (the gripper has not occluded them yet).
 
 A keypoint is *usable* on a key-frame when it is a surviving Step-3
 keypoint lying inside that key-frame's SAM3 mask (masks[j].any() missing
@@ -31,8 +37,8 @@ keypoint lying inside that key-frame's SAM3 mask (masks[j].any() missing
 dataset annotations meta/subtasks.csv ([object, manipulator] of the
 sub-task's row): Step 3a recorded the segment's canonical sub-task label
 (subtask_index) in the detections JSON, and that label resolves the row —
-a segment without a recorded label is tracked unlabelled (anchored like
-the object), never role-matched by the segment ordinal.
+a segment without a recorded label is tracked unlabelled, never
+role-matched by the segment ordinal.
 
 The shipped TAPIP3D iteration graph has a fixed query count (1088), so
 each pass tracks up to 64 role keypoints + a full-frame support grid
@@ -78,7 +84,7 @@ from flow_models.tapip3d.utils._grid_utils import get_grid_queries
 from tools.astribot.extract_frames import DataExtract
 from utils.depth_utils import load_depth_lz4
 from utils.file_io.image_io import to_image_tensor
-from utils.keyframe_utils import load_subtask_meta
+from utils.keyframe_utils import load_subtask_meta, span_stems
 from utils.streaming_utils import (
     compute_global_depth_roi,
     load_npz_batch,
@@ -109,9 +115,10 @@ def parse_args(argv: list[str] | None = None):
     parser = argparse.ArgumentParser(
         description="Step 4 online: track the Step-3 keypoints with TAPIP3D "
                     "over the Step-2 depth + pose outputs — one pass per role "
-                    "(object anchored at the sub-task's first usable key-frame, "
-                    "manipulator at the sub-task's first frame), RGB frames "
-                    "decoded online from the dataset."
+                    "(each pass traces the Step-2 stems around its prompts' "
+                    "key-frames: the object's close..open transport, the "
+                    "manipulator's whole sub-task), RGB frames decoded online "
+                    "from the dataset."
     )
     parser.add_argument("--repo-id", "-id", required=True,
                         help="dataset repo id as seen by LeRobotDataset")
@@ -387,27 +394,27 @@ class SubtaskTraceExtract(DataExtract):
 
     # --- anchor / query assembly -------------------------------------------
 
-    def _candidate_frames(self, prompts: list[dict]) -> list[int]:
-        """Chronological anchor candidates of one role pass: the sub-task's
-        first Step-2 stem first (the manipulator's rule — the object pass
-        finds the same frame when its keypoints are usable there), then the
-        role's key-frames that are Step-2 stems."""
-        stems = self.seg_stems
-        cands = [stems[0]]
+    def _candidate_frames(self, prompts: list[dict],
+                          window: list[int]) -> list[int]:
+        """Chronological anchor candidates of one role pass inside its trace
+        window: the window's first stem, then the prompts' key-frames that
+        are stems of the window."""
+        cands = [window[0]]
         for t in sorted({int(i) for p in prompts
                          for i in p["frame_indices"]}):
-            if t in stems and t not in cands:
+            if t in window and t != cands[0]:
                 cands.append(t)
         return cands
 
     def _usable_at(self, prompt: dict, kf_abs: int, depth: np.ndarray):
         """(rows, px_keyframe, px_depth) of a prompt's keypoints usable on
-        the key-frame (Step-2 stem) kf_abs; empty rows when the key-frame
-        is not among the prompt's key-frames or nothing is usable there."""
+        the Step-2 stem kf_abs: the prompt's own key-frame column when the
+        stem is one of its key-frames, else the first column's keypoints
+        tested against kf_abs's depth — valid for the window's leading stem
+        (at-or-before the first key-frame), where the object is still
+        static. Empty rows when nothing is usable there."""
         kfs = list(prompt["frame_indices"])
-        if kf_abs not in kfs:
-            return np.empty(0, dtype=np.int64), None, None
-        j = kfs.index(kf_abs)
+        j = kfs.index(kf_abs) if kf_abs in kfs else 0
         return _row_pixels(prompt["keypoints"], prompt["masks"], j, depth,
                            MAX_OBJECT_QUERIES)
 
@@ -512,7 +519,7 @@ class SubtaskTraceExtract(DataExtract):
             if role is None:
                 print(f"    [{p['slug']}] warning: prompt {p['prompt']!r} "
                       f"matches no object/manipulator entry of sub-task {k}; "
-                      f"anchoring it like the object")
+                      f"tracking it in the unlabelled pass")
             roles.setdefault(role, []).append(p)
         # object and manipulator first, then any unlabelled prompts
         seg_report = {"episode": int(self.ep_idx), "subtask": int(k),
@@ -538,8 +545,9 @@ class SubtaskTraceExtract(DataExtract):
     def _process_role(self, role: str | None, prompts: list[dict],
                       seg_report: dict) -> None:
         """One TAPIP3D pass for a role: pick the anchor key-frame, assemble
-        the exact-N queries and track the role's keypoints over the stems
-        from the anchor on. Records per-prompt results into seg_report."""
+        the exact-N queries and track the role's keypoints over the trace
+        window's stems from the anchor on. Records per-prompt results into
+        seg_report."""
         k = self.k
         label = role or "unlabelled"
         pdirs = [str(Path(self.trace_root) / f"ep{self.ep_idx:06d}"
@@ -556,11 +564,19 @@ class SubtaskTraceExtract(DataExtract):
                        if not (Path(d) / "coords.npy").is_file()]
             pdirs = [d for d in pdirs if not (Path(d) / "coords.npy").is_file()]
 
-        # --- anchor: first candidate frame with usable keypoints ------------
+        # --- trace window + anchor: first candidate with usable rows --------
+        # The pass traces the stems inside its prompts' key-frame envelope
+        # (span_stems): the object's [close .. open] transport gets the stem
+        # right before the close through the stem right after the open; a
+        # full-span prompt keeps the whole sub-task (as before).
+        window = span_stems(
+            self.seg_stems,
+            [int(p["frame_indices"][0]) for p in prompts],
+            [int(p["frame_indices"][-1]) for p in prompts])
         depth = None
         anchor_abs = None
         usable: dict[str, tuple] = {}
-        for cand in self._candidate_frames(prompts):
+        for cand in self._candidate_frames(prompts, window):
             depth, intrs, extr = _geometry_at(self.seg_depth_dir, cand)
             for p in prompts:
                 usable[p["slug"]] = self._usable_at(p, cand, depth)
@@ -568,8 +584,8 @@ class SubtaskTraceExtract(DataExtract):
                 anchor_abs = cand
                 break
         if anchor_abs is None:
-            reason = "no usable keypoints on any key-frame of the " \
-                     "sub-task's Step-2 steps"
+            reason = "no usable keypoints on the pass's candidate frames " \
+                     f"(window {window[0]}..{window[-1]})"
             print(f"  [subtask {k:02d}] {label} pass: empty ({reason})")
             for p, d in zip(prompts, pdirs):
                 self._save_empty(p, role, d, reason, seg_report)
@@ -616,8 +632,8 @@ class SubtaskTraceExtract(DataExtract):
               f"+ {need} support queries, anchor {anchor_abs} "
               f"(seed {pass_seed})")
 
-        # --- sequence: Step-2 stems from the anchor on ------------------------
-        steps = self.seg_stems[self.seg_stems.index(anchor_abs):]
+        # --- sequence: the trace window's stems from the anchor on ------------
+        steps = window[window.index(anchor_abs):]
         if len(steps) < self._pt2.seq_len:
             print(f"    warning: {len(steps)} steps < the {self._pt2.seq_len}-"
                   f"frame window; the trace will stay at the anchor points "
