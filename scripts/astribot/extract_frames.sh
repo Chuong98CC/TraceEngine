@@ -5,11 +5,14 @@
 # --use-inferred-splits from the Step-2 commands).
 DATA_ROOT=/data/astri_making_coffee_v1
 REPO_ID=Kronze157/astri_making_coffee_vlva
+MODE=${1:-frames}  # frames | detect_subtask
+echo "Please select the mode from the following options: detect_subtask| key_frames | frames | videos"
+echo "Extracting frames for $REPO_ID from $DATA_ROOT in mode $MODE"
 
 python tools/astribot/extract_frames.py \
     --repo-id $REPO_ID \
     --data-root $DATA_ROOT \
     --episode-idxes 0 \
     --use-inferred-splits \
-    --mode frames --interval 4 --max-frames 32 -c 0 \
+    --mode $MODE --interval 4 --max-frames 32 -c 0 \
     # --mode detect_subtask

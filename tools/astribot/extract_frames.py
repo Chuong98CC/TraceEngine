@@ -635,7 +635,7 @@ class DataExtract:
         path = self._split_file_path()
         if not os.path.isfile(path):
             raise FileNotFoundError(
-                f"{path} missing: run --mode detect_subtask first "
+                f"{path} missing: run scripts/astribot/extract_frames.sh --mode detect_subtask first "
                 "(--dedup-tasks skips episodes whose task already has output)")
         with open(path) as f:
             return json.load(f)

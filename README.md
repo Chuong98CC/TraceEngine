@@ -291,11 +291,14 @@ the tools they wrap). Note you need to create a [subtasks.csv](assets/subtasks.c
 ```bash
 # Step 1 — infer the sub-task split frames from the gripper state
 # (optional when the dataset's ground-truth subtask_index column is used)
-bash scripts/astribot/extract_frames.sh
+bash scripts/astribot/extract_frames.sh detect_subtask
 
 # Step 2 — depth + pose per sub-task segment (online streaming, WAFT masks)
 bash scripts/astribot/run_step2_stereo.sh    # RGB stereo: VGGT-Omega (or DA3), cameras 4+5
 bash scripts/astribot/run_step2_rgbd.sh      # RGB-D: Any2Full (a2f) densifies the sensor depth
+
+# (Optional) Visualize the depth-pose
+bash scripts/astribot/visualize_subtask_stream.sh
 
 # Step 3 — key-point sampling: key-frame jpgs + RexOmni detections +
 # SAM3/RoMaV2 init points (prompts come from the dataset's meta/subtasks.csv)
