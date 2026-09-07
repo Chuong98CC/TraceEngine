@@ -22,13 +22,16 @@ category per frame.
 
 Object prompts are per sub-task: the [object, manipulator] of the sub-task's
 row in the dataset's meta/subtasks.csv, recorded in the JSON next to the
-detections. In episode mode the segment's row is found through its canonical
+detections. Each prompt is recorded with its role — the column it was read
+from — under ``prompt_roles`` (aligned with ``prompts``): Step 3b uses it
+to sample object keypoints only between the sub-task's gripper close/open
+key-frames. In episode mode the segment's row is found through its canonical
 label in subtask_labels.json — Step 1 (key_frames) matches the segments to
 the ground-truth sub-tasks by execution order, and the canonical labels need
 not equal the segment ordinals, so every key-frame extraction must carry the
 labels file (missing -> error). Folder mode (--keyframes-dir, one sub-task
-of one camera) takes --text-prompts instead. RexOmni needs its own
-environment (Python
+of one camera) takes --text-prompts instead and records no roles. RexOmni
+needs its own environment (Python
 3.10 / torch 2.7; checkpoint IDEA-Research/Rex-Omni), so run this script
 with .venv-rexomni's python — the sys.path bootstrap below exposes the repo
 to it.
@@ -78,7 +81,7 @@ from utils.keyframe_utils import (
     select_camera,
     select_episodes,
     subtask_labels_path,
-    subtask_prompts,
+    subtask_prompt_roles,
 )
 
 DEFAULT_PROMPTS = ["brown coffee cup", "robot gripper"]
@@ -386,6 +389,8 @@ class SubtaskDetectExtract:
             "0": {
                 "segment": [min(keys), max(keys) + 1],
                 "keyframes": keys,
+                # folder mode has no meta/subtasks.csv row: prompts carry
+                # no role, Step 3b samples them over all key-frames
                 "prompts": prompts,
                 "detections": self._detect_segment(cam, 0, keys, prompts),
             }
@@ -433,18 +438,21 @@ class SubtaskDetectExtract:
                       f"subtask_labels.json (segment beyond the sub-task "
                       f"order?)")
                 continue
-            prompts = subtask_prompts(self.meta.get(label))
+            row = self.meta.get(label)
+            prompts, prompt_roles = subtask_prompt_roles(row)
             if not prompts:
                 print(f"  [subtask {k:02d}] skip: no object/manipulator "
                       f"row for label {label} in meta/subtasks.csv")
                 continue
             print(f"  [subtask {k:02d}] label {label}: {len(keys)} "
-                  f"key-frames {keys}, prompts {prompts}")
+                  f"key-frames {keys}, prompts "
+                  f"{dict(zip(prompts, prompt_roles))}")
             subtasks[str(k)] = {
                 "subtask_index": label,
                 "segment": [min(keys), max(keys) + 1],
                 "keyframes": keys,
                 "prompts": prompts,
+                "prompt_roles": prompt_roles,
                 "detections": self._detect_segment(cam, k, keys, prompts),
             }
         data = {
