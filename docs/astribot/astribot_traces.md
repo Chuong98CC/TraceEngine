@@ -159,13 +159,17 @@ prompts skipped by a role carry a `metadata.json` with
   never role-matched by the segment ordinal.
 - **Anchors sit on the stem grid; boundary key-frames usually don't.**
   Step-2 streams at `--stride` 4, so a prompt's key-frames are generally
-  *not* stems — except the sub-task's first frame (a boundary key-frame),
-  which is always a stem. The manipulator pass therefore anchors on the
-  sub-task's first stem as before; the object pass anchors on the stem
-  right before the close key-frame, where the object is still static (its
-  close-frame pixels are exact there, and the approach has not occluded
-  them). When that stem carries no usable keypoints the anchor advances to
-  the next window stem that does.
+  *not* stems — the sub-task's first frame (a boundary key-frame) is a
+  stem only when it lands on the grid, and usually it does not. When the
+  start key-frame is a stem the manipulator window starts on it;
+  otherwise the window starts on the stem nearest the start key-frame —
+  the last one at-or-before it, or the first one at-or-after it when the
+  sub-task's grid begins later. The manipulator pass therefore anchors on
+  the sub-task's first stem as before; the object pass anchors on the
+  stem right before the close key-frame, where the object is still static
+  (its close-frame pixels are exact there, and the approach has not
+  occluded them). When that stem carries no usable keypoints the anchor
+  advances to the next window stem that does.
 - **Sequences shorter than the 16-frame window** (`seq_len` of the
   exported encoder) run no real window: the output stays at the anchor
   points with all `visibs` false — a warning is printed.
@@ -195,4 +199,5 @@ prompts skipped by a role carry a `metadata.json` with
   1168, 1355, 1564; the 466 end is the grid clamp — sub-task 1's open
   key-frame 502 lies beyond its last Step-2 stem) — while the manipulator
   passes still span the sub-task's full [start .. end] key-frame envelope
-  (0..328, 338..466, 555..883, 900..1200, 1227..1371, 1400..1740).
+  on the Step-2 grid (grid-clamped windows: 0..328, 338..466, 555..883,
+  900..1200, 1227..1371, 1400..1740).
