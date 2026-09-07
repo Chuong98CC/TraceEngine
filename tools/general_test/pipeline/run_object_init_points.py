@@ -28,7 +28,12 @@ is matched only between the sub-task's 2nd and 2nd-to-last key-frame
 the dropped boundary frames anyway); the **manipulator** — and any prompt
 whose role is unrecorded (folder mode, older Step-3a JSONs) — is matched
 across all key-frames. There is no JSON-less fallback — run Step 3a first.
-All checkpoints are the repo defaults.
+
+By default RoMAv2 samples its candidate points inside the object masks
+(--sampling-mode mask); with --sampling-mode uniform it samples over the
+whole enlarged crops instead and the in-mask top-k filter alone decides —
+same crops and output criterion, different pool (run both modes into
+separate --out-dirs to compare). All checkpoints are the repo defaults.
 
 Examples
 --------
@@ -135,6 +140,16 @@ def parse_args(argv: list[str] | None = None):
     parser.add_argument("--num-corresp", type=int, default=2000,
                         help="RoMAv2 candidate points sampled in the anchor "
                              "crop before filtering (default: %(default)s)")
+    parser.add_argument("--sampling-mode", choices=("mask", "uniform"),
+                        default="mask",
+                        help="where RoMAv2 samples its candidate points: "
+                             "'mask' (default) constrains the pool inside "
+                             "the object masks by passing them to RoMAv2; "
+                             "'uniform' samples over the whole enlarged "
+                             "crops instead and the in-mask top-k filter "
+                             "alone decides (same crops, same filter — "
+                             "run both modes into separate --out-dirs to "
+                             "compare)")
     parser.add_argument("--strategy", choices=("reference", "cycle"),
                         default="reference",
                         help="RoMAv2 matching strategy (default: %(default)s)")
@@ -336,7 +351,9 @@ class InitPointsExtract:
 
         crop_masks: per-crop object masks (one per crop, already cropped with
         the same box as the image; None = unconstrained). Passed to RoMAv2 so
-        the sampled points lie inside the object masks.
+        the sampled points lie inside the object masks. Pass None (or omit)
+        for uniform sampling over the crops — the caller's in-mask top-k
+        filter then decides alone (--sampling-mode uniform).
         """
         positions, _ = self._ensure_romav2().match(
             crops, strategy=self.args.strategy,
@@ -576,10 +593,15 @@ class InitPointsExtract:
         if empty_reason is None and (not any_mask or first_box is None):
             empty_reason = "no mask or box"
 
-        # RoMAv2 matching on the enlarged-bbox crops of all key-frames. The
-        # full-frame mask is cropped with the same box as the image and fed to
-        # RoMAv2, so points are sampled inside the object only (frames without
-        # a mask stay unconstrained).
+        # RoMAv2 matching on the enlarged-bbox crops of all key-frames. With
+        # --sampling-mode mask (default) the per-frame mask is cropped with
+        # the same box as the image and fed to RoMAv2, so the candidate pool
+        # is sampled inside the object only (frames without a mask stay
+        # unconstrained). With --sampling-mode uniform RoMAv2 samples over
+        # the whole crops instead and the in-mask filter below keeps only
+        # the tracks inside the masks — same crops, same output criterion,
+        # different pool.
+        mask_gated = self.args.sampling_mode == "mask"
         keypoints = np.zeros((0, n, 2), dtype=np.float32)
         if empty_reason is None:
             crops, offsets, crop_masks = [], [], []
@@ -590,12 +612,14 @@ class InitPointsExtract:
                     break
                 crops.append(crop)
                 offsets.append(off)
-                c0x, c0y = off
-                crop_masks.append(
-                    m[c0y:c0y + crop.shape[0], c0x:c0x + crop.shape[1]]
-                    if m.any() else None)
+                if mask_gated:
+                    c0x, c0y = off
+                    crop_masks.append(
+                        m[c0y:c0y + crop.shape[0], c0x:c0x + crop.shape[1]]
+                        if m.any() else None)
             if empty_reason is None:
-                matches = self._match_object(crops, crop_masks)
+                matches = self._match_object(
+                    crops, crop_masks if mask_gated else None)
                 if matches is None:
                     empty_reason = "no matches"
                 else:
@@ -627,6 +651,7 @@ class InitPointsExtract:
             "match_top_k": self.args.top_k * 4,
             "in_mask_min_frames": int(in_mask_need),
             "strategy": self.args.strategy,
+            "sampling_mode": self.args.sampling_mode,
             "detections_file": str(self._detections_path(self.ep_idx)),
             "sam3_checkpoint": DEFAULT_SAM3_CKPT,
             "romav2_checkpoint": DEFAULT_ROMAV2_CKPT,

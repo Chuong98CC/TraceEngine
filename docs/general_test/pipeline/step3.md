@@ -25,8 +25,12 @@ columns of the sub-task's row in meta/subtasks.csv; folder mode: --text-prompts
   → RexOmni     — detect the object in each key-frame            (Step 3a)
   → SAM3        — segment the object masks (bbox + text prompt)  (Step 3b)
   → RoMAv2      — match keypoints across key-frames on enlarged
-                  bbox crops (mask cropped with the same box, so
-                  points are sampled inside the object only;
+                  bbox crops (by default the mask is cropped with
+                  the same box and fed to RoMAv2, so candidates
+                  are sampled inside the object only;
+                  --sampling-mode uniform samples over the whole
+                  crops instead and the in-mask top-k filter
+                  decides — same crops and filter, different pool;
                   dataset mode: object prompts span the close..open
                   key-frames)
   → top-k keypoints inside the object masks
@@ -98,6 +102,18 @@ python tools/astribot/run_step3_init_points.py \
     --repo-id Kronze157/astri_making_coffee_vlva \
     --data-root /data/astri_making_coffee_v1 --episode-idxes 0 \
     --skip-extract --skip-3a --top-k 64
+
+# A/B the RoMAv2 candidate pool (3b-only re-run): --sampling-mode mask
+# (default, both drivers) samples inside the object masks; --sampling-mode
+# uniform samples over the whole enlarged crops and the in-mask top-k
+# filter decides. Same crops, same filter — run both modes into separate
+# output roots to compare (--detections-dir keeps the 3b-only re-run
+# reading the original detections)
+python tools/general_test/pipeline/run_object_init_points.py \
+    --data-root /data/astri_making_coffee_v1 --episode-idxes 0 \
+    --sampling-mode uniform \
+    -o /data/astri_making_coffee_v1/eps_data_uniform \
+    --detections-dir /data/astri_making_coffee_v1/eps_data/detections
 ```
 
 ## Expected output
@@ -125,7 +141,7 @@ Step 3b — per sub-task, per prompt:
     init_points.npz    keypoints (K, N, 2) px  + frame_indices, masks, boxes, scores
     masks_rle.json     SAM3 masks as COCO-style RLE (portable reuse)
     init_points.json   metadata (episode, segment, keyframes, num_keypoints,
-                       top_k, bbox_scale, empty_reason on failure)
+                       top_k, bbox_scale, sampling_mode, empty_reason on failure)
     viz.png            key-frames with masks, boxes and the tracks
 ```
 
@@ -152,7 +168,10 @@ uniform, so downstream consumers always find the same files.
       sub-task — the close/open pair — all key-frames otherwise)).
 - [ ] `viz.png` shows the tracks: for each key-frame, the object mask, the
       bbox, and the K keypoints — keypoints lie **inside the object masks**
-      (mask-constrained RoMAv2 sampling).
+      (default `--sampling-mode mask` constrains the RoMAv2 pool to the
+      masks; `--sampling-mode uniform` samples the whole crops and the
+      in-mask top-k filter keeps the tracks — the K points stay in-mask
+      either way).
 - [ ] Re-run with `--skip-3a` reuses the detections JSON (no new detection
       pass — 3a is skipped).
 - [ ] `--skip-3a` without the detections JSON on disk exits with an error

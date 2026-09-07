@@ -78,6 +78,7 @@ DEFAULT_TOP_K = 64
 DEFAULT_BBOX_SCALE = 1.25
 DEFAULT_NUM_CORRESP = 2000
 DEFAULT_STRATEGY = "reference"
+DEFAULT_SAMPLING_MODE = "mask"
 #: default path of the RexOmni environment (relative to the repo root).
 REXOMNI_ENV_DIR = ".venv-rexomni"
 
@@ -145,6 +146,16 @@ def parse_args(argv: list[str] | None = None):
                         default=DEFAULT_STRATEGY,
                         help="RoMAv2 matching strategy (Step 3b, default: "
                              "%(default)s)")
+    parser.add_argument("--sampling-mode", choices=("mask", "uniform"),
+                        default=DEFAULT_SAMPLING_MODE,
+                        help="where RoMAv2 samples its candidate points "
+                             "(Step 3b, default: %(default)s): 'mask' "
+                             "constrains the pool inside the object masks "
+                             "by passing them to RoMAv2; 'uniform' samples "
+                             "over the whole enlarged crops instead and "
+                             "the in-mask top-k filter alone decides — "
+                             "same crops and filter, run both modes into "
+                             "separate --out-dirs to compare")
     parser.add_argument("--device", default=None, choices=["cuda", "cpu"],
                         help="device (Step 3b; default: auto)")
     parser.add_argument("--skip-extract", action="store_true",
@@ -316,7 +327,8 @@ def _build_3b_cmd(args, repo_root: Path) -> list[str]:
             "--top-k", str(args.top_k),
             "--bbox-scale", str(args.bbox_scale),
             "--num-corresp", str(args.num_corresp),
-            "--strategy", args.strategy]
+            "--strategy", args.strategy,
+            "--sampling-mode", args.sampling_mode]
     if args.device:
         cmd += ["--device", args.device]
     if args.skip_done:
