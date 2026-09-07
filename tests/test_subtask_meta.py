@@ -1,5 +1,6 @@
 """CPU-only unit tests for the Step-3 subtask-annotation loader
-(src/utils/keyframe_utils.py): load_subtask_meta / subtask_prompts."""
+(src/utils/keyframe_utils.py): load_subtask_meta / subtask_prompts /
+subtask_prompt_roles."""
 
 from __future__ import annotations
 
@@ -7,6 +8,7 @@ import pytest
 
 from utils.keyframe_utils import (
     load_subtask_meta,
+    subtask_prompt_roles,
     subtask_prompts,
 )
 
@@ -100,3 +102,25 @@ def test_subtask_prompts_skip_empty_and_missing_columns():
         ["left gripper"]
     assert subtask_prompts({}) == []
     assert subtask_prompts(None) == []
+
+
+def test_subtask_prompt_roles_aligned_object_then_manipulator():
+    row = {"object": "brown cup",
+           "manipulator": "left robot arm's black grippers"}
+    prompts, roles = subtask_prompt_roles(row)
+    assert prompts == ["brown cup", "left robot arm's black grippers"]
+    assert roles == ["object", "manipulator"]
+    # subtask_prompts keeps its historical return value
+    assert subtask_prompts(row) == prompts
+
+
+def test_subtask_prompt_roles_partial_row():
+    row = {"manipulator": "left robot arm's black grippers"}
+    prompts, roles = subtask_prompt_roles(row)
+    assert prompts == ["left robot arm's black grippers"]
+    assert roles == ["manipulator"]
+
+
+def test_subtask_prompt_roles_empty_and_missing_row():
+    assert subtask_prompt_roles({}) == ([], [])
+    assert subtask_prompt_roles(None) == ([], [])

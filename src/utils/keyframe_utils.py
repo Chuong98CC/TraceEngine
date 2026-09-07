@@ -258,9 +258,18 @@ def load_subtask_meta(data_root: str | Path) -> dict[int, dict[str, str]]:
     return meta
 
 
+def subtask_prompt_roles(row: dict[str, str] | None
+                         ) -> tuple[list[str], list[str]]:
+    """([object, manipulator] text prompts of one annotation row, the role
+    of each prompt — the meta/subtasks.csv column it was read from).
+    Empty cells are dropped; prompts and roles stay aligned."""
+    row = row or {}
+    return ([row[c] for c in SUBTASK_PROMPT_COLUMNS if row.get(c)],
+            [c for c in SUBTASK_PROMPT_COLUMNS if row.get(c)])
+
+
 def subtask_prompts(row: dict[str, str] | None) -> list[str]:
     """RexOmni/SAM3 text prompts of one annotation row: the non-empty
     [object, manipulator] values ([] when the row is missing or carries
-    neither)."""
-    row = row or {}
-    return [row[c] for c in SUBTASK_PROMPT_COLUMNS if row.get(c)]
+    neither). See ``subtask_prompt_roles``."""
+    return subtask_prompt_roles(row)[0]
