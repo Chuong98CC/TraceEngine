@@ -186,4 +186,13 @@ prompts skipped by a role carry a `metadata.json` with
   occlusion (e.g. the cup drops to ~0 % once the gripper closes on it
   around abs frame 32 of subtask_00 — the grasp hides it from the head
   view for the rest of the transfer — while subtasks where the hand
-  occludes less show 60–85 %).
+  occludes less show 60–85 %). Re-verified 2026-09-06 after the
+  object/manipulator span split (ep000000, all 6 sub-tasks, Step 3a/3b/4d
+  re-run): the object passes now trace the close..open transport only —
+  anchored on the last stem at-or-before the close key-frame (168, 366,
+  611, 1048, 1231, 1448 — each usable directly, so no pass had to advance)
+  and ending on the first stem at-or-after the open one (312, 466, 755,
+  1168, 1355, 1564; the 466 end is the grid clamp — sub-task 1's open
+  key-frame 502 lies beyond its last Step-2 stem) — while the manipulator
+  passes still span the sub-task's full [start .. end] key-frame envelope
+  (0..328, 338..466, 555..883, 900..1200, 1227..1371, 1400..1740).
