@@ -77,7 +77,11 @@ flowchart LR
    the object masks (`run_object_init_points.py`, SAM3); the enlarged box
    crops are matched across the key-frames (RoMAv2, mask-cropped so points are
    sampled inside the object only) and only the top-k keypoints inside the
-   masks are kept. → **[Pipeline test:
+   masks are kept. In dataset (episode) mode, where each prompt carries its
+   role, object prompts are matched between the sub-task's gripper close/open
+   key-frames (2nd..2nd-to-last) and the manipulator over all key-frames;
+   folder mode (`--text-prompts`, no roles) matches over all key-frames as
+   before. → **[Pipeline test:
    `pipeline/step3.md`](pipeline/step3.md)**
 4. **Step 4: 3D traces** — `infer_tapip3d.py` tracks the world-space positions of the
    sampled keypoints (plus a support grid) through the depth + pose output,

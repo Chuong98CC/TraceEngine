@@ -3,7 +3,10 @@
 End-to-end test of **Step 3 (Sampling Keypoints)** of the repo README: for
 each interacted object, detect the object on the sub-task's key-frames,
 segment its masks, match keypoints across the key-frames, and keep the
-top-k keypoints inside the masks.
+top-k keypoints inside the masks. In dataset mode, object prompts are
+matched between the sub-task's 2nd and 2nd-to-last key-frame (the gripper
+close/open pair); manipulator prompts — and all folder-mode prompts, which
+carry no role — over all key-frames.
 
 Step 3 runs on the **key-frames that Step 1 saved to disk**
 (`tools/astribot/extract_frames.py --mode key_frames`) — a handful of frames
@@ -23,7 +26,9 @@ columns of the sub-task's row in meta/subtasks.csv; folder mode: --text-prompts
   → SAM3        — segment the object masks (bbox + text prompt)  (Step 3b)
   → RoMAv2      — match keypoints across key-frames on enlarged
                   bbox crops (mask cropped with the same box, so
-                  points are sampled inside the object only)
+                  points are sampled inside the object only;
+                  dataset mode: object prompts span the close..open
+                  key-frames)
   → top-k keypoints inside the object masks
 ```
 
@@ -135,13 +140,16 @@ uniform, so downstream consumers always find the same files.
       key-frame; the frame indexes inside match the `frame_<idx>` stems;
       in dataset mode each sub-task entry carries its `subtask_index`
       (its canonical label from `subtask_labels.json`) and the `prompts`
-      of that label's row in `meta/subtasks.csv` ([object, manipulator] —
-      e.g. segment `subtask_01` labelled `2` gets row 2's prompts, not
-      row 1's).
+      of that label's row in `meta/subtasks.csv` together with the aligned
+      `prompt_roles` ([object, manipulator] — e.g. segment `subtask_01`
+      labelled `2` gets row 2's prompts, not row 1's); folder mode records
+      no roles.
 - [ ] Step 3b wrote one `init_points/` folder per prompt with all four files
       (`init_points.npz`, `masks_rle.json`, `init_points.json`, `viz.png`).
 - [ ] `init_points.npz` keypoints are `(K, N, 2)` — K ≤ `--top-k` points
-      visible in all N key-frames (N = number of key-frames).
+      visible in all N key-frames (N = number of matched key-frames
+      (dataset mode: 2 for an object prompt of a canonical 4-frame
+      sub-task — the close/open pair — all key-frames otherwise)).
 - [ ] `viz.png` shows the tracks: for each key-frame, the object mask, the
       bbox, and the K keypoints — keypoints lie **inside the object masks**
       (mask-constrained RoMAv2 sampling).

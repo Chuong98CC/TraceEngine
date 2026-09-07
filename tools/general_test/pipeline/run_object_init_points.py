@@ -20,9 +20,15 @@ Per prompt, under <out-dir>/init_points/ep{ep:06d}/subtask_{k:02d}/
 masks as COCO RLE), viz.png (key-frames + masks + tracks).
 
 Prompts are read per sub-task from the Step-3a detections JSON (Step 3a
-recorded them from the dataset's meta/subtasks.csv in episode mode, or from
-its --text-prompts in folder mode). There is no JSON-less fallback — run
-Step 3a first. All checkpoints are the repo defaults.
+recorded them from the dataset's meta/subtasks.csv in episode mode —
+together with each prompt's role, the column it was read from — or from
+its --text-prompts in folder mode, without roles). An **object** prompt
+is matched only between the sub-task's 2nd and 2nd-to-last key-frame
+(the gripper close .. open transport span, where the object is static on
+the dropped boundary frames anyway); the **manipulator** — and any prompt
+whose role is unrecorded (folder mode, older Step-3a JSONs) — is matched
+across all key-frames. There is no JSON-less fallback — run Step 3a first.
+All checkpoints are the repo defaults.
 
 Examples
 --------
@@ -421,10 +427,19 @@ class InitPointsExtract:
                       f"in the Step-3a JSON (re-run Step 3a — prompts "
                       f"are per-sub-task now)")
                 continue
-            items.append((int(k), keys,
-                          sub.get("detections") or {}, prompts))
-        for k, keys, seg_dets, prompts in items:
-            self._process_segment(k, keys, seg_dets, prompts)
+            # roles aligned with prompts (the meta/subtasks.csv column each
+            # prompt was read from); a missing/mismatched list means every
+            # prompt samples over all key-frames, as before
+            prompt_roles = sub.get("prompt_roles") or []
+            if prompt_roles and len(prompt_roles) != len(prompts):
+                print(f"  [subtask {k:02d}] warning: prompt_roles length "
+                      f"mismatch — sampling every prompt over all "
+                      f"key-frames")
+                prompt_roles = []
+            items.append((int(k), keys, sub.get("detections") or {},
+                          prompts, prompt_roles))
+        for k, keys, seg_dets, prompts, prompt_roles in items:
+            self._process_segment(k, keys, seg_dets, prompts, prompt_roles)
 
     def _process_folder(self, ep_idx: int) -> None:
         """The folder of key-frame images = one sub-task (subtask 00) of a
@@ -464,23 +479,30 @@ class InitPointsExtract:
                   "Step-3a JSON (re-run Step 3a — prompts are "
                   "per-sub-task now)")
             return
-        items = [(0, keys, sub.get("detections") or {}, prompts)]
-        for k, keys, seg_dets, prompts in items:
-            self._process_segment(k, keys, seg_dets, prompts)
+        items = [(0, keys, sub.get("detections") or {}, prompts, [])]
+        for k, keys, seg_dets, prompts, prompt_roles in items:
+            self._process_segment(k, keys, seg_dets, prompts, prompt_roles)
 
     def _process_segment(self, k: int, keys: list[int],
-                         seg_dets: dict | None, prompts: list[str]) -> None:
+                         seg_dets: dict | None, prompts: list[str],
+                         prompt_roles: list[str] | None = None) -> None:
         seg_dir = os.path.join(self.init_dir, f"ep{self.ep_idx:06d}",
                                f"subtask_{k:02d}")
         print(f"  [subtask {k:02d}] {len(keys)} key-frames {keys}, "
               f"prompts {prompts}")
+        if prompt_roles:
+            print(f"    roles: {dict(zip(prompts, prompt_roles))}")
         frames = [self._load_keyframe(k, t) for t in keys]
-        for prompt in prompts:
-            self._process_prompt(seg_dir, k, keys, frames, seg_dets, prompt)
+        for i, prompt in enumerate(prompts):
+            role = prompt_roles[i] if prompt_roles and i < len(prompt_roles) \
+                else None
+            self._process_prompt(seg_dir, k, keys, frames, seg_dets,
+                                 prompt, role)
 
     def _process_prompt(self, seg_dir: str, k: int,
                         keyframes: list[int], frames: list[np.ndarray],
-                        seg_dets: dict | None, prompt: str) -> None:
+                        seg_dets: dict | None, prompt: str,
+                        role: str | None = None) -> None:
         slug = re.sub(r"[^a-z0-9]+", "_", prompt.lower()).strip("_")
         pdir = os.path.join(seg_dir, slug)
         os.makedirs(pdir, exist_ok=True)
@@ -489,8 +511,19 @@ class InitPointsExtract:
             print(f"    [{slug}] skip: {npz_path} exists")
             return
 
+        keyframes_all = keyframes          # full sub-task list (meta span)
+        # Object prompts sample only the transport span: the 2nd to the
+        # 2nd-to-last key-frame (gripper close .. open). The object is
+        # static on the dropped boundary frames (sub-task start/end), so
+        # points there would only duplicate the close/open ones. The
+        # manipulator — and any prompt without a recorded role (folder
+        # mode, older Step-3a JSONs) — keeps the full span. Fewer than 2
+        # frames left -> "insufficient keyframes" below.
+        if role == "object":
+            keyframes = keyframes[1:-1]
+            frames = frames[1:-1]
         n = len(keyframes)
-        h, w = frames[0].shape[:2]
+        h, w = frames[0].shape[:2] if frames else (0, 0)
         empty_reason = None
         in_mask_need = 0
         if n < 2:
@@ -581,10 +614,11 @@ class InitPointsExtract:
         meta = {
             "episode": int(self.ep_idx),
             "subtask": int(k),
-            "segment": [int(min(keyframes)), int(max(keyframes)) + 1],
+            "segment": [int(min(keyframes_all)), int(max(keyframes_all)) + 1],
             "camera_key": self.cam_key,
             "prompt": prompt,
             "prompt_slug": slug,
+            "role": role,
             "keyframes": [int(t) for t in keyframes],
             "num_keypoints": int(len(keypoints)),
             "top_k": self.args.top_k,

@@ -156,6 +156,30 @@ def cap_keyframes(keys: list[int], max_keyframes: int | None) -> list[int]:
     return [keys[i] for i in idx]
 
 
+def span_stems(stems: list[int], first_frames: list[int],
+               last_frames: list[int]) -> list[int]:
+    """The Step-2 stems of one role pass's trace window: the sub-list of
+    ``stems`` from the last stem at-or-before the earliest first key-frame
+    to the first stem at-or-after the latest last key-frame (boundaries
+    inclusive; clamped to the first/last stem when the key-frames fall
+    outside the grid).
+
+    A full-span prompt (key-frames [start .. end] of the sub-task)
+    therefore recovers every stem, while an object prompt key-framed only
+    on the transport span ([gripper close .. open], Step 3b) is traced
+    from the stem right before the close to the stem right after the open
+    — the object is static on the dropped boundary key-frames, so its
+    keypoints stay exact on that leading stem (see run_step4_traces.py).
+    """
+    if not stems or not first_frames or not last_frames:
+        return list(stems)
+    lo_f = min(first_frames)
+    hi_f = max(last_frames)
+    a = next((s for s in reversed(stems) if s <= lo_f), stems[0])
+    b = next((s for s in stems if s >= hi_f), stems[-1])
+    return [s for s in stems if a <= s <= b]
+
+
 def select_episodes(root: str | Path,
                     episode_idxes: list[int] | None = None,
                     max_episodes: int | None = None) -> list[int]:
@@ -258,9 +282,18 @@ def load_subtask_meta(data_root: str | Path) -> dict[int, dict[str, str]]:
     return meta
 
 
+def subtask_prompt_roles(row: dict[str, str] | None
+                         ) -> tuple[list[str], list[str]]:
+    """([object, manipulator] text prompts of one annotation row, the role
+    of each prompt — the meta/subtasks.csv column it was read from).
+    Empty cells are dropped; prompts and roles stay aligned."""
+    row = row or {}
+    return ([row[c] for c in SUBTASK_PROMPT_COLUMNS if row.get(c)],
+            [c for c in SUBTASK_PROMPT_COLUMNS if row.get(c)])
+
+
 def subtask_prompts(row: dict[str, str] | None) -> list[str]:
     """RexOmni/SAM3 text prompts of one annotation row: the non-empty
     [object, manipulator] values ([] when the row is missing or carries
-    neither)."""
-    row = row or {}
-    return [row[c] for c in SUBTASK_PROMPT_COLUMNS if row.get(c)]
+    neither). See ``subtask_prompt_roles``."""
+    return subtask_prompt_roles(row)[0]

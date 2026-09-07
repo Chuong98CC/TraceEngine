@@ -212,7 +212,12 @@ can be extracted from the subtask description. Given the text prompt:
 3. The bounding boxes are enlarged with a scale and used to crop the objects
    from the key-frames; the cropped object images are then passed to
    **RoMAv2** to find matching keypoints consistent across the key-frames of a
-   subtask.
+   subtask. The **manipulator** crops are matched over all key-frames of
+   the subtask (start frame → last frame); the **object** crops only over
+   the sub-task's 2nd to 2nd-to-last key-frame — the gripper close/open
+   pair that carries the object. The object is static before the close
+   and after the open, so matching on the boundary frames would only
+   duplicate the close/open points.
 
    <p align="center">
      <img src="docs/assets/roma2_matching.jpg" alt="RoMAv2 cross-frame keypoint matching on the object crops" width="800"/>
@@ -230,8 +235,12 @@ across the key-frames of a subtask:
 ### Step 4 — 3D Trace
 
 We use **TAPIP3D** to track the 3D positions of the keypoints detected in
-Step 3, from the first frame to the last frame of each subtask, and save the
-output.
+Step 3, and save the output. The **manipulator** keypoints are tracked
+from the subtask's first frame to its last; the **object** keypoints only
+across its transport — from the frame just before the gripper-close
+key-frame to the frame just after the gripper-open key-frame (outside
+that span the object is static). Tracking runs on the Step-2 depth + pose
+frames.
 
 The video below shows the 3D traces of the tracked keypoints across the frames:
 
@@ -301,13 +310,15 @@ bash scripts/astribot/run_step2_rgbd.sh      # RGB-D: Any2Full (a2f) densifies t
 bash scripts/astribot/visualize_subtask_stream.sh
 
 # Step 3 — key-point sampling: key-frame jpgs + RexOmni detections +
-# SAM3/RoMaV2 init points (prompts come from the dataset's meta/subtasks.csv)
+# SAM3/RoMaV2 init points (prompts come from the dataset's meta/subtasks.csv;
+# object keypoints sample between the gripper close/open key-frames, the
+# manipulator over all key-frames)
 bash scripts/astribot/run_step3_init_points.sh
 
 # Step 4 — 3D traces: track the Step-3 keypoints with TAPIP3D over the
-# Step-2 depth + pose outputs (one pass per role: the object keypoints from
-# its first usable key-frame, the manipulator keypoints from the sub-task's
-# first frame) -> eps_data/traces/
+# Step-2 depth + pose outputs (one pass per role: the object keypoints
+# over its close..open transport, the manipulator over the whole
+# sub-task) -> eps_data/traces/
 bash scripts/astribot/run_step4_traces.sh
 
 # visualize — trajectory video per sub-task from the depth_pose outputs
