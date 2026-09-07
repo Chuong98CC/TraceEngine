@@ -23,9 +23,11 @@ in the main env) — launch this driver from the **main** environment:
 
 There is no dataset annotation: the prompts come from --text-prompts.
 Outputs land under <keyframes-dir>/../step3_output (--out-dir to change):
-3a writes detections/ep{episode_idx:06d}.json, 3b the per-prompt
-init_points/... under the same episode label. Pass a distinct --episode-idx
-per folder to keep several folders' outputs separate under one output root.
+3a writes the flat detections/ep{episode_idx:06d}.json (the folder is the
+camera — episode mode nests detections/ep{ep}/<camera>.json instead), 3b
+the per-prompt init_points/... under the same episode label. Pass a
+distinct --episode-idx per folder to keep several folders' outputs
+separate under one output root.
 
 Examples
 --------

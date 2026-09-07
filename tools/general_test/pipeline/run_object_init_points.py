@@ -15,19 +15,25 @@ object masks:
     │  init_points per prompt      │
     └──────────────────────────────┘
 
-Per prompt, under <out-dir>/init_points/ep{ep:06d}/subtask_{k:02d}/
-<prompt_slug>/: init_points.npz (top-k keypoints), masks_rle.json (SAM3
-masks as COCO RLE), viz.png (key-frames + masks + tracks).
+Per prompt: init_points.npz (top-k keypoints), masks_rle.json (SAM3
+masks as COCO RLE), viz.png (key-frames + masks + tracks) — in episode
+mode under <out-dir>/init_points/ep{ep:06d}/subtask_{XX}/<camera>/
+<prompt_slug>/, one subtree per camera, mirroring the per-camera
+detections JSONs of Step 3a (folder mode writes the flat
+.../subtask_{XX}/<prompt_slug>/ — the folder is the camera).
 
 Prompts are read per sub-task from the Step-3a detections JSON (Step 3a
 recorded them from the dataset's meta/subtasks.csv in episode mode —
 together with each prompt's role, the column it was read from — or from
-its --text-prompts in folder mode, without roles). An **object** prompt
-is matched only between the sub-task's 2nd and 2nd-to-last key-frame
-(the gripper close .. open transport span, where the object is static on
-the dropped boundary frames anyway); the **manipulator** — and any prompt
-whose role is unrecorded (folder mode, older Step-3a JSONs) — is matched
-across all key-frames. There is no JSON-less fallback — run Step 3a first.
+its --text-prompts in folder mode, without roles). Episode mode processes
+every --camera-keys entry whose JSON exists under
+detections/ep{ep:06d}/<camera>.json (default: all such cameras). An
+**object** prompt is matched only between the sub-task's 2nd and
+2nd-to-last key-frame (the gripper close .. open transport span, where
+the object is static on the dropped boundary frames anyway); the
+**manipulator** — and any prompt whose role is unrecorded (folder mode,
+older Step-3a JSONs) — is matched across all key-frames. There is no
+JSON-less fallback — run Step 3a first.
 
 By default RoMAv2 samples its candidate points inside the object masks
 (--sampling-mode mask); with --sampling-mode uniform it samples over the
@@ -73,7 +79,7 @@ from utils.keyframe_utils import (
     discover_folder_frames,
     keyframe_path,
     keyframes_root,
-    select_camera,
+    sampling_points_root,
     select_episodes,
 )
 from utils.file_io.mask_rle import encode_rle
@@ -115,21 +121,23 @@ def parse_args(argv: list[str] | None = None):
                         help="camera key recorded in the outputs (folder "
                              "mode only; default: the folder name)")
     parser.add_argument("--keyframes-root", default=None,
-                        help="root of the key-frames saved by Step 1 "
-                             "(default: <data-root>/eps_data/key_frames)")
+                        help="root of the key-frames saved by the Step-3 "
+                             "driver (default: <data-root>/eps_data/"
+                             "sampling_points/key_frames)")
     parser.add_argument("--camera-keys", nargs="+", default=None,
-                        help="camera subdir names (e.g. cam_head); the first "
-                             "one present on disk wins (default: the first "
-                             "RGB camera saved on disk, or the camera Step 3a "
-                             "used)")
+                        help="camera subdir names (e.g. cam_head) to process, "
+                             "in order; entries without a Step-3a detections "
+                             "JSON are skipped (default: every camera Step "
+                             "3a detected for the episode)")
     parser.add_argument("--episode-idxes", "-e", nargs="*", type=int, default=None,
                         help="only process these episode indices (default: all "
                              "episodes with key-frames on disk)")
     parser.add_argument("--max-episodes", "-x", type=int, default=None,
                         help="cap the number of processed episodes")
     parser.add_argument("--out-dir", "-o", default=None,
-                        help="output root (default: <data-root>/eps_data); "
-                             "results land under <out-dir>/init_points/")
+                        help="output root (default: <data-root>/eps_data/"
+                             "sampling_points); results land under "
+                             "<out-dir>/init_points/")
     parser.add_argument("--top-k", type=int, default=128,
                         help="final keypoints kept per prompt per sub-task "
                              "(default: %(default)s)")
@@ -208,7 +216,8 @@ class InitPointsExtract:
                     f"then --mode key_frames --camera-idxes <camera>)")
             self.ep_idxes = select_episodes(self.root, args.episode_idxes,
                                             args.max_episodes)
-            self.out_dir = args.out_dir or (args.data_root + "/eps_data")
+            self.out_dir = str(args.out_dir) if args.out_dir \
+                else str(sampling_points_root(args.data_root))
             print(f"key-frames: {self.root}")
             print(f"episodes on disk: {len(discover_episodes(self.root))} -> "
                   f"{len(self.ep_idxes)} selected")
@@ -256,12 +265,18 @@ class InitPointsExtract:
 
     # --- Step-3a detections ---------------------------------------------------
 
-    def _detections_path(self, ep_idx: int) -> Path:
-        return Path(self.args.detections_dir) / f"ep{ep_idx:06d}.json"
+    def _detections_path(self, ep_idx: int, cam: str | None = None) -> Path:
+        """Step-3a detections JSON of the (episode, camera): folder mode
+        reads the flat ep{ep}.json (the folder is the camera); episode mode
+        reads the per-camera detections/ep{ep:06d}/<camera>.json."""
+        if self.folder_mode:
+            return Path(self.args.detections_dir) / f"ep{ep_idx:06d}.json"
+        return Path(self.args.detections_dir) / f"ep{ep_idx:06d}" \
+            / f"{cam}.json"
 
-    def _load_detections(self, ep_idx: int) -> dict:
-        """The Step-3a detections JSON of the episode."""
-        path = self._detections_path(ep_idx)
+    def _load_detections(self, ep_idx: int, cam: str | None = None) -> dict:
+        """The Step-3a detections JSON of the (episode, camera)."""
+        path = self._detections_path(ep_idx, cam)
         if not path.is_file():
             raise FileNotFoundError(
                 f"{path} missing: run Step 3a first "
@@ -409,25 +424,47 @@ class InitPointsExtract:
             self._process_folder(ep_idx)
             return
         self.ep_idx = ep_idx
-        detections = self._load_detections(ep_idx)
-        print(f"\nepisode {ep_idx}: detections loaded from "
-              f"{self._detections_path(ep_idx)}")
-        # camera: the one Step 3a used (its JSON records it), else an
-        # explicit --camera-keys entry or the first RGB camera on disk
-        cam = (detections or {}).get("camera_key")
-        if cam is None:
-            cam = select_camera(self.root, ep_idx, self.args.camera_keys)
-        elif cam not in camera_subdirs(self.root, ep_idx):
+        # One pass per camera of the episode: the detections JSONs Step 3a
+        # wrote (detections/ep{ep}/<camera>.json) drive which cameras are
+        # processed — every --camera-keys entry among them, or all of them.
+        det_dir = Path(self.args.detections_dir) / f"ep{ep_idx:06d}"
+        have = sorted(p.stem for p in det_dir.glob("*.json")) \
+            if det_dir.is_dir() else []
+        if not have:
             raise FileNotFoundError(
-                f"Step-3a camera {cam!r} of episode {ep_idx} has no key-frames "
-                f"on disk ({camera_subdirs(self.root, ep_idx)}); run "
-                f"extract_frames.py --mode key_frames for that camera")
-        self.cam_key = cam
-        print(f"episode {ep_idx} (camera {cam})")
+                f"{det_dir} missing: run Step 3a first "
+                "(.venv-rexomni/bin/python tools/general_test/"
+                "run_object_detection.py ...)")
+        if self.args.camera_keys:
+            cams = [c for c in self.args.camera_keys if c in have]
+            missing = [c for c in self.args.camera_keys if c not in have]
+            if missing:
+                print(f"episode {ep_idx}: camera(s) {missing} have no "
+                      f"Step-3a detections JSON in {det_dir} — skipped "
+                      f"(have: {have})")
+            if not cams:
+                return
+        else:
+            cams = have
+        for cam in cams:
+            self._process_camera(cam)
 
-        # key-frames come from the Step-3a JSON so both steps agree; the
-        # per-sub-task prompts are the ones Step 3a recorded next to the
-        # detections (they are keyed by prompt text)
+    def _process_camera(self, cam: str) -> None:
+        """3b of one (episode, camera): key-frames and prompts come from
+        that camera's Step-3a JSON so both steps agree (the key-frame
+        indices and the per-sub-task prompts are recorded next to the
+        detections). Outputs land per camera under
+        init_points/ep{ep}/subtask_{k}/{cam}/."""
+        ep_idx = self.ep_idx
+        if cam not in camera_subdirs(self.root, ep_idx):
+            print(f"episode {ep_idx} (camera {cam}): skip, no key-frames "
+                  f"saved for it (run extract_frames.py --mode key_frames "
+                  f"for this camera)")
+            return
+        self.cam_key = cam
+        detections = self._load_detections(ep_idx, cam)
+        print(f"\nepisode {ep_idx} (camera {cam}): detections loaded from "
+              f"{self._detections_path(ep_idx, cam)}")
         items = []
         for k, sub in sorted(detections.get("subtasks", {}).items(),
                              key=lambda kv: int(kv[0])):
@@ -456,12 +493,15 @@ class InitPointsExtract:
             items.append((int(k), keys, sub.get("detections") or {},
                           prompts, prompt_roles))
         for k, keys, seg_dets, prompts, prompt_roles in items:
-            self._process_segment(k, keys, seg_dets, prompts, prompt_roles)
+            seg_dir = os.path.join(self.init_dir, f"ep{ep_idx:06d}",
+                                   f"subtask_{k:02d}", cam)
+            self._process_segment(seg_dir, k, keys, seg_dets, prompts,
+                                  prompt_roles)
 
     def _process_folder(self, ep_idx: int) -> None:
         """The folder of key-frame images = one sub-task (subtask 00) of a
         synthetic episode labelled --episode-idx; same outputs as the episode
-        mode."""
+        mode, written flat (the folder is the camera)."""
         self.ep_idx = ep_idx
         detections = self._load_detections(ep_idx)
         print(f"\nepisode {ep_idx}: detections loaded from "
@@ -498,13 +538,14 @@ class InitPointsExtract:
             return
         items = [(0, keys, sub.get("detections") or {}, prompts, [])]
         for k, keys, seg_dets, prompts, prompt_roles in items:
-            self._process_segment(k, keys, seg_dets, prompts, prompt_roles)
+            seg_dir = os.path.join(self.init_dir, f"ep{ep_idx:06d}",
+                                   f"subtask_{k:02d}")
+            self._process_segment(seg_dir, k, keys, seg_dets, prompts,
+                                  prompt_roles)
 
-    def _process_segment(self, k: int, keys: list[int],
+    def _process_segment(self, seg_dir: str, k: int, keys: list[int],
                          seg_dets: dict | None, prompts: list[str],
                          prompt_roles: list[str] | None = None) -> None:
-        seg_dir = os.path.join(self.init_dir, f"ep{self.ep_idx:06d}",
-                               f"subtask_{k:02d}")
         print(f"  [subtask {k:02d}] {len(keys)} key-frames {keys}, "
               f"prompts {prompts}")
         if prompt_roles:
@@ -652,7 +693,8 @@ class InitPointsExtract:
             "in_mask_min_frames": int(in_mask_need),
             "strategy": self.args.strategy,
             "sampling_mode": self.args.sampling_mode,
-            "detections_file": str(self._detections_path(self.ep_idx)),
+            "detections_file": str(self._detections_path(self.ep_idx,
+                                                          self.cam_key)),
             "sam3_checkpoint": DEFAULT_SAM3_CKPT,
             "romav2_checkpoint": DEFAULT_ROMAV2_CKPT,
             "empty_reason": empty_reason,

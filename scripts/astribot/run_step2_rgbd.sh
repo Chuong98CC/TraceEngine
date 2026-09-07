@@ -6,7 +6,7 @@ DATA_ROOT=/data/astri_making_coffee_v1
 REPO_ID=Kronze157/astri_making_coffee_vlva
 # BACKEND=da3
 BACKEND=a2f
-CAMERA_IDX=3   # cam_torso (a camera with a paired raw-depth feature)
+CAMERA_IDX=${1:-0}  # cam_torso (a camera with a paired raw-depth feature)
 
 # --no-depth-enhance: skip Any2Full and feed the raw sensor depth into the
 # alignment step

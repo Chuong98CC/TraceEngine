@@ -3,7 +3,8 @@ torch.export programs, straight from the Step-2/Step-3 results and the
 LeRobotDataset (nothing extracted to disk).
 
 For every sub-task of the selected episodes it loads the per-prompt init
-points of Step 3b (SAM3 masks + RoMAv2 keypoints under <out>/init_points/),
+points of Step 3b (SAM3 masks + RoMAv2 keypoints under the Step-3
+sampling_points root — <data-root>/eps_data/sampling_points/init_points),
 anchors them on the Step-2 depth + pose outputs (<out>/depth_pose/), and
 tracks the 3D positions of the points with TAPIP3D over the sub-task's
 streamed frames — the RGB frames are decoded **online** from the dataset,
@@ -46,11 +47,17 @@ trimmed/padded deterministically to reach exactly 1088 (random padding
 points are sampled among the anchor frame's valid-depth pixels,
 np.random.default_rng(seed + role_index)).
 
-Output, per sub-task under <out>/traces/<episode>/subtask_XX/ and per
-prompt under <prompt_slug>/: coords.npy (T, Q, 3) world-space traces,
-visibs.npy (T, Q) visibility flags, queries.npy (Q, 4) query points
-(home frame, x, y, z) and metadata.json — plus a sub-task-level
-metadata.json summarizing the roles/passes. No visualization (v1).
+Every camera of a sub-task is tracked separately over its own Step-2
+depth_<camera> outputs — the cameras come from the per-camera init-points
+subtrees of Step 3b (init_points/<episode>/subtask_XX/<camera>/), the
+role labels from that camera's Step-3a detections JSON — the Step-3
+inputs are read from the sampling_points root, while --out-dir holds only
+the depth_pose read and the traces write. Output, per camera under
+<out>/traces/<episode>/subtask_XX/<camera>/ and per prompt
+under <prompt_slug>/: coords.npy (T, Q, 3) world-space traces, visibs.npy
+(T, Q) visibility flags, queries.npy (Q, 4) query points (home frame, x,
+y, z) and metadata.json — plus a camera-level metadata.json summarizing
+the roles/passes. No visualization (v1).
 
 Examples
 --------
@@ -84,7 +91,7 @@ from flow_models.tapip3d.utils._grid_utils import get_grid_queries
 from tools.astribot.extract_frames import DataExtract
 from utils.depth_utils import load_depth_lz4
 from utils.file_io.image_io import to_image_tensor
-from utils.keyframe_utils import load_subtask_meta, span_stems
+from utils.keyframe_utils import load_subtask_meta, sampling_points_root, span_stems
 from utils.streaming_utils import (
     compute_global_depth_roi,
     load_npz_batch,
@@ -127,9 +134,9 @@ def parse_args(argv: list[str] | None = None):
     parser.add_argument("--camera-idxes", "-c", nargs="+", type=int,
                         default=None,
                         help="dataset camera indices eligible for tracking "
-                             "(default: all; the tracked camera of each "
-                             "sub-task is the one its Step-3 init points "
-                             "recorded)")
+                             "(default: all; the tracked cameras of each "
+                             "sub-task are the ones with Step-3 init "
+                             "points on disk)")
     select = parser.add_mutually_exclusive_group()
     select.add_argument("--episode-idxes", "-e", nargs="*", type=int,
                         default=None,
@@ -141,9 +148,12 @@ def parse_args(argv: list[str] | None = None):
                         help="cap the number of processed episodes")
     parser.add_argument("--out-dir", "-o", default=None,
                         help="output root (default: <data-root>/eps_data); "
-                             "Step-2 results are read under <out-dir>/depth_pose, "
-                             "Step-3 under <out-dir>/init_points, traces are "
-                             "saved under <out-dir>/traces")
+                             "Step-2 results are read under "
+                             "<out-dir>/depth_pose, traces are saved under "
+                             "<out-dir>/traces; the Step-3 inputs are read "
+                             "from the sampling_points root "
+                             "(<data-root>/eps_data/sampling_points/"
+                             "{detections,init_points})")
     parser.add_argument("--image-size", nargs=2, type=int,
                         default=list(DEFAULT_IMAGE_SIZE),
                         help="inference resolution (H W), must match the "
@@ -311,11 +321,15 @@ class SubtaskTraceExtract(DataExtract):
         if args.camera_idxes is None:
             keys = LeRobotDatasetMetadata(repo_id=args.repo_id,
                                           root=args.data_root).camera_keys
-            # every camera stays selectable: the tracked camera of each
-            # sub-task comes from its Step-3 init_points.json
+            # every camera stays selectable: the tracked cameras of each
+            # sub-task are the ones with Step-3 init-points subtrees
             args.camera_idxes = list(range(len(keys)))
         super().__init__(args)
-        self.init_root = os.path.join(self.out_dir, "init_points")
+        # Step-3 inputs live under the Step-3 sampling_points root (see
+        # sampling_points_root) — fixed, not relocated by --out-dir, which
+        # only locates the Step-2 depth_pose read and the traces write.
+        self.det_root = str(sampling_points_root(args.data_root) / "detections")
+        self.init_root = str(sampling_points_root(args.data_root) / "init_points")
         self.depth_pose_root = os.path.join(self.out_dir, "depth_pose")
         self.trace_root = os.path.join(self.out_dir, "traces")
         #: {subtask_index: annotation row}; role resolution degrades to
@@ -327,11 +341,12 @@ class SubtaskTraceExtract(DataExtract):
         self._device = args.device or ("cuda" if torch.cuda.is_available()
                                        else "cpu")
         self._pt2 = None
-        # per-segment state, set by _process_segment()
+        # per-camera state, set by _process_camera()
         self.ep_idx = self.k = self.cam_key = None
+        self.cam_subdir = None
         self.seg_depth_dir = None
         self.seg_stems: list[int] = []
-        self.seg_labels: dict[int, int] = {}  # per-episode, _process_episode
+        self.seg_labels: dict[int, int] = {}  # per (episode, camera)
         self.args = args
 
     # --- model setup --------------------------------------------------------
@@ -366,13 +381,13 @@ class SubtaskTraceExtract(DataExtract):
             f"camera {subdir!r} of the init points has no dataset camera "
             f"among {sorted({self._camera_subdir(k) for k in self.cam_keys.values()})}")
 
-    def _detection_labels(self, ep_idx: int) -> dict[int, int]:
+    def _detection_labels(self, ep_idx: int, cam: str) -> dict[int, int]:
         """{segment ordinal: canonical subtask label} that Step 3a recorded
-        in the episode's detections JSON — the label resolves the sub-task
-        annotation row of every segment's role split ({} when the JSON is
-        missing or carries no labels: the prompts then degrade to unlabelled
-        tracking, never to segment-ordinal rows)."""
-        path = Path(self.out_dir) / "detections" / f"ep{ep_idx:06d}.json"
+        in the (episode, camera) detections JSON — the label resolves the
+        sub-task annotation row of every segment's role split ({} when the
+        JSON is missing or carries no labels: the prompts then degrade to
+        unlabelled tracking, never to segment-ordinal rows)."""
+        path = (Path(self.det_root) / f"ep{ep_idx:06d}" / f"{cam}.json")
         if not path.is_file():
             return {}
         data = json.loads(path.read_text())
@@ -445,7 +460,6 @@ class SubtaskTraceExtract(DataExtract):
         tid = self._episode_task_id(ep_idx)
         print(f"\nepisode {ep_idx}: task {tid} "
               f"({self._task_description(tid)})")
-        self.seg_labels = self._detection_labels(ep_idx)
         ep_init = Path(self.init_root) / f"ep{ep_idx:06d}"
         subtasks = sorted(int(m.group(1)) for p in ep_init.iterdir()
                           if p.is_dir() and (m := _SUB_RE.match(p.name))
@@ -454,9 +468,25 @@ class SubtaskTraceExtract(DataExtract):
             self._process_segment(k)
 
     def _process_segment(self, k: int) -> None:
+        """Track every camera of the sub-task: each camera owns an
+        init-points subtree (init_points/.../subtask_XX/<camera>/, one per
+        camera from Step 3b) and is tracked over its own Step-2
+        depth_<camera> outputs into traces/.../subtask_XX/<camera>/."""
         self.k = k
         seg_init = (Path(self.init_root) / f"ep{self.ep_idx:06d}"
                     / f"subtask_{k:02d}")
+        cameras = sorted(p.name for p in seg_init.iterdir() if p.is_dir())
+        for cam in cameras:
+            self._process_camera(cam)
+
+    def _process_camera(self, cam: str) -> None:
+        """TAPIP3D tracking of one (sub-task, camera): prompts come from the
+        camera's init-points subtree, the geometry from the same camera's
+        Step-2 depth_<camera> folder, the role labels from that camera's
+        Step-3a detections JSON."""
+        k = self.k
+        seg_init = (Path(self.init_root) / f"ep{self.ep_idx:06d}"
+                    / f"subtask_{k:02d}" / cam)
         prompts = []
         for pdir in sorted(seg_init.iterdir()):
             if not pdir.is_dir() or not (pdir / "init_points.npz").is_file():
@@ -464,54 +494,48 @@ class SubtaskTraceExtract(DataExtract):
             try:
                 prompt = _read_prompt_dir(pdir)
             except FileNotFoundError as e:
-                print(f"  [subtask {k:02d}] skip {pdir.name}: {e}")
+                print(f"  [subtask {k:02d}] {cam}: skip {pdir.name}: {e}")
                 continue
             if prompt["num_keypoints"] <= 0:
-                print(f"  [subtask {k:02d}] skip {pdir.name}: no Step-3 "
-                      f"keypoints ({prompt['empty_reason'] or 'empty'})")
+                print(f"  [subtask {k:02d}] {cam}: skip {pdir.name}: no "
+                      f"Step-3 keypoints ({prompt['empty_reason'] or 'empty'})")
                 continue
             prompts.append(prompt)
         if not prompts:
-            print(f"  [subtask {k:02d}] skip: no usable Step-3 prompts")
+            print(f"  [subtask {k:02d}] {cam}: skip, no usable Step-3 "
+                  f"prompts")
             return
 
-        # camera: the one Step 3b recorded; every prompt must agree.
-        keep = [p for p in prompts if p["camera_key"]]
-        if len(keep) < len(prompts):
-            print(f"  [subtask {k:02d}] skip {len(prompts) - len(keep)} "
-                  f"prompt(s) without a camera_key in their init_points.json")
-        prompts = keep
-        if not prompts:
+        self.cam_subdir = cam
+        try:
+            self.cam_key = self._cam_key_for_subdir(cam)
+        except ValueError as e:
+            print(f"  [subtask {k:02d}] {cam}: skip, {e}")
             return
-        cameras = {p["camera_key"] for p in prompts}
-        if len(cameras) > 1:
-            print(f"  [subtask {k:02d}] skip: prompts of different cameras "
-                  f"{sorted(cameras)} (one camera per sub-task required)")
-            return
-        self.cam_key = self._cam_key_for_subdir(cameras.pop())
-        print(f"  [subtask {k:02d}] camera {self._camera_subdir(self.cam_key)}")
+        self.seg_labels = self._detection_labels(self.ep_idx, cam)
+        print(f"  [subtask {k:02d}] camera {cam}")
 
         seg_depth = (Path(self.depth_pose_root) / f"ep{self.ep_idx:06d}"
                      / f"subtask_{k:02d}")
-        self.seg_depth_dir = seg_depth / f"depth_{self._camera_subdir(self.cam_key)}"
+        self.seg_depth_dir = seg_depth / f"depth_{cam}"
         if not self.seg_depth_dir.is_dir():
-            print(f"  [subtask {k:02d}] skip: no Step-2 outputs under "
-                  f"{self.seg_depth_dir} (run run_step2_depth_stream.py for "
-                  f"this camera)")
+            print(f"  [subtask {k:02d}] {cam}: skip, no Step-2 outputs "
+                  f"under {self.seg_depth_dir} (run "
+                  f"run_step2_depth_stream.py for this camera)")
             return
         self.seg_stems = sorted(int(p.stem.rsplit("_", 1)[-1])
                                 for p in self.seg_depth_dir.glob("*.npz"))
         if not self.seg_stems:
-            print(f"  [subtask {k:02d}] skip: no Step-2 steps in "
+            print(f"  [subtask {k:02d}] {cam}: skip, no Step-2 steps in "
                   f"{self.seg_depth_dir}")
             return
 
         label = self.seg_labels.get(k)
         if label is None:
-            print(f"  [subtask {k:02d}] no ground-truth label recorded for "
-                  f"it in the Step-3a detections JSON — tracking its "
-                  f"prompts unlabelled (re-run Step 3 to regenerate the "
-                  f"JSON with labels)")
+            print(f"  [subtask {k:02d}] {cam}: no ground-truth label "
+                  f"recorded for it in the Step-3a detections JSON — "
+                  f"tracking its prompts unlabelled (re-run Step 3 to "
+                  f"regenerate the JSON with labels)")
         row = self.subtask_meta.get(label) if label is not None else None
         roles: dict[str | None, list[dict]] = {}
         for p in prompts:
@@ -523,7 +547,7 @@ class SubtaskTraceExtract(DataExtract):
             roles.setdefault(role, []).append(p)
         # object and manipulator first, then any unlabelled prompts
         seg_report = {"episode": int(self.ep_idx), "subtask": int(k),
-                      "camera_key": self._camera_subdir(self.cam_key),
+                      "camera_key": cam,
                       "depth_dir": str(self.seg_depth_dir),
                       "prompts": [], "passes": []}
         order = [r for r in list(ROLE_ORDER) + [None] if r in roles]
@@ -531,13 +555,13 @@ class SubtaskTraceExtract(DataExtract):
             self._process_role(role, roles[role], seg_report)
         if not seg_report["prompts"] and not seg_report["passes"]:
             if self.args.skip_done:
-                print(f"  [subtask {k:02d}] all prompts already tracked "
-                      f"(--skip-done)")
+                print(f"  [subtask {k:02d}] {cam}: all prompts already "
+                      f"tracked (--skip-done)")
             else:
-                print(f"  [subtask {k:02d}] skip: nothing to track")
+                print(f"  [subtask {k:02d}] {cam}: skip, nothing to track")
             return
         out_dir = Path(self.trace_root) / f"ep{self.ep_idx:06d}" \
-            / f"subtask_{k:02d}"
+            / f"subtask_{k:02d}" / cam
         out_dir.mkdir(parents=True, exist_ok=True)
         with open(out_dir / "metadata.json", "w") as f:
             json.dump(seg_report, f, indent=2)
@@ -551,7 +575,8 @@ class SubtaskTraceExtract(DataExtract):
         k = self.k
         label = role or "unlabelled"
         pdirs = [str(Path(self.trace_root) / f"ep{self.ep_idx:06d}"
-                     / f"subtask_{k:02d}" / p["slug"]) for p in prompts]
+                     / f"subtask_{k:02d}" / self.cam_subdir
+                     / p["slug"]) for p in prompts]
         if self.args.skip_done and all(
                 (Path(d) / "coords.npy").is_file() for d in pdirs):
             print(f"  [subtask {k:02d}] {label} pass: skip (outputs exist)")
@@ -672,7 +697,7 @@ class SubtaskTraceExtract(DataExtract):
                 "episode": int(self.ep_idx), "subtask": int(k),
                 "role": role, "prompt": p["prompt"],
                 "prompt_slug": p["slug"],
-                "camera_key": self._camera_subdir(self.cam_key),
+                "camera_key": self.cam_subdir,
                 "status": "ok",
                 "anchor_frame": int(anchor_abs),
                 "steps": [int(s) for s in steps],
@@ -706,7 +731,7 @@ class SubtaskTraceExtract(DataExtract):
             "episode": int(self.ep_idx), "subtask": int(self.k),
             "role": role, "prompt": prompt["prompt"],
             "prompt_slug": prompt["slug"],
-            "camera_key": self._camera_subdir(self.cam_key),
+            "camera_key": self.cam_subdir,
             "status": "empty", "empty_reason": reason,
             "inputs": {"init_points_dir": str(prompt["dir"]),
                        "depth_dir": str(self.seg_depth_dir)},

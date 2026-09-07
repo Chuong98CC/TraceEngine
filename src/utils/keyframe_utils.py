@@ -55,10 +55,23 @@ SUBTASK_ORDER_FILE = "lerobot_annotations.json"
 SUBTASK_LABELS_FILE = "subtask_labels.json"
 
 
+def sampling_points_root(data_root: str) -> Path:
+    """Default Step-3 output root: <data-root>/eps_data/sampling_points (the
+    sampling-keypoints workspace: key_frames/ from the driver's Step 1b,
+    detections/ from 3a, init_points/ from 3b). Step 2's depth_pose/, Step
+    4's traces/ and the shared detect_subtask subtask/ splits (Step 2 reads
+    them) stay under <data-root>/eps_data."""
+    return Path(data_root) / "eps_data" / "sampling_points"
+
+
 def keyframes_root(data_root: str) -> Path:
-    """Default key-frames root: the key_frames/ folder of extract_frames.py's
-    default output root (<data-root>/eps_data)."""
-    return Path(data_root) / "eps_data" / "key_frames"
+    """Default key-frames root of the Step-3 tools: the key_frames/ folder of
+    the Step-3 output root (sampling_points_root -> <data-root>/eps_data/
+    sampling_points/key_frames). extract_frames.py itself defaults to
+    <data-root>/eps_data when run standalone — the run_step3_init_points.py
+    driver (which owns the Step-1b key-frame extraction of the sampling
+    flow) always passes an explicit --out-dir."""
+    return sampling_points_root(data_root) / "key_frames"
 
 
 def episode_dir(root: str | Path, ep_idx: int) -> Path:

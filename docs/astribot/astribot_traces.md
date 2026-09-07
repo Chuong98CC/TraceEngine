@@ -69,11 +69,13 @@ are resized to the encoder resolution (480x640) with the intrinsics scaled
 `resize_batch_to_inference` helper so the online builder reuses it). The
 anchor queries are unprojected with the anchor stem's saved depth + pose.
 
-**Camera and split alignment.** The tracked camera is the one Step 3
-recorded (`camera_key` in each prompt's `init_points.json`), and the
-geometry folder must exist for it (`depth_pose/.../subtask_XX/depth_<cam>`
-— run `run_step2_depth_stream.py` for that camera; a stereo-only Step-2
-run does not cover a mono Step-3 camera). A pass traces only Step-2
+**Camera and split alignment.** The tracked cameras of a sub-task are
+the ones Step 3b wrote init-points subtrees for
+(`init_points/.../subtask_XX/<camera>/`): each camera is tracked
+separately over its own geometry folder (`depth_pose/.../subtask_XX/
+depth_<cam>` — run `run_step2_depth_stream.py` for that camera; a
+stereo-only Step-2 run does not cover a mono Step-3 camera). A pass
+traces only Step-2
 stems (geometry exists there). Its window is the stems inside its
 prompts' key-frame envelope — the last stem at-or-before the earliest
 first key-frame through the first stem at-or-after the latest last
@@ -87,7 +89,9 @@ this tool follows the saved stems automatically.
 ### 1. Track every sub-task of episode 0
 
 Requires the Step-2 (`run_step2_depth_stream.py`) and Step-3
-(`run_step3_init_points.py`) results of the same camera on disk:
+(`run_step3_init_points.py`) results of the tracked cameras on disk
+(each camera's init points need its own `depth_<camera>` Step-2
+outputs):
 
 ```bash
 python tools/astribot/run_step4_traces.py \
@@ -104,16 +108,17 @@ TAPIP3D encoder/iteration graphs load once per run.
 ```
 <out-dir>/traces/                    # <out-dir> defaults to <data-root>/eps_data
 └── ep000000/
-    ├── metadata.json                # roles/passes, prompt statuses, skip reasons
     └── subtask_00/
-        ├── metadata.json
-        ├── brown_cup/               # object pass, per-prompt slice
-        │   ├── coords.npy           # (T, Q, 3) world-space 3D traces
-        │   ├── visibs.npy           # (T, Q) visibility flags (sigmoid >= threshold)
-        │   ├── queries.npy          # (Q, 4) query points (home frame 0, x, y, z)
-        │   └── metadata.json        # role, anchor, steps, query/keypoint mapping
-        └── left_robot_arm_s_grippers/   # manipulator pass
-            └── …
+        └── cam_head/                # one camera of the sub-task (its own
+                                     #   Step-3 init points + depth_<cam> outputs)
+            ├── metadata.json        # roles/passes, prompt statuses, skip reasons
+            ├── brown_cup/           # object pass, per-prompt slice
+            │   ├── coords.npy       # (T, Q, 3) world-space 3D traces
+            │   ├── visibs.npy       # (T, Q) visibility flags (sigmoid >= threshold)
+            │   ├── queries.npy      # (Q, 4) query points (home frame 0, x, y, z)
+            │   └── metadata.json    # role, anchor, steps, query/keypoint mapping
+            └── left_robot_arm_s_grippers/   # manipulator pass
+                └── …
 ```
 
 `T` = the number of tracked stems (the trace window's Step-2 stems from
@@ -131,11 +136,11 @@ prompts skipped by a role carry a `metadata.json` with
 |---|---|---|
 | `--repo-id`, `-id` | — (required) | dataset repo id as seen by LeRobotDataset |
 | `--data-root`, `-d` | — (required) | root of the local dataset copy |
-| `--camera-idxes`, `-c` | all | dataset camera indices eligible for tracking (the per-sub-task camera comes from its Step-3 init points) |
+| `--camera-idxes`, `-c` | all | dataset camera indices eligible for tracking (the tracked cameras of each sub-task are the ones with Step-3 init points on disk) |
 | `--episode-idxes`, `-e` | all | only process these episode indices (mutually exclusive with `--one-per-task`) |
 | `--one-per-task` | off | select the first episode of each task |
 | `--max-episodes`, `-x` | — | cap the number of processed episodes |
-| `--out-dir`, `-o` | `<data-root>/eps_data` | output root; Step-2 results read under `<out-dir>/depth_pose`, Step-3 under `<out-dir>/init_points`, traces under `<out-dir>/traces` |
+| `--out-dir`, `-o` | `<data-root>/eps_data` | output root; Step-2 results read under `<out-dir>/depth_pose`, traces saved under `<out-dir>/traces`. The Step-3 inputs are always read from the sampling_points root (`<data-root>/eps_data/sampling_points/{detections,init_points}`) |
 | `--image-size` | `480 640` | inference resolution (H W), must match the encoder graph |
 | `--encoder` | `weights/tapip3d/tapip3d_encoder_480x640_bf16.pt2` | TAPIP3D encoder `.pt2` artifact |
 | `--iteration` | `weights/tapip3d/tapip3d_iteration_1088_bf16.pt2` | fused corr+updater `.pt2` (query count auto-detected; 1088 = 32x32 support grid + 64 object slots expected) |
@@ -152,7 +157,8 @@ prompts skipped by a role carry a `metadata.json` with
   (`load_subtask_meta`), so prompt texts must match the [object,
   manipulator] entries (they do when Step 3a/3b recorded them from there).
   The row of a segment is resolved through the canonical label that Step
-  3a recorded as `subtask_index` in the detections JSON (the segment
+  3a recorded as `subtask_index` in the camera's detections JSON (the
+  segment
   ordinals are not the canonical ids — an episode executes its sub-tasks
   e.g. in order `[0, 2, 1, 3, 5, 4]`); a segment whose JSON carries no
   label is tracked unlabelled (anchored like the object) with a warning —

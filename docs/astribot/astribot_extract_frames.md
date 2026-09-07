@@ -201,7 +201,7 @@ directly).
 | `--max-episodes`, `-x` | — | cap the number of processed episodes |
 | `--interval` | `4` | `frames` mode: sample every N-th frame of each sub-task segment |
 | `--max-frames` | all | `frames` mode: cap the sampled frames per sub-task |
-| `--out-dir`, `-o` | `<data-root>/eps_data` | output root holding `subtask/`, `key_frames/`, `subtask_videos/`, `subtask_frames/` |
+| `--out-dir`, `-o` | `<data-root>/eps_data` | output root holding `subtask/`, `key_frames/`, `subtask_videos/`, `subtask_frames/` (the reading modes load the shared splits from `<data-root>/eps_data/subtask` when this root has no `detect_subtask` outputs of its own — see Notes) |
 | `--dedup-tasks` | off | skip episodes whose task already produced output (useful across runs) |
 | `--min-close-seconds` | `1.5` | closed-gripper runs shorter than this are sensor noise (key-frame detection) |
 
@@ -216,6 +216,13 @@ directly).
   `subtask_index` (or fewer than two sub-tasks) — run the `detect_subtask`
   mode once so the fallback json exists. `key_frames` always needs the json
   (its key frames come from the gripper analysis only).
+- **The splits are shared across steps.** The reading modes load
+  `subtask_splits.json` from their `--out-dir`'s `subtask/` when it has
+  `detect_subtask` outputs, else from the canonical shared location
+  `<data-root>/eps_data/subtask` — so the Step-3 driver's `key_frames` step
+  can write under its `sampling_points` `--out-dir` while the splits stay
+  at `<data-root>/eps_data` (Step 2 reads them from there). A standalone
+  `detect_subtask` + reading-mode pair under one `--out-dir` is unaffected.
 - The `frames` mode only saves depth when the paired feature is stored as
   uint16 (mm); when the only depth source is a video flagged
   `video.is_depth_map=false`, a warning is printed and depth is skipped.

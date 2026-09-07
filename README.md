@@ -304,7 +304,8 @@ bash scripts/astribot/extract_frames.sh detect_subtask
 
 # Step 2 — depth + pose per sub-task segment (online streaming, WAFT masks)
 bash scripts/astribot/run_step2_stereo.sh    # RGB stereo: VGGT-Omega (or DA3), cameras 4+5
-bash scripts/astribot/run_step2_rgbd.sh      # RGB-D: Any2Full (a2f) densifies the sensor depth
+bash scripts/astribot/run_step2_rgbd.sh 0    # RGB-D: for head cam RGB-D Any2Full (a2f) densifies the sensor depth
+bash scripts/astribot/run_step2_rgbd.sh 3    # RGB-D: for Torso RGB-D Any2Full (a2f) densifies the sensor depth
 
 # (Optional) Visualize the depth-pose
 bash scripts/astribot/visualize_subtask_stream.sh
@@ -325,19 +326,24 @@ bash scripts/astribot/run_step4_traces.sh
 bash scripts/astribot/visualize_subtask_stream.sh
 ```
 
-All outputs land under `<data-root>/eps_data/` (`--out-dir`), one root per
-dataset:
+Step 2 and Step 4 default to `<data-root>/eps_data/` (`--out-dir`), and the
+Step-3 driver defaults to `<data-root>/eps_data/sampling_points/` (its
+`--out-dir`) — one root per dataset:
 
 ```
 /data/astri_making_coffee_v1/eps_data/
-├── subtask/         <- detect_subtask: subtask_splits.json + gripper plot per episode
-├── key_frames/      <- extract_frames --mode key_frames (first/last/key-frame jpgs)
+├── subtask/         <- detect_subtask (shared across steps — Step 2 reads the
+│                       splits from here): subtask_splits.json + gripper plot,
+│                       written by extract_frames.sh AND by the Step-3 driver's
+│                       Step 1a (which never moves it to the sampling root)
 ├── subtask_videos/  <- extract_frames --mode videos (one mp4 per sub-task segment)
 ├── subtask_frames/  <- extract_frames --mode frames (sampled per-sub-task frames + depth .lz4)
 ├── depth_pose/      <- Step 2 online streaming (run_step2_depth_stream.py)
-├── detections/      <- Step 3a (RexOmni)
-├── init_points/     <- Step 3b (SAM3/RoMaV2)
-└── traces/          <- Step 4 3D point tracking (run_step4_traces.py)
+├── traces/          <- Step 4 3D point tracking (run_step4_traces.py; per camera)
+└── sampling_points/ <- Step 3 default root (run_step3_init_points.py --out-dir)
+    ├── key_frames/      <- Step 1b of the driver (first/last/key-frame jpgs)
+    ├── detections/      <- Step 3a (RexOmni; per ep+camera JSON)
+    └── init_points/     <- Step 3b (SAM3/RoMaV2; per camera subtree)
 ```
 
 Depth + pose results live in
@@ -345,6 +351,16 @@ Depth + pose results live in
 log-encoded uint8 depth — float metres over [0.001, 2.001] m, decoded to
 metres by `load_depth_lz4` — + `frame_<idx>.npz` pose, the same contract
 as the disk-based `run_depth_stream.py`).
+
+Step-3/4 results share the same per-camera nesting:
+`sampling_points/detections/ep{ep}/<camera>.json` (one JSON per episode
+and camera), `sampling_points/init_points/ep{ep}/subtask_XX/<camera>/
+<prompt_slug>/` and `traces/ep{ep}/subtask_XX/<camera>/` — every selected
+camera with key-frames on disk runs 3a/3b, and Step 4 tracks each camera
+over its own `depth_<camera>` outputs (a stereo Step-2 run therefore
+feeds the two stereo cameras' init points independently). Step 4's
+`--out-dir` defaults to `<data-root>/eps_data` (traces + the `depth_pose`
+read); its Step-3 inputs are read from the sampling_points root.
 
 The docs live in [`docs/astribot/`](docs/astribot/):
 [`astribot_extract_frames.md`](docs/astribot/astribot_extract_frames.md),

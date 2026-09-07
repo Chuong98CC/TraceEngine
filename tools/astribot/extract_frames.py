@@ -158,6 +158,21 @@ class DataExtract:
         self.tasks = getattr(self.ds_meta, "tasks", None)
         self.subtasks = self._load_subtasks()
         self.out_dir = args.out_dir or (args.data_root + "/eps_data")
+        # root of the detect_subtask outputs (subtask_splits.json + gripper
+        # plot). Default: the output root, so a standalone detect_subtask +
+        # reading-mode pair under one --out-dir stays self-contained. The
+        # reading modes (key_frames, videos, frames) additionally fall back
+        # to the splits' canonical shared location <data-root>/eps_data/
+        # subtask when the out-dir has no detect_subtask outputs of its own —
+        # the Step-3 driver's key_frames step writes under its sampling_points
+        # --out-dir while the splits stay at <data-root>/eps_data (Step 2
+        # reads them from there).
+        self.splits_root = self.out_dir
+        if args.mode in ("key_frames", "videos", "frames"):
+            canonical = os.path.join(args.data_root, "eps_data")
+            if not os.path.isdir(os.path.join(self.out_dir, "subtask")) \
+                    and os.path.isdir(os.path.join(canonical, "subtask")):
+                self.splits_root = canonical
         self._features = getattr(self.ds_meta.info, "features", None)
         if self._features is None:
             self._features = getattr(self.ds_meta, "features", {})
@@ -591,9 +606,10 @@ class DataExtract:
     def _split_file_path(self):
         """subtask_splits.json of the current episode (written by
         detect_subtask, read by key_frames, videos and frames). Always lives
-        under the subtask root, so the reading modes can find it without
-        knowing the detect_subtask layout."""
-        return os.path.join(self.out_dir, MODE_ROOTS["detect_subtask"],
+        under the subtask root of the splits root (self.splits_root — the
+        output root, or the canonical <data-root>/eps_data for the reading
+        modes when the output root has no detect_subtask outputs)."""
+        return os.path.join(self.splits_root, MODE_ROOTS["detect_subtask"],
                             f"ep{self.ep_idx:06d}", "subtask_splits.json")
 
     def _save_splits(self, key_idxes, split_idxes):
