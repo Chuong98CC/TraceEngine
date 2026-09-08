@@ -58,7 +58,7 @@ under <prompt_slug>/: coords.npy (T, Q, 3) world-space traces, visibs.npy
 (T, Q) visibility flags, queries.npy (Q, 4) query points (home frame, x,
 y, z) and metadata.json — plus a camera-level metadata.json summarizing
 the roles/passes.
-Visualization: tools/astribot/visualize_subtask_traces.py renders
+Visualization: tools/astribot/visualize_step4_traces.py renders
 per-camera videos of the traces.
 
 Examples

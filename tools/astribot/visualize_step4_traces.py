@@ -2,20 +2,20 @@
 run_step4_traces.py.
 
 For every tracked camera of the selected episodes it renders two videos
-under the camera's Step-4 traces dir, with NO model inference and nothing
+under the shared visualization tree, with NO model inference and nothing
 extracted to disk — RGB frames decoded online from the LeRobotDataset,
 geometry from the Step-2 depth_pose npzs, traces from the Step-4
 coords/visibs:
 
-    <out>/traces/<episode>/subtask_XX/<camera>/
-        traces_2d.mp4  — the world-space keypoint traces projected back
-                         onto the RGB frames (a 2D overlay: role-colored
-                         keypoint markers + trails, invisible keypoints
-                         red, abs-step HUD);
-        traces_3d.mp4  — the 3D point-cloud scene (per-step cloud +
-                         frustum, as visualize_subtask_stream renders) with
-                         the growing world-space trace curves overlaid in
-                         role colors.
+    <out>/visualization/<episode>/subtask_XX/<camera>/
+        trace2d.mp4  — the world-space keypoint traces projected back onto
+                       the RGB frames (a 2D overlay: role-colored keypoint
+                       markers + trails, invisible keypoints red, abs-step
+                       HUD);
+        trace3d.mp4  — the 3D point-cloud scene (per-step cloud + frustum,
+                       as visualize_step2_depth_pose.py renders) with the
+                       growing world-space trace curves overlaid in role
+                       colors.
 
 Different role prompts cover different step windows (object = the
 close..open transport only, manipulator = the whole sub-task), so each
@@ -25,10 +25,17 @@ union step is a Step-2 stem, so its pose npz exists.
 Colour legend: object green, manipulator orange, unlabelled cyan,
 occluded red.
 
+Episodes, sub-task segments, cameras and rendered steps are discovered
+from the saved Step-4 trace outputs themselves — <out-dir>/traces/ep*/
+subtask_XX/<camera>/<prompt>/coords.npy — plus the Step-2 depth_pose
+geometry: no dataset split inference, no subtask_splits.json, no
+selection flag that must match the run_step4_traces.py run; ``-e``/
+``-c`` only filter what exists on disk.
+
 Examples
 --------
     # Render every tracked camera of every sub-task of episode 0
-    python tools/astribot/visualize_subtask_traces.py
+    python tools/astribot/visualize_step4_traces.py
         --repo-id Kronze157/astri_making_coffee_vlva
         --data-root /data/astri_making_coffee --episode-idxes 0
 """
@@ -37,6 +44,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 from pathlib import Path
 
@@ -45,10 +53,9 @@ import imageio
 import numpy as np
 import open3d as o3d
 import trimesh
-from lerobot.datasets import LeRobotDatasetMetadata
+from lerobot.datasets import LeRobotDataset, LeRobotDatasetMetadata
 from tqdm import tqdm
 
-from tools.astribot.extract_frames import DataExtract
 from tools.general_test.pipeline.visualize_stream import render_stream_video
 from utils.visualize.visualize_mask import to_pil
 
@@ -120,10 +127,16 @@ def _draw_legend(canvas: np.ndarray, roles_present: list, y: int) -> None:
 
 def parse_args(argv: list[str] | None = None):
     parser = argparse.ArgumentParser(
-        description="Render the Step-4 3D-trace videos of every sub-task "
-                    "camera, online (RGB frames decoded from the "
-                    "LeRobotDataset; geometry from the Step-2 depth_pose "
-                    "NPZs; traces from the Step-4 coords/visibs)."
+        description="Render the Step-4 3D-trace videos (trace2d.mp4 / "
+                    "trace3d.mp4) of every selected camera of each sub-task "
+                    "segment of an episode, online (RGB frames decoded from "
+                    "the LeRobotDataset; geometry from the Step-2 depth_pose "
+                    "NPZs; traces from the Step-4 coords/visibs). Episodes, "
+                    "sub-task segments, cameras and rendered steps are "
+                    "discovered from the saved Step-4 trace outputs on disk "
+                    "— no split inference, no subtask_splits.json, no "
+                    "selection flag that must match the run_step4_traces.py "
+                    "run; -e/-c only filter what exists."
     )
     parser.add_argument("--repo-id", "-id", required=True,
                         help="dataset repo id as seen by LeRobotDataset")
@@ -132,22 +145,22 @@ def parse_args(argv: list[str] | None = None):
                              "full chunk path, e.g. /data/x/chunk-0000/part-0000")
     parser.add_argument("--camera-idxes", "-c", nargs="+", type=int, default=None,
                         help="indices into the dataset's camera_keys to "
-                             "render (default: all dataset cameras; only "
-                             "cameras with Step-4 trace outputs are "
-                             "rendered)")
-    select = parser.add_mutually_exclusive_group()
-    select.add_argument("--episode-idxes", "-e", nargs="*", type=int, default=None,
-                        help="only process these episode indices (default: all "
-                             "episodes with Step-4 traces on disk)")
-    select.add_argument("--one-per-task", action="store_true",
-                        help="select the first episode of each task")
+                             "visualize (default: every camera that has "
+                             "Step-4 trace outputs on disk)")
+    parser.add_argument("--episode-idxes", "-e", nargs="*", type=int, default=None,
+                        help="only visualize these episode indices (default: "
+                             "every episode with Step-4 traces under "
+                             "<out-dir>/traces); an episode with no traces "
+                             "on disk is warned about and skipped")
     parser.add_argument("--max-episodes", "-x", type=int, default=None,
-                        help="cap the number of processed episodes")
+                        help="cap the number of discovered episodes (first N, "
+                             "after any -e filter)")
     parser.add_argument("--out-dir", "-o", default=None,
                         help="output root (default: <data-root>/eps_data); "
                              "Step-2 geometry is read under <out-dir>/"
-                             "depth_pose, traces are read and the videos "
-                             "written under <out-dir>/traces")
+                             "depth_pose, Step-4 traces under <out-dir>/"
+                             "traces, videos written under <out-dir>/"
+                             "visualization")
     parser.add_argument("--fps", type=int, default=10)
     parser.add_argument("--trail-len", type=int, default=30,
                         help="2D-overlay trail window: trailing projected "
@@ -157,9 +170,6 @@ def parse_args(argv: list[str] | None = None):
     parser.add_argument("--max-points", type=int, default=100_000,
                         help="max point-cloud points rendered per video frame "
                              "(default: 100000)")
-    parser.add_argument("--stride", type=int, default=4,
-                        help="subsample the sequence for the view fitting only "
-                             "(default: %(default)s)")
     parser.add_argument(
         "--views", type=int, choices=[1, 4], default=4,
         help="viewpoints per frame: 1 (center only) or 4 (2x2 grid of "
@@ -203,48 +213,91 @@ def parse_args(argv: list[str] | None = None):
     return parser.parse_args(argv)
 
 
-class SubtaskTraceVisualize(DataExtract):
+class SubtaskTraceVisualize:
     """Render the Step-4 trace videos of every tracked camera, online.
 
-    Reuses DataExtract for dataset introspection and episode/camera
-    selection (same selection as run_step4_traces.py); the frames shown in
-    both videos are decoded from the LeRobotDataset on the fly, the
-    geometry comes from the Step-2 depth_pose npz files, the traces from
-    the Step-4 coords/visibs — which cameras exist is discovered from the
-    trace dirs themselves.
+    Standalone: the episodes, sub-task segments, cameras and rendered
+    steps are all discovered from the saved Step-4 trace outputs on disk
+    (traces/<ep>/subtask_XX/<camera>/<prompt>) — never recomputed from
+    dataset splits, so no selection flag has to match the
+    run_step4_traces.py run. The Step-2 depth_pose tree supplies the
+    geometry behind trace3d.mp4 (every union step is a Step-2 stem); the
+    dataset is only consulted for camera_keys (decoding the -c indices
+    and mapping the on-disk camera subdirs back to decode keys) and for
+    the online frame decode. The videos are written under the shared
+    visualization tree (viz_root), next to the step-2 depth_pose.mp4
+    videos.
     """
 
     def __init__(self, args):
-        args.mode = "videos"  # DataExtract needs one of its modes; only the
-                             # dataset/camera machinery is reused
-        if args.camera_idxes is None:
-            keys = LeRobotDatasetMetadata(repo_id=args.repo_id,
-                                          root=args.data_root).camera_keys
-            # every camera stays selectable: the rendered cameras of each
-            # sub-task are the ones with Step-4 trace outputs
-            args.camera_idxes = list(range(len(keys)))
-        super().__init__(args)
+        self.args = args
+        # dataset metadata for camera_keys only — episodes/segments come
+        # from the disk (self.trace_root), not from the dataset
+        self.ds_meta = LeRobotDatasetMetadata(repo_id=args.repo_id,
+                                              root=args.data_root)
+        self.dataset = None  # LeRobotDataset handle, created lazily
+        self.cam_keys = self._select_cameras()
+        self.out_dir = args.out_dir or os.path.join(args.data_root, "eps_data")
+        # Step-4 trace outputs read from <out-dir>/traces/<episode>/
+        # subtask_XX/<camera>/, Step-2 geometry from <out-dir>/depth_pose/
+        # <episode>/subtask_XX/ — the videos go to the sibling
+        # visualization/ tree
         self.trace_root = Path(self.out_dir) / "traces"
         self.depth_pose_root = Path(self.out_dir) / "depth_pose"
+        self.viz_root = Path(self.out_dir) / "visualization"
         # per-camera state, set by _process_camera()
         self.ep_idx = self.k = self.cam_key = self.cam_subdir = None
         self.seg_dir: Path | None = None      # depth_pose/<ep>/subtask_XX
         self.seg_depth_dir: Path | None = None  # .../subtask_XX/depth_<cam>
-        self.args = args
         self.n_rendered = 0
 
     # --- dataset access -----------------------------------------------------
 
+    def _ensure_dataset(self):
+        """LeRobotDataset handle (videos on disk), created lazily: only
+        the per-step frame decode opens it."""
+        if self.dataset is None:
+            self.dataset = LeRobotDataset(repo_id=self.args.repo_id,
+                                          root=self.args.data_root,
+                                          download_videos=False)
+        return self.dataset
+
+    @staticmethod
+    def _camera_subdir(cam_key):
+        """Subdir per camera, named after the dataset's camera key (the
+        key_frames naming, mirrors run_step4_traces.py)."""
+        return cam_key.rsplit(".", 1)[-1]
+
+    def _select_cameras(self):
+        """-c indices -> dataset camera keys, validated against the
+        dataset's camera_keys (None: every camera with Step-4 trace
+        outputs on disk is rendered)."""
+        idxes = self.args.camera_idxes
+        if idxes is None:
+            return None
+        for idx in idxes:
+            if not 0 <= idx < len(self.ds_meta.camera_keys):
+                raise ValueError(f"camera_idx {idx} out of range "
+                                 f"(dataset has {len(self.ds_meta.camera_keys)} cameras)")
+        return {idx: self.ds_meta.camera_keys[idx] for idx in idxes}
+
     def _cam_key_for_subdir(self, subdir: str) -> str:
         """Dataset camera key whose subdir (key_frames naming) matches a
-        Step-4 trace camera dir — mirrors run_step4_traces.py."""
-        for key in self.cam_keys.values():
+        Step-4 trace camera dir — the key decoding that camera's frames
+        online. With -c only the requested cameras are candidates (a
+        trace camera outside them is skipped); without, every dataset
+        camera key is a candidate."""
+        candidates = (self.cam_keys.values() if self.cam_keys is not None
+                      else self.ds_meta.camera_keys)
+        for key in candidates:
             if self._camera_subdir(key) == subdir:
                 return key
         raise ValueError(
-            f"camera {subdir!r} of the Step-4 traces has no selected "
-            f"dataset camera among "
-            f"{sorted({self._camera_subdir(k) for k in self.cam_keys.values()})}")
+            f"camera {subdir!r} of the Step-4 traces has no dataset "
+            f"camera among "
+            f"{sorted({self._camera_subdir(k) for k in candidates})}")
+
+    # --- frame access -------------------------------------------------------
 
     def _frame_bgr(self, abs_idx: int) -> np.ndarray:
         """One frame of the current trace camera at an absolute dataset
@@ -265,6 +318,48 @@ class SubtaskTraceVisualize(DataExtract):
             return rgb[None]
 
         return load
+
+    # --- disk discovery -----------------------------------------------------
+
+    def _episode_dir(self, ep_idx: int) -> str:
+        """The on-disk episode dir name of a dataset episode index."""
+        return f"ep{ep_idx:06d}"
+
+    def _discover_episodes(self) -> list[int]:
+        """Sorted dataset indices of the episode dirs under traces/
+        (a dir counts when its name is ep<int>)."""
+        eps = []
+        for p in Path(self.trace_root).iterdir():
+            if not p.is_dir() or (m := _EP_RE.match(p.name)) is None:
+                continue
+            eps.append(int(m.group(1)))
+        return sorted(eps)
+
+    def _segment_dirs(self, ep_idx: int) -> list[int]:
+        """Sorted subtask ints of an episode, as present under
+        traces/ep%06d/ — the Step-2 segmentation the traces were tracked
+        over, never recomputed from dataset splits."""
+        ep_dir = Path(self.trace_root) / self._episode_dir(ep_idx)
+        if not ep_dir.is_dir():
+            return []
+        return sorted(int(m.group(1)) for p in ep_dir.iterdir()
+                      if p.is_dir() and (m := _SUB_RE.match(p.name)))
+
+    def _select_episodes(self, discovered: list[int]) -> list[int]:
+        """Episodes to process: the discovered ones, filtered by -e (a
+        requested episode with no Step-4 traces on disk is warned about
+        and skipped — never a failure) and capped by --max-episodes."""
+        if self.args.episode_idxes is not None:
+            requested = set(self.args.episode_idxes)
+            for ep in sorted(requested - set(discovered)):
+                print(f"  episode {ep}: no Step-4 traces under "
+                      f"{self.trace_root} — skipped")
+            eps = [ep for ep in discovered if ep in requested]
+        else:
+            eps = discovered
+        if self.args.max_episodes is not None:
+            eps = eps[: self.args.max_episodes]
+        return eps
 
     # --- geometry -----------------------------------------------------------
 
@@ -289,34 +384,28 @@ class SubtaskTraceVisualize(DataExtract):
     # --- orchestration ------------------------------------------------------
 
     def run(self) -> None:
-        trace_root = Path(self.trace_root)
-        depth_root = Path(self.depth_pose_root)
-        if not trace_root.is_dir() or not depth_root.is_dir():
+        if not self.trace_root.is_dir() or not self.depth_pose_root.is_dir():
             raise FileNotFoundError(
-                f"need Step-4 traces ({trace_root}) and Step-2 depth + "
-                f"pose ({depth_root}): run run_step4_traces.py and "
+                f"need Step-4 traces ({self.trace_root}) and Step-2 depth + "
+                f"pose ({self.depth_pose_root}): run run_step4_traces.py and "
                 f"run_step2_depth_stream.py first")
-        discovered = sorted(int(m.group(1)) for p in trace_root.iterdir()
-                            if p.is_dir() and (m := _EP_RE.match(p.name)))
-        eps = [e for e in self.ep_idxes if e in discovered]
-        if self.args.episode_idxes is not None:
-            missing = sorted(set(self.ep_idxes) - set(discovered))
-            if missing:
-                print(f"skip episode(s) {missing}: no Step-4 traces on disk")
-        print(f"\n{len(eps)} episode(s) selected: {eps}")
+        discovered = self._discover_episodes()
+        if not discovered:
+            print(f"\nno Step-4 traces under {self.trace_root} — run "
+                  f"run_step4_traces.py first")
+            return
+        eps = self._select_episodes(discovered)
+        print(f"\n{len(eps)} episode(s) selected:")
+        for ep in eps:
+            print(f"  episode {ep}: {len(self._segment_dirs(ep))} "
+                  f"sub-task segment(s)")
         for ep_idx in tqdm(eps, desc="episodes"):
             self._process_episode(ep_idx)
-        print(f"\ndone: {self.n_rendered} camera(s) -> {trace_root}")
+        print(f"\ndone: {self.n_rendered} camera(s) -> {self.viz_root}")
 
     def _process_episode(self, ep_idx: int) -> None:
         self.ep_idx = ep_idx
-        tid = self._episode_task_id(ep_idx)
-        print(f"\nepisode {ep_idx}: task {tid} "
-              f"({self._task_description(tid)})")
-        ep_trace = Path(self.trace_root) / f"ep{ep_idx:06d}"
-        subtasks = sorted(int(m.group(1)) for p in ep_trace.iterdir()
-                          if p.is_dir() and (m := _SUB_RE.match(p.name)))
-        for k in subtasks:
+        for k in self._segment_dirs(ep_idx):
             self._process_segment(k)
 
     def _process_segment(self, k: int) -> None:
@@ -379,13 +468,14 @@ class SubtaskTraceVisualize(DataExtract):
         # every one has geometry (enforced again per frame by _pose_at)
         print(f"  [subtask {k:02d}] camera {cam}: {len(prompts)} prompt(s) "
               f"-> {len(union_abs)} union steps {union_abs[0]}.."
-              f"{union_abs[-1]} -> {cam_trace}")
+              f"{union_abs[-1]} (from {cam_trace})")
+        viz_dir = (self.viz_root / f"ep{self.ep_idx:06d}"
+                   / f"subtask_{k:02d}" / cam)
+        viz_dir.mkdir(parents=True, exist_ok=True)
         if self.args.render in ("2d", "both"):
-            self._render_2d(prompts, union_abs,
-                            cam_trace / "traces_2d.mp4")
+            self._render_2d(prompts, union_abs, viz_dir / "trace2d.mp4")
         if self.args.render in ("3d", "both"):
-            self._render_3d(prompts, union_abs,
-                            cam_trace / "traces_3d.mp4")
+            self._render_3d(prompts, union_abs, viz_dir / "trace3d.mp4")
         self.n_rendered += 1
 
     def _read_prompt(self, pdir: Path) -> dict:
@@ -419,7 +509,7 @@ class SubtaskTraceVisualize(DataExtract):
 
     def _render_2d(self, prompts: list[dict], union_abs: list[int],
                    out_path: Path) -> Path:
-        """traces_2d.mp4: the world-space keypoints of every union step
+        """trace2d.mp4: the world-space keypoints of every union step
         projected back onto that step's RGB frame (intrinsics rescaled when
         the frame resolution differs from the npz's), with per-prompt
         age-faded trails and role-coloured markers (occluded red) plus the
@@ -520,8 +610,8 @@ class SubtaskTraceVisualize(DataExtract):
 
     def _render_3d(self, prompts: list[dict], union_abs: list[int],
                    out_path: Path) -> Path:
-        """traces_3d.mp4 via render_stream_video (visualize_subtask_stream
-        renders the same scene): the per-step clouds + frustums get the
+        """trace3d.mp4 via render_stream_video (visualize_step2_depth_pose
+        renders the same scene): the per-step clouds + frustum get the
         growing world-space trace curves of every prompt overlaid through
         its trace_geoms_fn hook."""
         stems = [f"frame_{s:06d}" for s in union_abs]
@@ -589,6 +679,11 @@ class SubtaskTraceVisualize(DataExtract):
 
         print(f"  [subtask {self.k:02d}] camera {self.cam_subdir}: 3D "
               f"scene over {len(stems)} steps -> {out_path}")
+        # view-fit stride derived from the union steps' dataset spacing:
+        # only a spatial thinning of each depth map for the auto view-fit
+        # (visualize_stream._union_scene_points) — unrelated to any producer
+        # frame stride (fallback 1: single-step segment)
+        fit_stride = (union_abs[1] - union_abs[0] if len(union_abs) > 1 else 1)
         render_stream_video(
             stems,
             [self.cam_subdir],
@@ -597,7 +692,7 @@ class SubtaskTraceVisualize(DataExtract):
             fps=self.args.fps,
             size=(w_vid, h_vid),
             max_points_per_frame=self.args.max_points,
-            stride=self.args.stride,
+            stride=fit_stride,
             view_distance=self.args.view_distance,
             views=self.args.views,
             view_angle=self.args.view_angle,

@@ -106,21 +106,31 @@ TAPIP3D encoder/iteration graphs load once per run.
 ## Visualization
 
 The visualization counterpart of this tool —
-`tools/astribot/visualize_subtask_traces.py` — renders, per tracked
+`tools/astribot/visualize_step4_traces.py` — renders, per tracked
 camera of each sub-task, two videos from the Step-4 trace data:
 
-- `traces_2d.mp4` — the world-space keypoint traces projected back onto
+- `trace2d.mp4` — the world-space keypoint traces projected back onto
   the RGB frames, coloured per role (a 2D overlay of the keypoints with
   their trails);
-- `traces_3d.mp4` — a 3D point-cloud scene with the growing world-space
+- `trace3d.mp4` — a 3D point-cloud scene with the growing world-space
   trace curves.
 
 The RGB frames are decoded online from the dataset (nothing extracted to
-disk); the videos are written next to the trace data, inside the camera's
-traces dir:
+disk); the videos are written under the shared visualization tree —
+`<out-dir>/visualization/<episode>/subtask_XX/<camera>/` — next to the
+step-2 `depth_pose.mp4` videos (`visualize_step2_depth_pose.py`, see
+`astribot_visualize_step2_depth_pose.md`):
+
+- Standalone and disk-derived: the episodes, sub-task segments, cameras
+  and rendered steps are discovered from the saved Step-4 trace outputs
+  themselves — no selection flag has to match the `run_step4_traces.py`
+  run; `-e` (default: every episode with trace outputs) and `-c`
+  (default: every camera with trace outputs) only filter what exists.
+  The tool still needs the same Step-2 `depth_pose` outputs as geometry
+  for `trace3d.mp4`.
 
 ```bash
-python tools/astribot/visualize_subtask_traces.py \
+python tools/astribot/visualize_step4_traces.py \
     --repo-id Kronze157/astri_making_coffee_vlva \
     --data-root /data/astri_making_coffee \
     --episode-idxes 0
