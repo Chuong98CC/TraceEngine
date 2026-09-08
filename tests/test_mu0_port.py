@@ -47,3 +47,36 @@ def test_stats_module_runnable():
         check=True,
         capture_output=True,
     )
+
+
+def test_config_encode_decode_roundtrip():
+    cfg_mod = importlib.import_module("mu0.policies.configuration_smolvla")
+    SmolVLAConfig = cfg_mod.SmolVLAConfig
+    cfg = SmolVLAConfig(trace_mode=True, num_vlm_layers=20, depth_clone_stem=True)
+    import draccus
+
+    raw = draccus.encode(cfg)
+    dec = draccus.decode(SmolVLAConfig, raw)  # draccus 0.8: decode(target_type, raw)
+    assert dec.trace_mode is True
+    assert dec.num_vlm_layers == 20
+    assert dec.depth_clone_stem is True
+
+
+def test_from_ckpt_config_release():
+    cfg_mod = importlib.import_module("mu0.policies.configuration_smolvla")
+    ckpt = MU0_RELEASE / "final_ckpt"
+    if not (ckpt / "config.json").exists():
+        pytest.skip("release checkpoint not present")
+    cfg = cfg_mod.from_ckpt_config(ckpt)
+    assert cfg.trace_mode is True
+    assert cfg.vlm_model_name.endswith("SmolVLM2-2.2B-Instruct")
+    assert cfg.num_vlm_layers == 20
+    assert cfg.num_expert_layers == 20
+    assert cfg.expert_width_multiplier == 0.5
+    assert cfg.depth_clone_stem is True
+    assert cfg.depth_lora_rank == 8
+    assert cfg.use_dino is True
+    assert cfg.trace_bspline_n_ctrl == 10
+    assert cfg.history_len == 8 and cfg.future_len == 32
+    # Field is tuple[int, int]; draccus decodes the JSON list into a tuple.
+    assert cfg.resize_imgs_with_padding == (512, 512)
