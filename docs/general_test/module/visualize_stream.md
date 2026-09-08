@@ -17,8 +17,8 @@ stays put while per-frame content moves inside it.
 - Used in three places: the standalone CLI below,
   `run_depth_stream.py --video` (rendered after the run, lazy-imported so
   streaming-only runs don't need open3d), and the online per-sub-task
-  variant `tools/astribot/visualize_subtask_stream.py` (see
-  `astribot_visualize_subtask_stream.md`), which decodes the colour
+  variant `tools/astribot/visualize_step2_depth_pose.py` (see
+  `astribot_visualize_step2_depth_pose.md`), which decodes the colour
   frames from the LeRobotDataset instead of reading frame folders and
   exposes the same `--view-*` tuning flags.
 
@@ -135,7 +135,7 @@ exact requested size (even dimensions), `fps` frames per second.
 `render_stream_video(...)` (the underlying function) additionally takes
 `stride` (subsample the sequence for the view fitting only) and
 `frame_loader` (online images instead of frame folders) — used by
-`visualize_subtask_stream.py`, not exposed on this CLI.
+`visualize_step2_depth_pose.py`, not exposed on this CLI.
 
 ## Notes
 
@@ -146,5 +146,5 @@ exact requested size (even dimensions), `fps` frames per second.
 - Outputs written by older pipeline versions (depth stored inside the
   NPZ, no `.lz4` / `shape`) are not readable by the current loaders.
 - Related docs: [`streaming.md`](streaming.md) (the `run_depth_stream.py`
-  inference side), [`astribot_visualize_subtask_stream.md`](../../astribot/astribot_visualize_subtask_stream.md)
+  inference side), [`astribot_visualize_step2_depth_pose.md`](../../astribot/astribot_visualize_step2_depth_pose.md)
   (online per-sub-task variant).

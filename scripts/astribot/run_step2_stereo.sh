@@ -16,4 +16,4 @@ python tools/astribot/run_step2_depth_stream.py \
     --with-optical-flow \
     --use-inferred-splits
 
-# render the trajectory videos: bash scripts/astribot/visualize_subtask_stream.sh
+# render the per-camera depth_pose videos: bash scripts/astribot/visualize_step2_depth_pose.sh

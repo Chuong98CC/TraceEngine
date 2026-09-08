@@ -148,31 +148,33 @@ holds the `extrinsics` (3×4, world→camera), `intrinsics` (3×3) and the depth
 
 ## Visualization
 
-`tools/astribot/visualize_subtask_stream.py` renders one trajectory video per
-sub-task segment from the saved depth_pose outputs — the visualization
-counterpart of `run_step2_depth_stream.py`, built on
-`tools/general_test/pipeline/visualize_stream.py` but with the colour frames decoded
-**online from the dataset** (no extracted frames or videos on disk). Full
-usage and argument reference: `astribot_visualize_subtask_stream.md`.
+`tools/astribot/visualize_step2_depth_pose.py` renders one `depth_pose.mp4`
+per (sub-task, selected camera) from the saved depth_pose outputs — the
+visualization counterpart of `run_step2_depth_stream.py`, built on
+`tools/general_test/pipeline/visualize_stream.py` but with the colour frames
+decoded **online from the dataset** (no extracted frames or videos on disk).
+Full usage and argument reference: `astribot_visualize_step2_depth_pose.md`.
 
 ```bash
-python tools/astribot/visualize_subtask_stream.py \
+python tools/astribot/visualize_step2_depth_pose.py \
     --repo-id Kronze157/astri_making_coffee_vlva \
     --data-root /data/astri_making_coffee \
     --episode-idxes 0 \
-    --camera-idxes 4 5 --fps 30        # same selection flags as the stream tool
+    --camera-idxes 4 5 --fps 30        # -e/-c merely filter the on-disk outputs
 ```
 
-- Selection flags (`-id`, `-d`, `-c`, `-e`, `--one-per-task`, `-x`, `-o`)
-  match `run_step2_depth_stream.py`; cameras must match the ones used for
-  streaming. `--stride` only affects the view fitting (the rendered steps are
-  the saved file stems).
-- Per segment: `--fps` (10), `--size` (960x540), `--max-points` (100000);
-  output `<seg_dir>/trajectory.mp4` — each frame shows that step's coloured
-  point cloud, camera frustums and the growing camera path, with the view
-  fixed per segment (aligned to the first camera, fitted to the union of the
-  segment's clouds).
-- Segments without saved results are skipped with a message.
+- Episodes, sub-task segments, cameras and rendered steps are discovered
+  from the saved Step-2 outputs on disk (`<out-dir>/depth_pose/ep*/subtask_XX/
+  depth_<cam>/`) — no selection flag has to match the stream tool's run;
+  `-e` (default: every episode with outputs) and `-c` (default: every camera
+  with outputs) only filter what exists, `-x` caps the episode count.
+- Per (segment, camera): `--fps` (10), `--size` (960x540), `--max-points`
+  (100000); output
+  `<out-dir>/visualization/<episode>/subtask_XX/<camera>/depth_pose.mp4` —
+  each frame shows that step's coloured point cloud, the camera's frustum
+  and its growing path, with the view fixed per segment (aligned to the
+  first camera, fitted to the union of the segment's clouds).
+- Cameras without saved results for a segment are skipped with a message.
 
 ## Notes
 

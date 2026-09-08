@@ -18,6 +18,6 @@ python tools/astribot/run_step2_depth_stream.py \
     --with-optical-flow \
     --use-inferred-splits
 
-# render the trajectory videos of this camera:
-# bash scripts/astribot/visualize_subtask_stream.sh -c $CAMERA_IDX \
+# render the depth_pose video of this camera:
+# bash scripts/astribot/visualize_step2_depth_pose.sh -c $CAMERA_IDX \
 #     --fps 15 --size 960x540

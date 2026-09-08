@@ -307,8 +307,8 @@ bash scripts/astribot/run_step2_stereo.sh    # RGB stereo: VGGT-Omega (or DA3), 
 bash scripts/astribot/run_step2_rgbd.sh 0    # RGB-D: for head cam RGB-D Any2Full (a2f) densifies the sensor depth
 bash scripts/astribot/run_step2_rgbd.sh 3    # RGB-D: for Torso RGB-D Any2Full (a2f) densifies the sensor depth
 
-# (Optional) Visualize the depth-pose
-bash scripts/astribot/visualize_subtask_stream.sh
+# (Optional) Visualize the depth-pose (per-camera depth_pose.mp4 videos)
+bash scripts/astribot/visualize_step2_depth_pose.sh
 
 # Step 3 — key-point sampling: key-frame jpgs + RexOmni detections +
 # SAM3/RoMaV2 init points (prompts come from the dataset's meta/subtasks.csv;
@@ -322,8 +322,11 @@ bash scripts/astribot/run_step3_init_points.sh
 # sub-task) -> eps_data/traces/
 bash scripts/astribot/run_step4_traces.sh
 
-# visualize — trajectory video per sub-task from the depth_pose outputs
-bash scripts/astribot/visualize_subtask_stream.sh
+# visualize — per-(sub-task, camera) depth_pose.mp4 + the per-camera
+# Step-4 trace videos (trace2d.mp4 / trace3d.mp4) under
+# <data-root>/eps_data/visualization/<ep>/<subtask_XX>/<camera>/
+bash scripts/astribot/visualize_step2_depth_pose.sh
+bash scripts/astribot/visualize_step4_traces.sh
 ```
 
 Step 2 and Step 4 default to `<data-root>/eps_data/` (`--out-dir`), and the
@@ -366,4 +369,4 @@ The docs live in [`docs/astribot/`](docs/astribot/):
 [`astribot_extract_frames.md`](docs/astribot/astribot_extract_frames.md),
 [`astribot_subtask_stream.md`](docs/astribot/astribot_subtask_stream.md),
 [`astribot_traces.md`](docs/astribot/astribot_traces.md),
-[`astribot_visualize_subtask_stream.md`](docs/astribot/astribot_visualize_subtask_stream.md).
+[`astribot_visualize_step2_depth_pose.md`](docs/astribot/astribot_visualize_step2_depth_pose.md).

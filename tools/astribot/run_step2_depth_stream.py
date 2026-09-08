@@ -4,7 +4,7 @@ LeRobotDataset copy (nothing extracted to disk).
 Streams each sub-task segment of the selected episodes through a chunked
 streaming backend — frames are decoded from the dataset one chunk at a time
 — and saves per-frame depth/pose outputs under
-<out-dir>/depth_pose/<episode>/subtask_XX/ (visualize_subtask_stream.py
+<out-dir>/depth_pose/<episode>/subtask_XX/ (visualize_step2_depth_pose.py
 renders them). The online counterpart of run_depth_stream.py:
 
     episode videos (dataset, sub-task segments)
