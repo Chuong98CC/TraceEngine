@@ -1,19 +1,6 @@
 # Copyright (c) TAPIP3D team(https://tapip3d.github.io/)
 """Streaming inference over a Tapip3D_PT2 model.
 
-Mirrors tapip3d_stream.Tapip3DStreamONNX exactly — same window scheduling
-(plan_windows), same carry/frame0 state machine, same 17-frame window
-stacks [frame0] + [16 window frames] — while the low-level forwards run on
-the torch.export programs. Tapip3D_PT2.forward_window takes a full video
-with absolute window bounds, so each 17-frame window stack is passed with
-local bounds (1, seq_len+1), reproducing the ONNX stream's window semantics
-(window-only normalization stats, corr context over the stack, time-sliced
-to the window). Like the ONNX stream there is NO full-video buffer.
-
-Deviation from the ONNX stream: the PT2 encoder program is static at
-exactly seq_len frames (the ONNX encoder accepted T <= seq_len), so a
-short batch is padded to seq_len for the encode_batch call and the
-returned features are sliced back to the batch's real length.
 """
 
 from typing import Optional, Tuple

@@ -39,6 +39,12 @@ columns of the sub-task's row in meta/subtasks.csv; folder mode: --text-prompts
                   --sampling-mode uniform samples over the whole
                   crops instead and the in-mask top-k filter
                   decides — same crops and filter, different pool;
+                  --sampling-mode no_roma skips RoMAv2 entirely:
+                  the simple baseline uniformly sampling top-k
+                  points inside the mask of the span's first frame
+                  only (manipulator: the 1st key-frame; object:
+                  the 2nd, first of its close..open span), with
+                  the same masks and outputs otherwise;
                   dataset mode: object prompts span the close..open
                   key-frames)
   → top-k keypoints inside the object masks
@@ -118,17 +124,28 @@ python tools/astribot/run_step3_init_points.py \
     --skip-3a --top-k 64
 
 # A/B the RoMAv2 candidate pool (3b-only re-run): --sampling-mode mask
-# (default, both drivers) samples inside the object masks; --sampling-mode
-# uniform samples over the whole enlarged crops and the in-mask top-k
-# filter decides. Same crops, same filter — run both modes into separate
-# output roots to compare (--detections-dir keeps the 3b-only re-run
-# reading the original detections; the default detections/init-points
-# roots are <data-root>/eps_data/sampling_points/{detections,init_points})
+# (default) samples inside the object masks; --sampling-mode uniform
+# samples over the whole enlarged crops and the in-mask top-k filter
+# decides. Same crops, same filter — run both modes into separate output
+# roots to compare (--detections-dir keeps the 3b-only re-run reading the
+# original detections; the default detections/init-points roots are
+# <data-root>/eps_data/sampling_points/{detections,init_points})
 python tools/general_test/pipeline/run_object_init_points.py \
     --data-root /data/astri_making_coffee_v1 --episode-idxes 0 \
     --sampling-mode uniform \
     -o /data/astri_making_coffee_v1/eps_data_uniform \
     --detections-dir /data/astri_making_coffee_v1/eps_data/sampling_points/detections
+
+# Simple-baseline A/B (no RoMaV2): --sampling-mode no_roma uniformly
+# samples top-k points inside the mask of the span's first frame only
+# (manipulator: 1st key-frame; object: 2nd, first of its close..open
+# span) — same SAM3 masks, frame_indices and outputs, so Step 4 windows
+# and gating are unchanged; only the matching is dropped
+python tools/astribot/run_step3_init_points.py \
+    --repo-id Kronze157/astri_making_coffee_vlva \
+    --data-root /data/astri_making_coffee_v1 --episode-idxes 0 \
+    --sampling-mode no_roma \
+    -o /data/astri_making_coffee_v1/eps_data_no_roma
 ```
 
 ## Expected output
@@ -197,7 +214,9 @@ uniform, so downstream consumers always find the same files.
       (default `--sampling-mode mask` constrains the RoMAv2 pool to the
       masks; `--sampling-mode uniform` samples the whole crops and the
       in-mask top-k filter keeps the tracks — the K points stay in-mask
-      either way).
+      either way). With `--sampling-mode no_roma` the K sampled points lie
+      inside the first span frame's mask and viz draws them on that
+      frame's panel only (no cross-frame lines).
 - [ ] Re-run with `--skip-3a` reuses the per-camera detections JSONs (no
       new detection pass — 3a is skipped) and implies `--skip-extract`
       (no re-extraction either — 3b reuses the key-frames on disk).

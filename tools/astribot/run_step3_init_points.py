@@ -159,7 +159,8 @@ def parse_args(argv: list[str] | None = None):
                         default=DEFAULT_STRATEGY,
                         help="RoMAv2 matching strategy (Step 3b, default: "
                              "%(default)s)")
-    parser.add_argument("--sampling-mode", choices=("mask", "uniform"),
+    parser.add_argument("--sampling-mode",
+                        choices=("mask", "uniform", "no_roma"),
                         default=DEFAULT_SAMPLING_MODE,
                         help="where RoMAv2 samples its candidate points "
                              "(Step 3b, default: %(default)s): 'mask' "
@@ -168,7 +169,12 @@ def parse_args(argv: list[str] | None = None):
                              "over the whole enlarged crops instead and "
                              "the in-mask top-k filter alone decides — "
                              "same crops and filter, run both modes into "
-                             "separate --out-dirs to compare")
+                             "separate --out-dirs to compare; 'no_roma' "
+                             "skips RoMAv2 — the simple baseline uniformly "
+                             "sampling top-k points inside the mask of the "
+                             "span's first frame only (manipulator: the "
+                             "1st key-frame; object: the 2nd, first of its "
+                             "transport span)")
     parser.add_argument("--device", default=None, choices=["cuda", "cpu"],
                         help="device (Step 3b; default: auto)")
     parser.add_argument("--skip-extract", action="store_true",

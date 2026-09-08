@@ -39,7 +39,13 @@ By default RoMAv2 samples its candidate points inside the object masks
 (--sampling-mode mask); with --sampling-mode uniform it samples over the
 whole enlarged crops instead and the in-mask top-k filter alone decides —
 same crops and output criterion, different pool (run both modes into
-separate --out-dirs to compare). All checkpoints are the repo defaults.
+separate --out-dirs to compare). --sampling-mode no_roma is the simple
+baseline: no RoMAv2 — top-k points are uniformly sampled inside the mask
+of the span's first frame only (the manipulator's 1st key-frame, the
+object's 2nd — the first of its transport span), with the same full-span
+SAM3 masks, frame_indices and outputs as the matching modes, so Step 4
+sees identical windows and gating minus the matching. All checkpoints are
+the repo defaults.
 
 Examples
 --------
@@ -60,6 +66,7 @@ import json
 import os
 import re
 import sys
+import zlib
 from pathlib import Path
 
 import cv2
@@ -148,7 +155,8 @@ def parse_args(argv: list[str] | None = None):
     parser.add_argument("--num-corresp", type=int, default=2000,
                         help="RoMAv2 candidate points sampled in the anchor "
                              "crop before filtering (default: %(default)s)")
-    parser.add_argument("--sampling-mode", choices=("mask", "uniform"),
+    parser.add_argument("--sampling-mode",
+                        choices=("mask", "uniform", "no_roma"),
                         default="mask",
                         help="where RoMAv2 samples its candidate points: "
                              "'mask' (default) constrains the pool inside "
@@ -157,7 +165,13 @@ def parse_args(argv: list[str] | None = None):
                              "crops instead and the in-mask top-k filter "
                              "alone decides (same crops, same filter — "
                              "run both modes into separate --out-dirs to "
-                             "compare)")
+                             "compare); 'no_roma' skips RoMAv2 entirely — "
+                             "the simple baseline uniformly sampling "
+                             "top-k points inside the mask of the span's "
+                             "first frame only (manipulator: the 1st "
+                             "key-frame; object: the 2nd, first of its "
+                             "transport span), same masks and outputs "
+                             "otherwise")
     parser.add_argument("--strategy", choices=("reference", "cycle"),
                         default="reference",
                         help="RoMAv2 matching strategy (default: %(default)s)")
@@ -411,6 +425,23 @@ class InitPointsExtract:
                 keep.append(i)
         return full[keep][: self.args.top_k], need
 
+    def _sample_in_mask(self, mask: np.ndarray, n: int, seed: int
+                        ) -> np.ndarray:
+        """n distinct pixels uniformly sampled inside a boolean mask.
+
+        Returns (K, 2) float32 full-frame x/y coordinates, K = min(n, mask
+        pixels) — the deterministic no_roma baseline (--sampling-mode
+        no_roma samples its points here instead of matching across the
+        key-frames with RoMAv2).
+        """
+        ys, xs = np.nonzero(mask)
+        k = min(n, len(xs))
+        if k == 0:
+            return np.zeros((0, 2), dtype=np.float32)
+        rng = np.random.default_rng(seed)
+        idx = rng.choice(len(xs), size=k, replace=False)
+        return np.stack([xs[idx], ys[idx]], axis=1).astype(np.float32)
+
     # --- orchestration ---------------------------------------------------------
 
     def run(self) -> None:
@@ -607,65 +638,86 @@ class InitPointsExtract:
                 boxes[j] = b
                 scores[j] = s if s is not None else -1.0
 
-        # Per-key-frame crop boxes: each key-frame is cropped around its
-        # own box (the object can move between key-frames) — the frame's
-        # best SAM3 box, else its largest detection box, else the first box
-        # available anywhere.
-        first_box: list[float] | None = None
-        crop_boxes: list[list[float] | None] = []
-        for j, t in enumerate(keyframes):
-            b = boxes[j].tolist() if boxes[j].any() else None
-            if b is None and seg_dets:
-                preds = (seg_dets.get(str(t)) or {}).get(prompt) or []
-                dets = [d["coords"] for d in preds if d.get("type") == "box"]
-                if dets:
-                    b = max(dets, key=lambda bb: max(0.0, bb[2] - bb[0])
-                            * max(0.0, bb[3] - bb[1]))
-            if b is None:
-                b = first_box
-            else:
-                first_box = first_box or b
-            crop_boxes.append(b)
-        if first_box is not None:
-            # backfill frames without any box (e.g. leading frames before
-            # the first detection) with the first available box
-            crop_boxes = [b if b is not None else first_box
-                          for b in crop_boxes]
-        if empty_reason is None and (not any_mask or first_box is None):
-            empty_reason = "no mask or box"
-
-        # RoMAv2 matching on the enlarged-bbox crops of all key-frames. With
-        # --sampling-mode mask (default) the per-frame mask is cropped with
-        # the same box as the image and fed to RoMAv2, so the candidate pool
-        # is sampled inside the object only (frames without a mask stay
-        # unconstrained). With --sampling-mode uniform RoMAv2 samples over
-        # the whole crops instead and the in-mask filter below keeps only
-        # the tracks inside the masks — same crops, same output criterion,
-        # different pool.
-        mask_gated = self.args.sampling_mode == "mask"
         keypoints = np.zeros((0, n, 2), dtype=np.float32)
-        if empty_reason is None:
-            crops, offsets, crop_masks = [], [], []
-            for rgb, cb, m in zip(frames, crop_boxes, masks):
-                crop, off = self._enlarge_crop(rgb, cb)
-                if crop is None:
-                    empty_reason = "degenerate crop"
-                    break
-                crops.append(crop)
-                offsets.append(off)
-                if mask_gated:
-                    c0x, c0y = off
-                    crop_masks.append(
-                        m[c0y:c0y + crop.shape[0], c0x:c0x + crop.shape[1]]
-                        if m.any() else None)
-            if empty_reason is None:
-                matches = self._match_object(
-                    crops, crop_masks if mask_gated else None)
-                if matches is None:
-                    empty_reason = "no matches"
+        if empty_reason is None and self.args.sampling_mode == "no_roma":
+            # Simple baseline (no RoMAv2): uniformly sample top-k points
+            # inside the mask of the span's first frame — the sub-task's
+            # 1st key-frame for the manipulator (and role-less prompts),
+            # the 2nd for the object (the first of its transport span
+            # after the [1:-1] trim above). No cross-frame matching; the
+            # later keypoint columns carry copies of the sampled points so
+            # the frame_indices span — and with it Step-4's trace window
+            # and per-frame mask gating — stays identical to the RoMAv2
+            # modes (Step 4 anchors on the span's leading stem or its
+            # first key-frame, i.e. column 0, in the common case anyway).
+            if not masks[0].any():
+                empty_reason = "no mask on the sampled key-frame"
+            else:
+                seed = zlib.crc32(
+                    f"{self.ep_idx}:{k}:{self.cam_key}:{prompt}".encode())
+                pts = self._sample_in_mask(masks[0], self.args.top_k, seed)
+                if len(pts):
+                    keypoints = np.repeat(pts[:, None, :], n, axis=1)
+                    in_mask_need = 1
+        elif empty_reason is None:
+            # Per-key-frame crop boxes: each key-frame is cropped around its
+            # own box (the object can move between key-frames) — the frame's
+            # best SAM3 box, else its largest detection box, else the first
+            # box available anywhere.
+            first_box: list[float] | None = None
+            crop_boxes: list[list[float] | None] = []
+            for j, t in enumerate(keyframes):
+                b = boxes[j].tolist() if boxes[j].any() else None
+                if b is None and seg_dets:
+                    preds = (seg_dets.get(str(t)) or {}).get(prompt) or []
+                    dets = [d["coords"] for d in preds if d.get("type") == "box"]
+                    if dets:
+                        b = max(dets, key=lambda bb: max(0.0, bb[2] - bb[0])
+                                * max(0.0, bb[3] - bb[1]))
+                if b is None:
+                    b = first_box
                 else:
-                    keypoints, in_mask_need = self._filter_top_k(
-                        matches, masks, offsets, h, w)
+                    first_box = first_box or b
+                crop_boxes.append(b)
+            if first_box is not None:
+                # backfill frames without any box (e.g. leading frames before
+                # the first detection) with the first available box
+                crop_boxes = [b if b is not None else first_box
+                              for b in crop_boxes]
+            if not any_mask or first_box is None:
+                empty_reason = "no mask or box"
+            # RoMAv2 matching on the enlarged-bbox crops of all key-frames
+            # (the mask/uniform modes). With --sampling-mode mask (default)
+            # the per-frame mask is cropped with the same box as the image
+            # and fed to RoMAv2, so the candidate pool is sampled inside
+            # the object only (frames without a mask stay unconstrained).
+            # With --sampling-mode uniform RoMAv2 samples over the whole
+            # crops instead and the in-mask filter below keeps only the
+            # tracks inside the masks — same crops, same output criterion,
+            # different pool.
+            if empty_reason is None:
+                mask_gated = self.args.sampling_mode == "mask"
+                crops, offsets, crop_masks = [], [], []
+                for rgb, cb, m in zip(frames, crop_boxes, masks):
+                    crop, off = self._enlarge_crop(rgb, cb)
+                    if crop is None:
+                        empty_reason = "degenerate crop"
+                        break
+                    crops.append(crop)
+                    offsets.append(off)
+                    if mask_gated:
+                        c0x, c0y = off
+                        crop_masks.append(
+                            m[c0y:c0y + crop.shape[0], c0x:c0x + crop.shape[1]]
+                            if m.any() else None)
+                if empty_reason is None:
+                    matches = self._match_object(
+                        crops, crop_masks if mask_gated else None)
+                    if matches is None:
+                        empty_reason = "no matches"
+                    else:
+                        keypoints, in_mask_need = self._filter_top_k(
+                            matches, masks, offsets, h, w)
 
         # Save (uniform schema; failures are recorded in init_points.json).
         np.savez(npz_path,
@@ -676,6 +728,9 @@ class InitPointsExtract:
                for j, t in enumerate(keyframes) if masks[j].any()}
         with open(os.path.join(pdir, "masks_rle.json"), "w") as f:
             json.dump(rle, f, indent=2)
+        # The matching knobs (crops, RoMAv2 strategy, checkpoint) only apply
+        # to the mask/uniform modes — no_roma records them as None.
+        roma = self.args.sampling_mode != "no_roma"
         meta = {
             "episode": int(self.ep_idx),
             "subtask": int(k),
@@ -687,41 +742,49 @@ class InitPointsExtract:
             "keyframes": [int(t) for t in keyframes],
             "num_keypoints": int(len(keypoints)),
             "top_k": self.args.top_k,
-            "bbox_scale": self.args.bbox_scale,
-            "num_corresp": self.args.num_corresp,
-            "match_top_k": self.args.top_k * 4,
+            "bbox_scale": self.args.bbox_scale if roma else None,
+            "num_corresp": self.args.num_corresp if roma else None,
+            "match_top_k": self.args.top_k * 4 if roma else None,
             "in_mask_min_frames": int(in_mask_need),
-            "strategy": self.args.strategy,
+            "strategy": self.args.strategy if roma else None,
             "sampling_mode": self.args.sampling_mode,
             "detections_file": str(self._detections_path(self.ep_idx,
                                                           self.cam_key)),
             "sam3_checkpoint": DEFAULT_SAM3_CKPT,
-            "romav2_checkpoint": DEFAULT_ROMAV2_CKPT,
+            "romav2_checkpoint": DEFAULT_ROMAV2_CKPT if roma else None,
             "empty_reason": empty_reason,
         }
         with open(os.path.join(pdir, "init_points.json"), "w") as f:
             json.dump(meta, f, indent=2)
         if not self.args.no_viz and len(keypoints):
-            self._visualize(pdir, frames, keypoints, masks, boxes, prompt)
+            self._visualize(pdir, frames, keypoints, masks, boxes, prompt,
+                            col0_only=self.args.sampling_mode == "no_roma")
         status = empty_reason or f"{len(keypoints)} keypoints"
         print(f"    [{slug}] {status} -> {pdir}")
 
     def _visualize(self, pdir: str, frames: list[np.ndarray],
                    keypoints: np.ndarray, masks: np.ndarray,
-                   boxes: np.ndarray, prompt: str) -> None:
-        """Key-frames side-by-side with the masks, boxes and the tracks."""
+                   boxes: np.ndarray, prompt: str,
+                   col0_only: bool = False) -> None:
+        """Key-frames side-by-side with the masks, boxes and the tracks.
+
+        col0_only: the keypoints exist on the first column only (no_roma)
+        — draw them on the first frame's panel without cross-frame lines
+        (the other columns are copies, not real tracks).
+        """
         imgs = [f[:, :, ::-1] for f in frames]  # RGB -> BGR for cv2
         H0, W0 = imgs[0].shape[:2]
         imgs = [cv2.resize(im, (W0, H0)) for im in imgs]
         stacked = np.hstack(imgs)
         for m, pts in enumerate(keypoints):
             color = tuple(int(c) for c in _PALETTE[m % len(_PALETTE)])
-            for j, (x, y) in enumerate(pts):
+            draw = pts[:1] if col0_only else pts
+            for j, (x, y) in enumerate(draw):
                 cx, cy = int(x) + j * W0, int(y)
                 cv2.circle(stacked, (cx, cy), 3, color, -1)
                 if j > 0:
-                    px, py = (int(pts[j - 1][0]) + (j - 1) * W0,
-                              int(pts[j - 1][1]))
+                    px, py = (int(draw[j - 1][0]) + (j - 1) * W0,
+                              int(draw[j - 1][1]))
                     cv2.line(stacked, (px, py), (cx, cy), color, 1)
         for j in range(len(imgs)):
             if masks[j].any():
