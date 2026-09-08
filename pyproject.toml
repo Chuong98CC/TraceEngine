@@ -56,6 +56,10 @@ dependencies = [
 data = ["pandas"]
 dev = ["pre-commit", "pytest", "pytest-cov", "ruff"]
 
+[project.scripts]
+mu0-train = "mu0.scripts.lerobot_train_trace_mu0:main"
+mu0-predict = "mu0.scripts.lerobot_predict_trace_mu0_image_only:main"
+
 [[tool.uv.index]]
 name = "pytorch-cu128"
 url = "https://download.pytorch.org/whl/cu128"
