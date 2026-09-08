@@ -107,7 +107,8 @@ tools/
 │   ├── run_step2_depth_stream.py   # online per-sub-task depth+pose streaming (da3/vggt_omega/a2f)
 │   ├── run_step3_init_points.py    # Step 3 driver on episodes (key-frames + 3a + 3b)
 │   ├── run_step4_traces.py     # Step 4: TAPIP3D 3D point tracking of the Step-3 keypoints (per-role passes) over the Step-2 depth+pose, online frames
-│   └── visualize_subtask_stream.py  # per-sub-task trajectory videos from the depth_pose outputs (no re-inference)
+│   ├── visualize_subtask_stream.py  # per-sub-task trajectory videos from the depth_pose outputs (no re-inference)
+│   └── visualize_subtask_traces.py  # per-camera Step-4 trace videos (traces_2d/3d.mp4) from the traces outputs (no re-inference)
 ├── push_ckpt_2HF.py            # upload weights/ to Hugging Face (Chuong98vt/TraceEngine)
 └── hifi-umi/                   # HiFi-UMI dataset preprocessing (extract_frames, generate_masks)
 scripts/                        # ready-to-run pipeline scripts
@@ -121,7 +122,8 @@ scripts/                        # ready-to-run pipeline scripts
     ├── run_step2_rgbd.sh       # Step 2: RGB-D depth+pose streaming (a2f densifies the sensor depth)
     ├── run_step3_init_points.sh  # Step 3: key-frames + detections + init points
     ├── run_step4_traces.sh   # Step 4: TAPIP3D 3D point tracking over the step-2/3 results -> eps_data/traces
-    └── visualize_subtask_stream.sh  # trajectory videos from the depth_pose outputs
+    ├── visualize_subtask_stream.sh  # trajectory videos from the depth_pose outputs
+    └── visualize_subtask_traces.sh  # per-camera Step-4 trace videos from the traces outputs
 docs/
 ├── general_test/               # general_test.md master index (mermaid pipeline diagram) +
 │   │                           #   module/ per-model pages (streaming, any2full, waft,

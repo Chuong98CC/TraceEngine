@@ -157,8 +157,13 @@ def _union_scene_points(
     input_dirs: list[str],
     result_dir: str,
     stride: int,
+    extra_points: np.ndarray | None = None,
 ) -> np.ndarray:
     """Union of all frames' clouds (strided) + the trajectory, for view fitting.
+
+    ``extra_points`` (``(M, 3)`` world space, not yet alignment-transformed)
+    is appended as-is so the fitted viewports also cover caller-added
+    geometry (e.g. trace curves overlaid per step).
 
     Geometry only — the per-frame images are discarded anyway, so this works
     without frame folders (e.g. the online visualizer)."""
@@ -181,6 +186,8 @@ def _union_scene_points(
         pts, _ = _depths_to_world_points_with_colors(d, K, extrs, dummy, None, 0.0)
         all_pts.append(pts)
     all_pts.append(load_trajectory(stems, input_dirs, result_dir).reshape(-1, 3))
+    if extra_points is not None:
+        all_pts.append(extra_points.reshape(-1, 3))
     return np.concatenate(all_pts, axis=0)
 
 
@@ -294,6 +301,8 @@ def render_stream_video(
     view_back: float = 0.3,
     view_fov: float | None = None,
     frame_loader: Callable[[str], np.ndarray] | None = None,
+    extra_fit_points: np.ndarray | None = None,
+    trace_geoms_fn: Callable[[int, np.ndarray], list | None] | None = None,
 ) -> str:
     """Render the streaming trajectory video (current-step cloud, growing path).
 
@@ -320,6 +329,18 @@ def render_stream_video(
     live on disk — e.g. ``visualize_subtask_stream.py`` decodes them online
     from a LeRobotDataset.  Geometry (depth/extrinsics/intrinsics) always
     comes from the saved NPZs in ``result_dir``.
+
+    ``extra_fit_points`` (``(M, 3)`` world-space points, NOT yet
+    alignment-transformed) is folded into the scene-point union the view
+    fit and alignment are computed from, so the auto-fitted viewports also
+    cover caller-added geometry (e.g. world-space TAPIP3D trace curves).
+
+    ``trace_geoms_fn(t, alignment)`` is called once per step, right after
+    the frustums are added to the scene, with ``t`` the 0-based step index
+    into ``stems`` and ``alignment`` the computed ``(4, 4)`` transform
+    already applied to the frame geometry.  It returns a list of open3d
+    LineSet/PointCloud geometries whose vertices are ALREADY in the aligned
+    glTF frame (or None/[] for nothing); each is added to that step's scene.
     """
     if not stems:
         raise ValueError("No stems to render.")
@@ -335,8 +356,12 @@ def render_stream_video(
         exts0.append(e)
     extr0 = np.stack(exts0, axis=0)
     # The cloud wraps around the camera path (not around the trajectory
-    # median), so the view is fit to the union of clouds + trajectory.
-    scene_pts = _union_scene_points(stems, input_dirs, result_dir, stride)
+    # median), so the view is fit to the union of clouds + trajectory
+    # (+ any extra trace points, which are fit before ``alignment`` is
+    # computed so the geometry callback below sees the final transform).
+    scene_pts = _union_scene_points(
+        stems, input_dirs, result_dir, stride, extra_points=extra_fit_points
+    )
     alignment = compute_view_transform(extr0, scene_pts)
 
     extent = _scene_max_extent(scene_pts)
@@ -428,6 +453,16 @@ def render_stream_video(
     line_mat.shader = "unlitLine"
     line_mat.line_width = 4.0
 
+    # Per-step trace overlays (from ``trace_geoms_fn``) get their own
+    # records so the cloud/trajectory/frustum widths and sizes above stay
+    # untouched: LineSets render thin (2.0), trace PointClouds render big.
+    trace_line_mat = o3d.visualization.rendering.MaterialRecord()
+    trace_line_mat.shader = "unlitLine"
+    trace_line_mat.line_width = 2.0
+    trace_pcd_mat = o3d.visualization.rendering.MaterialRecord()
+    trace_pcd_mat.shader = "defaultUnlit"
+    trace_pcd_mat.point_size = 6.0
+
     # macro_block_size=1 keeps the exact size (imageio would otherwise pad
     # e.g. 960x540 up to a multiple of 16); even dimensions are enough for
     # libx264/yuv420p, and we enforce them above.
@@ -466,6 +501,18 @@ def render_stream_video(
             if geoms["trajectory"] is not None:
                 renderer.scene.add_geometry("trajectory", geoms["trajectory"], line_mat)
             renderer.scene.add_geometry("frustums", geoms["frustums"], line_mat)
+
+            # Optional per-step trace overlays (e.g. world-space TAPIP3D
+            # trace curves), already in the aligned glTF frame; added with
+            # per-geometry names so the LineSet/PointCloud materials apply.
+            if trace_geoms_fn is not None:
+                for k, geom in enumerate(trace_geoms_fn(t, alignment) or []):
+                    mat = (
+                        trace_line_mat
+                        if isinstance(geom, o3d.geometry.LineSet)
+                        else trace_pcd_mat
+                    )
+                    renderer.scene.add_geometry(f"trace_{k}", geom, mat)
 
             if views == 1:
                 arr = _render_view(renderer, tone_lut, look_at, view_eyes[0][1],

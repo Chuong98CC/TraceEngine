@@ -103,6 +103,29 @@ python tools/astribot/run_step4_traces.py \
 Each sub-task runs up to two passes (object, then manipulator); the
 TAPIP3D encoder/iteration graphs load once per run.
 
+## Visualization
+
+The visualization counterpart of this tool —
+`tools/astribot/visualize_subtask_traces.py` — renders, per tracked
+camera of each sub-task, two videos from the Step-4 trace data:
+
+- `traces_2d.mp4` — the world-space keypoint traces projected back onto
+  the RGB frames, coloured per role (a 2D overlay of the keypoints with
+  their trails);
+- `traces_3d.mp4` — a 3D point-cloud scene with the growing world-space
+  trace curves.
+
+The RGB frames are decoded online from the dataset (nothing extracted to
+disk); the videos are written next to the trace data, inside the camera's
+traces dir:
+
+```bash
+python tools/astribot/visualize_subtask_traces.py \
+    --repo-id Kronze157/astri_making_coffee_vlva \
+    --data-root /data/astri_making_coffee \
+    --episode-idxes 0
+```
+
 ## Output
 
 ```
