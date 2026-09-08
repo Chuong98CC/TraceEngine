@@ -1,6 +1,7 @@
 """CPU-only checks for the src/mu0 port (see docs/superpowers/plans/2026-09-07-mu0-port.md)."""
 import json
 import importlib
+import logging
 from pathlib import Path
 
 import pytest
@@ -80,3 +81,49 @@ def test_from_ckpt_config_release():
     assert cfg.history_len == 8 and cfg.future_len == 32
     # Field is tuple[int, int]; draccus decodes the JSON list into a tuple.
     assert cfg.resize_imgs_with_padding == (512, 512)
+
+
+def test_ft_config_derivation_respects_ckpt_architecture():
+    train_mod = importlib.import_module("mu0.scripts.lerobot_train_trace_mu0")
+    ckpt = MU0_RELEASE / "final_ckpt"
+    if not (ckpt / "config.json").exists():
+        pytest.skip("release checkpoint not present")
+    # A cfg whose CLI architecture flags deliberately disagree with the ckpt:
+    cfg = train_mod.TraceTrainSmolVLAConfig(
+        pretrained_path=str(ckpt), num_vlm_layers=8, expert_width_multiplier=0.25,
+        use_dino=False, history_len=4, lr=2e-4,
+        video_dirs=["/nonexistent"],  # non-empty to satisfy __post_init__
+    )
+    # can't call _build_policy on CPU (model build needs the VLM + GPU); test the
+    # pure part: the derivation helper must prefer the ckpt's architecture.
+    sv_cfg = train_mod._derive_ft_smolvla_config(cfg, delta_scale=(1.0, 1.0, 1.0))
+    assert sv_cfg.num_vlm_layers == 20        # ckpt value wins over CLI
+    assert sv_cfg.expert_width_multiplier == 0.5
+    assert sv_cfg.use_dino is True
+    assert sv_cfg.history_len == 8            # ckpt value wins over CLI
+    assert sv_cfg.optimizer_lr == 2e-4        # whitelisted CLI override applied
+    assert sv_cfg.delta_scale == (1.0, 1.0, 1.0)
+
+
+def test_ft_config_derivation_drift_warning(caplog):
+    train_mod = importlib.import_module("mu0.scripts.lerobot_train_trace_mu0")
+    ckpt = MU0_RELEASE / "final_ckpt"
+    if not (ckpt / "config.json").exists():
+        pytest.skip("release checkpoint not present")
+    cfg = train_mod.TraceTrainSmolVLAConfig(
+        pretrained_path=str(ckpt), num_vlm_layers=8, expert_width_multiplier=0.25,
+        use_dino=False, history_len=4, lr=2e-4,
+        video_dirs=["/nonexistent"],  # non-empty to satisfy __post_init__
+    )
+    with caplog.at_level(logging.WARNING, logger=train_mod.__name__):
+        sv_cfg = train_mod._derive_ft_smolvla_config(cfg, delta_scale=(1.0, 1.0, 1.0))
+    warnings = [r for r in caplog.records if r.name == train_mod.__name__]
+    assert warnings, "expected a drift warning on the module logger"
+    msg = warnings[-1].getMessage()
+    assert "CLI/ckpt config fields differ" in msg
+    # the deliberately-drifted structural fields must be named in the report
+    # (and the ckpt values must have won):
+    for field_name in ("num_vlm_layers", "expert_width_multiplier", "use_dino", "history_len"):
+        assert field_name in msg
+    assert sv_cfg.num_vlm_layers == 20
+    assert sv_cfg.history_len == 8

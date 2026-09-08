@@ -17,6 +17,7 @@ Builds a `SmolVLAPolicy` with `trace_mode=True`. Tokenizer, image size, and LR
 defaults match SmolVLA.
 """
 
+import dataclasses  # dataclasses.fields for the fine-tune CLI/ckpt drift compare
 import datetime as dt
 import glob
 import json
@@ -357,10 +358,125 @@ def _split_video_dirs(
     return train_dirs, eval_dirs
 
 
+# mu0 port addition: fine-tune flow — architecture is derived from the
+# checkpoint's own config.json so structural flags can never silently drift
+# from the trained weights (spec §6; TRAINING.md §4 has no fine-tune recipe).
+# Whitelisted fields may differ from the ckpt config; any OTHER field where
+# the CLI-derived config differs is loudly reported and the ckpt value wins.
+# NOTE: --weight_decay is applied directly to torch.optim.AdamW downstream and
+# never stored in SmolVLAConfig, so it needs no entry here.
+logger = logging.getLogger(__name__)
+_FT_WHITELISTED = {
+    "optimizer_lr",              # --lr
+    "delta_scale",               # --delta_stats_path / auto-computed stats
+    # dropout / augmentation probabilities — training-time distributions only,
+    # no parameter-shape impact:
+    "trace_history_full_mask_prob",
+    "trace_history_kp_dropout_prob",
+    "depth_dropout_prob",
+}
+
+
+def _derive_ft_smolvla_config(
+    cfg: TraceTrainSmolVLAConfig,
+    delta_scale: tuple[float, float, float] | None,
+) -> SmolVLAConfig:
+    """Pure derivation: decode the ckpt's own config.json, report structural
+    drift vs the CLI-built config, apply the runtime-only whitelist. CPU-safe."""
+    from mu0.policies.configuration_smolvla import from_ckpt_config
+
+    sv_cfg = from_ckpt_config(cfg.pretrained_path)
+    if not sv_cfg.trace_mode:
+        raise ValueError(
+            f"pretrained_path {cfg.pretrained_path} is not a μ₀ trace checkpoint "
+            "(trace_mode=false)"
+        )
+    # CLI-built config for the drift comparison (same kwargs as the from-scratch
+    # branch in _build_policy below, with delta_scale as given):
+    cli_cfg = SmolVLAConfig(
+        trace_mode=True,
+        vlm_model_name=cfg.vlm_model_name,
+        history_len=cfg.history_len,
+        future_len=cfg.future_len,
+        n_min=cfg.n_min,
+        n_max=cfg.n_max,
+        num_steps=cfg.num_inference_steps,
+        freeze_vision_encoder=cfg.freeze_vision_encoder,
+        train_expert_only=cfg.train_expert_only,
+        load_vlm_weights=cfg.load_vlm_weights,
+        vlm_lr_multiplier=cfg.vlm_lr_multiplier,
+        num_vlm_layers=cfg.num_vlm_layers,
+        num_expert_layers=cfg.num_expert_layers,
+        expert_width_multiplier=cfg.expert_width_multiplier,
+        resize_imgs_with_padding=(cfg.image_size, cfg.image_size),
+        tokenizer_max_length=cfg.tokenizer_max_length,
+        trace_group_horizon=cfg.trace_group_horizon,
+        trace_history_full_mask_prob=cfg.trace_history_full_mask_prob,
+        trace_history_kp_dropout_prob=cfg.trace_history_kp_dropout_prob,
+        optimizer_lr=cfg.lr,
+        device=cfg.device,
+        use_depth=cfg.use_depth,
+        depth_lora_rank=cfg.depth_lora_rank,
+        depth_lora_alpha=cfg.depth_lora_alpha,
+        depth_clone_stem=cfg.depth_clone_stem,
+        depth_dropout_prob=cfg.depth_dropout_prob,
+        use_dino=cfg.use_dino,
+        dino_model_name=cfg.dino_model_name,
+        dino_input_size=cfg.dino_input_size,
+        dino_num_prefix_tokens=cfg.dino_num_prefix_tokens,
+        rigidity_loss_weight=cfg.rigidity_regularization_weight,
+        trace_done_head=cfg.trace_done_head,
+        done_loss_weight=cfg.done_loss_weight,
+        done_bias_init=cfg.done_bias_init,
+        done_threshold=cfg.done_threshold,
+        trace_bspline_n_ctrl=cfg.trace_bspline_n_ctrl,
+        trace_bspline_ctrl_per_token=cfg.trace_bspline_ctrl_per_token,
+        delta_scale=tuple(delta_scale) if delta_scale is not None else None,
+    )
+    cli_cfg.validate_features()
+    drifted = {
+        f.name: (getattr(cli_cfg, f.name), getattr(sv_cfg, f.name))
+        for f in dataclasses.fields(SmolVLAConfig)
+        if f.name not in _FT_WHITELISTED
+        and getattr(cli_cfg, f.name, None) != getattr(sv_cfg, f.name, None)
+    }
+    if drifted:
+        logger.warning(
+            "pretrained_path fine-tune: %d CLI/ckpt config fields differ and are "
+            "ignored (ckpt config wins) — change the architecture only by editing "
+            "the ckpt's config.json: %s",
+            len(drifted),
+            drifted,
+        )
+    # Runtime-only overrides from the CLI:
+    for k, v in {
+        "optimizer_lr": cfg.lr,
+        "delta_scale": tuple(delta_scale) if delta_scale is not None else sv_cfg.delta_scale,
+        "trace_history_full_mask_prob": cfg.trace_history_full_mask_prob,
+        "trace_history_kp_dropout_prob": cfg.trace_history_kp_dropout_prob,
+        "depth_dropout_prob": cfg.depth_dropout_prob,
+    }.items():
+        setattr(sv_cfg, k, v)
+    return sv_cfg
+
+
+def _build_policy_from_ckpt(
+    cfg: TraceTrainSmolVLAConfig,
+    delta_scale: tuple[float, float, float] | None,
+) -> SmolVLAPolicy:
+    sv_cfg = _derive_ft_smolvla_config(cfg, delta_scale)
+    # strict=False: a vanilla-arch ckpt would miss trace_* params; for μ₀ ckpts
+    # the derived config matches the weights by construction.
+    return SmolVLAPolicy.from_pretrained(str(cfg.pretrained_path), config=sv_cfg, strict=False)
+
+
 def _build_policy(
     cfg: TraceTrainSmolVLAConfig,
     delta_scale: tuple[float, float, float] | None = None,
 ) -> SmolVLAPolicy:
+    if cfg.pretrained_path is not None:
+        return _build_policy_from_ckpt(cfg, delta_scale)
+    # --- from-scratch path (unchanged fork behavior) ---
     sv_cfg = SmolVLAConfig(
         trace_mode=True,
         vlm_model_name=cfg.vlm_model_name,
@@ -402,10 +518,7 @@ def _build_policy(
         delta_scale=tuple(delta_scale) if delta_scale is not None else None,
     )
     sv_cfg.validate_features()
-    if cfg.pretrained_path is None:
-        return SmolVLAPolicy(sv_cfg)
-    # strict=False: trace branch has trace_* params; vanilla smolvla ckpt has action_* + state_proj.
-    return SmolVLAPolicy.from_pretrained(cfg.pretrained_path, config=sv_cfg, strict=False)
+    return SmolVLAPolicy(sv_cfg)
 
 
 def _make_tokenizer(cfg: TraceTrainSmolVLAConfig):
