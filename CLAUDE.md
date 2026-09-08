@@ -42,7 +42,7 @@ uv sync
 ```
 
 The editable install puts both the repo root and `src/` on `sys.path`, so
-`depth_models`, `flow_models`, `det_seg_models`, `utils`, and `tools`
+`depth_models`, `flow_models`, `det_seg_models`, `utils`, `tools`, and `mu0`
 are all importable as top-level packages.
 
 ## Package structure
@@ -76,6 +76,10 @@ src/
 ├── flow_models/
 │   ├── waftv2/                 # WAFTv2_PT2 (torch.export .pt2, bf16) — preprocess/run/postprocess
 │   └── tapip3d/                # TAPIP3D 3D tracking (Tapip3D_PT2: .pt2 encoder + fused corr/updater)
+├── mu0/                        # μ₀ trace world model — lerobot 0.6.1 train/fine-tune/eval (docs/mu0/training.md)
+│   ├── datasets/               # trace_dataset (TraceExtract episodes), trace_delta_stats, depth/bspline helpers
+│   ├── policies/               # SmolVLA-μ₀ — configuration/modeling/processor, smolvlm_with_expert, visualize
+│   └── scripts/                # lerobot_train_trace_mu0 / lerobot_predict_trace_mu0_image_only (mu0-train / mu0-predict)
 └── utils/                       # shared camera types, image I/O, visualizers
     ├── cam_structure.py         # CameraIntrinsics, CameraExtrinsics, read_calib_file
     ├── astribot_dataloader.py   # Astribot dataset: load_rgbd, CAMERA_SETS, depth configs
@@ -107,8 +111,8 @@ tools/
 │   ├── run_step2_depth_stream.py   # online per-sub-task depth+pose streaming (da3/vggt_omega/a2f)
 │   ├── run_step3_init_points.py    # Step 3 driver on episodes (key-frames + 3a + 3b)
 │   ├── run_step4_traces.py     # Step 4: TAPIP3D 3D point tracking of the Step-3 keypoints (per-role passes) over the Step-2 depth+pose, online frames
-│   ├── visualize_subtask_stream.py  # per-sub-task trajectory videos from the depth_pose outputs (no re-inference)
-│   └── visualize_subtask_traces.py  # per-camera Step-4 trace videos (traces_2d/3d.mp4) from the traces outputs (no re-inference)
+│   ├── visualize_step2_depth_pose.py   # per-(sub-task, camera) depth_pose.mp4 videos (visualization/<ep>/<subtask>/<cam>) from the depth_pose outputs (no re-inference)
+│   └── visualize_step4_traces.py   # per-camera Step-4 trace videos (trace2d/3d.mp4, same visualization tree) from the traces outputs (no re-inference)
 ├── push_ckpt_2HF.py            # upload weights/ to Hugging Face (Chuong98vt/TraceEngine)
 └── hifi-umi/                   # HiFi-UMI dataset preprocessing (extract_frames, generate_masks)
 scripts/                        # ready-to-run pipeline scripts
@@ -122,8 +126,8 @@ scripts/                        # ready-to-run pipeline scripts
     ├── run_step2_rgbd.sh       # Step 2: RGB-D depth+pose streaming (a2f densifies the sensor depth)
     ├── run_step3_init_points.sh  # Step 3: key-frames + detections + init points
     ├── run_step4_traces.sh   # Step 4: TAPIP3D 3D point tracking over the step-2/3 results -> eps_data/traces
-    ├── visualize_subtask_stream.sh  # trajectory videos from the depth_pose outputs
-    └── visualize_subtask_traces.sh  # per-camera Step-4 trace videos from the traces outputs
+    ├── visualize_step2_depth_pose.sh  # per-camera depth_pose.mp4 videos (eps_data/visualization/<ep>/<subtask>/<cam>)
+    └── visualize_step4_traces.sh  # per-camera Step-4 trace videos (trace2d/3d.mp4) into the same tree
 docs/
 ├── general_test/               # general_test.md master index (mermaid pipeline diagram) +
 │   │                           #   module/ per-model pages (streaming, any2full, waft,
