@@ -362,7 +362,10 @@ def _split_video_dirs(
 # checkpoint's own config.json so structural flags can never silently drift
 # from the trained weights (spec §6; TRAINING.md §4 has no fine-tune recipe).
 # Whitelisted fields may differ from the ckpt config; any OTHER field where
-# the CLI-derived config differs is loudly reported and the ckpt value wins.
+# the CLI-derived config differs is loudly reported and the ckpt value wins in
+# the derived policy config. Dataset-side CLI fields (window/crop, depth and
+# cluster_ids loading, trace sampling/target shapes) still drive the dataset
+# directly and must be passed matching the ckpt — see the drift warning.
 # NOTE: --weight_decay is applied directly to torch.optim.AdamW downstream and
 # never stored in SmolVLAConfig, so it needs no entry here.
 logger = logging.getLogger(__name__)
@@ -442,9 +445,17 @@ def _derive_ft_smolvla_config(
     }
     if drifted:
         logger.warning(
-            "pretrained_path fine-tune: %d CLI/ckpt config fields differ and are "
-            "ignored (ckpt config wins) — change the architecture only by editing "
-            "the ckpt's config.json: %s",
+            "pretrained_path fine-tune: %d CLI/ckpt config fields differ. "
+            "MODEL-side fields are taken from the ckpt config and the CLI values "
+            "are ignored for the model — change the architecture only by editing "
+            "the ckpt's config.json; the tokenizer likewise follows the ckpt VLM "
+            "(policy.config.vlm_model_name). The CLI value still shapes the run "
+            "for the dataset/run-side counterparts of the compared fields — "
+            "history_len/future_len/n_min/n_max/image_size (dataset window & "
+            "crop), use_depth (dataset loads depth), rigidity_loss_weight (dataset "
+            "loads cluster_ids when >0), trace_group_horizon/trace_bspline_n_ctrl/"
+            "trace_bspline_ctrl_per_token (trace sampling/target shape) — pass "
+            "them matching the checkpoint. Drifted (cli → ckpt): %s",
             len(drifted),
             drifted,
         )
@@ -521,10 +532,16 @@ def _build_policy(
     return SmolVLAPolicy(sv_cfg)
 
 
-def _make_tokenizer(cfg: TraceTrainSmolVLAConfig):
+def _make_tokenizer(vlm_model_name: str):
+    """Build the task-prompt tokenizer for `vlm_model_name`.
+
+    The caller resolves the name: `cfg.vlm_model_name` from-scratch, or
+    `policy.config.vlm_model_name` (the ckpt config's value) when fine-tuning —
+    the tokenizer must always match the VLM that actually backs the policy.
+    """
     from transformers import AutoTokenizer
 
-    tok = AutoTokenizer.from_pretrained(cfg.vlm_model_name)
+    tok = AutoTokenizer.from_pretrained(vlm_model_name)
     tok.padding_side = "right"  # matches embed_prefix's cumsum-based position ids.
     return tok
 
@@ -1713,8 +1730,18 @@ def train(cfg: TraceTrainSmolVLAConfig) -> None:
     elif is_main and cfg.test_video_dirs:
         logging.info("Test set provided but eval_every_n_steps=0 — test disabled.")
 
-    tokenizer = _make_tokenizer(cfg)
+    # The tokenizer must tokenize task prompts for the VLM that backs the policy.
+    # In fine-tune mode the policy config (incl. vlm_model_name) is derived from
+    # the ckpt's config.json, so the policy is built first and its resolved model
+    # name feeds the tokenizer; from-scratch keeps cfg.vlm_model_name (identical
+    # to the fixed-order behavior). Nothing between the old tokenizer call site
+    # and the policy build depends on the tokenizer.
     policy = _build_policy(cfg, delta_scale=delta_scale)
+    tokenizer = _make_tokenizer(
+        policy.config.vlm_model_name
+        if cfg.pretrained_path is not None
+        else cfg.vlm_model_name
+    )
     policy.train()
 
     num_trainable = sum(p.numel() for p in policy.parameters() if p.requires_grad)
