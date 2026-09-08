@@ -96,6 +96,7 @@ uv run python -m mu0.scripts.lerobot_train_trace_mu0 \
   --n_min=1 --n_max=256 \
   --image_size=512 \
   --use_depth=true --rigidity_regularization_weight=5 \
+  --trace_bspline_reg_lambda=0.2 --trace_bspline_reg_order=1 --trace_bspline_ctrl_clip=1.5 \
   --history_len=8 --future_len=32 --trace_group_horizon=8 \
   --trace_bspline_n_ctrl=10 --trace_bspline_ctrl_per_token=10 \
   --steps=4 --log_freq=1 --save_freq=3000 --eval_every_n_steps=0 --vis_num_samples=0 \
@@ -118,6 +119,16 @@ Notes:
   `meta.json`, `accel_state/`), plus a copy of the resolved `delta_stats.json`.
   Resume with `--resume_from=outputs/train/.../checkpoints/step_XXXXXXXX`
   (TRAINING.md §6).
+- Dataset-side knobs with no model-config counterpart — the B-spline reg
+  λ/order/clip and the augmentation strengths — are outside the drift warning's
+  reach and should be kept matching the checkpoint's training recipe (fork
+  TRAINING.md §4).
+- The trainer writes its dataset-scan cache (`trace_dataset_cache_*.pkl`) next
+  to the episode dirs when they live under the repo-root `mu0/` symlink tree,
+  and `--pretrained_path` requires a μ₀ trace checkpoint (`trace_mode=true`):
+  pointing it at a vanilla SmolVLA checkpoint now raises a clear `ValueError`
+  (the fork's vanilla warm-start was removed deliberately — a
+  silent-misalignment hazard).
 
 ## Training from scratch
 

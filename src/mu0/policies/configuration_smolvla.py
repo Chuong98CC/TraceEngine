@@ -382,7 +382,7 @@ import os
 
 def _decode_smolvla_config(raw: dict) -> "SmolVLAConfig":
     """Decode a raw config.json dict into SmolVLAConfig (mechanism verified in
-    Step 3, draccus 0.8.0): filter the dict to SmolVLAConfig's dataclass fields,
+    Step 3, draccus 0.11.6): filter the dict to SmolVLAConfig's dataclass fields,
     then ``draccus.decode(SmolVLAConfig, filtered)``.
 
     Filtering is required: release μ₀ checkpoint configs carry the ``"type"``

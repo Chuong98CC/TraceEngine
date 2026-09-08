@@ -315,7 +315,7 @@ def load_trace_stats(path: str | Path) -> TraceStats:
     if not any(k.startswith("depth_") for k in data):
         raise ValueError(
             f"stats JSON at {p} is missing depth_* keys — regenerate with "
-            f"`python -m lerobot.datasets.trace_delta_stats`"
+            f"`python -m mu0.datasets.trace_delta_stats`"
         )
     delta_scale = (
         float(data["delta_scale_x"]),

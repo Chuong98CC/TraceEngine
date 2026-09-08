@@ -57,7 +57,7 @@ def test_config_encode_decode_roundtrip():
     import draccus
 
     raw = draccus.encode(cfg)
-    dec = draccus.decode(SmolVLAConfig, raw)  # draccus 0.8: decode(target_type, raw)
+    dec = draccus.decode(SmolVLAConfig, raw)  # draccus 0.11.6: decode(target_type, raw)
     assert dec.trace_mode is True
     assert dec.num_vlm_layers == 20
     assert dec.depth_clone_stem is True
