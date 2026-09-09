@@ -70,7 +70,7 @@ Examples
     python tools/astribot/run_step3_init_points.py
         --repo-id Kronze157/astri_making_coffee_vlva
         --data-root /data/astri_making_coffee_v1 --episode-idxes 0
-        --skip-3a --top-k 64
+        --skip-3a --object-top-k 64
 """
 
 from __future__ import annotations
@@ -89,7 +89,14 @@ from utils.keyframe_utils import (
 )
 
 DEFAULT_MAX_KEYFRAMES = 8
-DEFAULT_TOP_K = 64
+#: final keypoints kept per object prompt per sub-task.
+DEFAULT_OBJECT_TOP_K = 64
+#: the manipulator is sampled denser than the object prompts: the Step-4
+#: static filters remove the stationary keypoints, so the moving
+#: manipulator needs more seeds to keep enough survivors (its pass tracks
+#: up to 128 role keypoints, the shipped iteration graph trimming the
+#: support grid to 1088 - 128 = 960 to keep its fixed 1088 queries).
+DEFAULT_MANIPULATOR_TOP_K = 128
 DEFAULT_BBOX_SCALE = 1.25
 DEFAULT_NUM_CORRESP = 2000
 DEFAULT_STRATEGY = "reference"
@@ -145,9 +152,18 @@ def parse_args(argv: list[str] | None = None):
                              "dataset's ground-truth subtask_index column "
                              "(Step 1 key-frames extraction; default: ground "
                              "truth when present)")
-    parser.add_argument("--top-k", type=int, default=DEFAULT_TOP_K,
-                        help="final keypoints kept per prompt per sub-task "
-                             "(Step 3b, default: %(default)s)")
+    parser.add_argument("--object-top-k", type=int,
+                        default=DEFAULT_OBJECT_TOP_K,
+                        help="final keypoints kept per object prompt per "
+                             "sub-task (Step 3b, default: %(default)s; the "
+                             "manipulator prompt uses --manipulator-top-k)")
+    parser.add_argument("--manipulator-top-k", type=int,
+                        default=DEFAULT_MANIPULATOR_TOP_K,
+                        help="final keypoints kept per manipulator prompt "
+                             "per sub-task (Step 3b — the manipulator is "
+                             "sampled denser so enough of its points "
+                             "survive the Step-4 static filters; default: "
+                             "%(default)s)")
     parser.add_argument("--bbox-scale", type=float, default=DEFAULT_BBOX_SCALE,
                         help="enlargement factor of the bounding-box crops fed "
                              "to RoMAv2 (Step 3b, default: %(default)s)")
@@ -373,7 +389,8 @@ def _build_3b_cmd(args, repo_root: Path) -> list[str]:
         cmd += ["--max-episodes", str(args.max_episodes)]
     cmd += ["--out-dir", str(_out_root(args))]
     cmd += ["--max-keyframes", str(args.max_keyframes),
-            "--top-k", str(args.top_k),
+            "--object-top-k", str(args.object_top_k),
+            "--manipulator-top-k", str(args.manipulator_top_k),
             "--bbox-scale", str(args.bbox_scale),
             "--num-corresp", str(args.num_corresp),
             "--strategy", args.strategy,

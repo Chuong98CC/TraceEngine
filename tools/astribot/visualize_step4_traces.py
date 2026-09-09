@@ -1,11 +1,11 @@
-"""Per-sub-task 3D-trace videos, online — the visualization counterpart of
-run_step4_traces.py.
+"""Per-sub-task 3D-trace visualization, online — the visualization
+counterpart of run_step4_traces.py.
 
-For every tracked camera of the selected episodes it renders two videos
-under the shared visualization tree, with NO model inference and nothing
-extracted to disk — RGB frames decoded online from the LeRobotDataset,
-geometry from the Step-2 depth_pose npzs, traces from the Step-4
-coords/visibs:
+For every tracked camera of the selected episodes it renders videos or
+still images under the shared visualization tree, with NO model inference
+and nothing extracted to disk — RGB frames decoded online from the
+LeRobotDataset, geometry from the Step-2 depth_pose npzs, traces from the
+Step-4 coords/visibs:
 
     <out>/visualization/<episode>/subtask_XX/<camera>/
         trace2d.mp4  — the world-space keypoint traces projected back onto
@@ -16,6 +16,17 @@ coords/visibs:
                        as visualize_step2_depth_pose.py renders) with the
                        growing world-space trace curves overlaid in role
                        colors.
+
+``--render stills`` replaces the videos with one trace2d PNG per Step-3
+key-frame of the camera (the jpgs extract_frames.py --mode key_frames
+saved under the sampling_points key_frames/ tree, read off disk):
+
+        trace2d_stills/frame_<k>.png — the trace2d overlay at the traced
+                       stem nearest the key-frame's dataset index, drawn
+                       on the key-frame image (key-frame indices are
+                       arbitrary, trace rows live on the strided Step-2
+                       stems, so each key-frame snaps to its nearest
+                       stem).
 
 Different role prompts cover different step windows (object = the
 close..open transport only, manipulator = the whole sub-task), so each
@@ -38,6 +49,13 @@ Examples
     python tools/astribot/visualize_step4_traces.py
         --repo-id Kronze157/astri_making_coffee_vlva
         --data-root /data/astri_making_coffee --episode-idxes 0
+
+    # Step-3 key-frame stills of the 2D overlay instead of the videos
+    # (--keyframes-root defaults to <out-dir>/sampling_points/key_frames)
+    python tools/astribot/visualize_step4_traces.py
+        --repo-id Kronze157/astri_making_coffee_vlva
+        --data-root /data/astri_making_coffee --episode-idxes 0
+        --render stills
 """
 
 from __future__ import annotations
@@ -77,6 +95,7 @@ TRAIL_ALPHA = 0.4
 
 _EP_RE = re.compile(r"^ep(\d{6})$")
 _SUB_RE = re.compile(r"^subtask_(\d+)$")
+_FRAME_RE = re.compile(r"^frame_(\d+)\.(?:jpg|jpeg|png)$")
 
 
 def _role_color_rgb01(role: str | None) -> np.ndarray:
@@ -96,6 +115,29 @@ def _project_points(world: np.ndarray, intr: np.ndarray,
     cam = cam[:, :3] / cam[:, 3:]
     img = (intr @ cam.T).T                                     # (Q, 3)
     return img[:, :2] / img[:, 2:]
+
+
+def _snap_stems(union_stems: list[int], kf_idxes: list[int]
+                ) -> dict[int, list[int]]:
+    """Key-frame indices snapped onto the traced-step grid:
+    {stem: [key-frames ...]} with each key-frame mapped to its nearest
+    union stem (ties to the earlier stem, ends clamped) — trace rows and
+    Step-2 pose npzs only exist at the strided stems, while the Step-3
+    key-frames sit at arbitrary dataset indices, so a still draws the
+    trace state of the stem nearest in time to its key-frame."""
+    u = np.asarray(union_stems)
+    out: dict[int, list[int]] = {}
+    for k in kf_idxes:
+        a = np.searchsorted(u, k)
+        if a == 0:
+            s = int(u[0])
+        elif a == len(u):
+            s = int(u[-1])
+        else:
+            lo, hi = int(u[a - 1]), int(u[a])
+            s = lo if (k - lo) <= (hi - k) else hi
+        out.setdefault(s, []).append(int(k))
+    return out
 
 
 def _hud_text(canvas: np.ndarray, text: str, org: tuple[int, int],
@@ -127,16 +169,18 @@ def _draw_legend(canvas: np.ndarray, roles_present: list, y: int) -> None:
 
 def parse_args(argv: list[str] | None = None):
     parser = argparse.ArgumentParser(
-        description="Render the Step-4 3D-trace videos (trace2d.mp4 / "
-                    "trace3d.mp4) of every selected camera of each sub-task "
-                    "segment of an episode, online (RGB frames decoded from "
-                    "the LeRobotDataset; geometry from the Step-2 depth_pose "
-                    "NPZs; traces from the Step-4 coords/visibs). Episodes, "
-                    "sub-task segments, cameras and rendered steps are "
-                    "discovered from the saved Step-4 trace outputs on disk "
-                    "— no split inference, no subtask_splits.json, no "
-                    "selection flag that must match the run_step4_traces.py "
-                    "run; -e/-c only filter what exists."
+        description="Render the Step-4 3D-trace outputs of every selected "
+                    "camera of each sub-task segment of an episode, online "
+                    "(RGB frames decoded from the LeRobotDataset; geometry "
+                    "from the Step-2 depth_pose NPZs; traces from the Step-4 "
+                    "coords/visibs): trace2d.mp4 / trace3d.mp4 videos, or "
+                    "--render stills — one trace2d PNG per Step-3 key-frame "
+                    "jpg of the camera. Episodes, sub-task segments, "
+                    "cameras and rendered steps are discovered from the "
+                    "saved Step-4 trace outputs on disk — no split "
+                    "inference, no subtask_splits.json, no selection flag "
+                    "that must match the run_step4_traces.py run; -e/-c "
+                    "only filter what exists."
     )
     parser.add_argument("--repo-id", "-id", required=True,
                         help="dataset repo id as seen by LeRobotDataset")
@@ -206,10 +250,18 @@ def parse_args(argv: list[str] | None = None):
         help="override the auto-fitted vertical field of view in degrees "
              "(default: auto-fit each viewport to the scene)",
     )
-    parser.add_argument("--render", choices=["2d", "3d", "both"],
+    parser.add_argument("--render", choices=["2d", "3d", "both", "stills"],
                         default="both",
-                        help="which videos to render per camera "
-                             "(default: %(default)s)")
+                        help="which outputs to render per camera: the 2d/3d "
+                             "videos, or 'stills' — one trace2d PNG per "
+                             "Step-3 key-frame jpg of the camera instead of "
+                             "any video (default: %(default)s)")
+    parser.add_argument("--keyframes-root", default=None,
+                        help="Step-3 key-frame jpgs root of the --render "
+                             "stills mode (default: <out-dir>/sampling_"
+                             "points/key_frames — the tree extract_frames.py "
+                             "--mode key_frames / run_step3_init_points.py "
+                             "writes)")
     return parser.parse_args(argv)
 
 
@@ -241,14 +293,22 @@ class SubtaskTraceVisualize:
         # Step-4 trace outputs read from <out-dir>/traces/<episode>/
         # subtask_XX/<camera>/, Step-2 geometry from <out-dir>/depth_pose/
         # <episode>/subtask_XX/ — the videos go to the sibling
-        # visualization/ tree
+        # visualization/ tree. --render stills reads the Step-3 key-frame
+        # jpgs from the key_frames/ tree of the Step-3 sampling_points
+        # workspace (<out-dir>/sampling_points/key_frames)
         self.trace_root = Path(self.out_dir) / "traces"
         self.depth_pose_root = Path(self.out_dir) / "depth_pose"
         self.viz_root = Path(self.out_dir) / "visualization"
+        self.keyframes_root = Path(
+            args.keyframes_root) if args.keyframes_root else \
+            Path(self.out_dir) / "sampling_points" / "key_frames"
         # per-camera state, set by _process_camera()
         self.ep_idx = self.k = self.cam_key = self.cam_subdir = None
         self.seg_dir: Path | None = None      # depth_pose/<ep>/subtask_XX
         self.seg_depth_dir: Path | None = None  # .../subtask_XX/depth_<cam>
+        # per-camera Step-3 key-frame jpgs of the stills mode:
+        # {abs dataset index: jpg path}, set by _render_2d_stills
+        self.kf_jpgs: dict[int, Path] = {}
         self.n_rendered = 0
 
     # --- dataset access -----------------------------------------------------
@@ -476,6 +536,8 @@ class SubtaskTraceVisualize:
             self._render_2d(prompts, union_abs, viz_dir / "trace2d.mp4")
         if self.args.render in ("3d", "both"):
             self._render_3d(prompts, union_abs, viz_dir / "trace3d.mp4")
+        if self.args.render == "stills":
+            self._render_2d_stills(prompts, union_abs, viz_dir)
         self.n_rendered += 1
 
     def _read_prompt(self, pdir: Path) -> dict:
@@ -500,7 +562,7 @@ class SubtaskTraceVisualize:
             "visibs": np.asarray(visibs, dtype=bool),   # (T, Q)
             "row_of": {step: r for r, step in enumerate(steps)},
             # recent projected 2D history of the prompt's own rendered
-            # steps (filled by _render_2d, capped at --trail-len)
+            # steps (filled by the 2D renders, capped at --trail-len)
             "trail_px": [],
             "trail_vis": [],
         }
@@ -605,6 +667,112 @@ class SubtaskTraceVisualize:
                  f"{self.cam_subdir} | abs {abs_step:04d}")
         _hud_text(frame, label, (8, 22), (255, 255, 255))
         _draw_legend(frame, roles_present, 46)
+
+    # --- 2D key-frame stills -------------------------------------------------
+
+    def _render_2d_stills(self, prompts: list[dict], union_abs: list[int],
+                          viz_dir: Path) -> Path:
+        """--render stills: one trace2d PNG per Step-3 key-frame jpg of the
+        camera (trace2d_stills/frame_<k>.png) instead of any video — a quick
+        disk-based QC of the traces on the handful of frames Step 3 sampled,
+        with no online frame decode.
+
+        Each still carries the exact overlay trace2d.mp4 would show at the
+        traced stem nearest the key-frame's dataset index (the strided
+        Step-2 stems and the arbitrary key-frame indices rarely coincide,
+        so every key-frame is snapped via _snap_stems): role-colored
+        markers + age-faded trails + occluded red + HUD, composited on the
+        key-frame image — the HUD reads "kf <k> ~ stem <s>" so the snap is
+        visible. The trail arrays advance over the whole union exactly as
+        the video loop advances them, so the state drawn at the snap stem
+        matches the video frame there; prompts without a row at the stem
+        (e.g. the object before its transport window) stay undrawn, as in
+        the video."""
+        kf_dir = (self.keyframes_root / f"ep{self.ep_idx:06d}"
+                  / f"subtask_{self.k:02d}" / self.cam_subdir)
+        jpgs: dict[int, Path] = {}
+        if kf_dir.is_dir():
+            for f in sorted(kf_dir.iterdir()):
+                if f.is_file() and (m := _FRAME_RE.match(f.name)):
+                    jpgs[int(m.group(1))] = f
+        if not jpgs:
+            print(f"  [subtask {self.k:02d}] camera {self.cam_subdir}: "
+                  f"skip stills, no Step-3 key-frame jpgs under {kf_dir} "
+                  f"(run extract_frames.py --mode key_frames or pass "
+                  f"--keyframes-root)")
+            return viz_dir
+        self.kf_jpgs = jpgs
+        kf_idxes = sorted(jpgs)
+        by_stem = _snap_stems(union_abs, kf_idxes)
+        # all key-frame jpgs of a camera share its native resolution — the
+        # draw space of the walk (every stem's projections land there, and
+        # the intrinsics are scaled onto it, like the video's frames)
+        probe = self._decode_kf(kf_idxes[0])
+        if probe is None:
+            print(f"  [subtask {self.k:02d}] camera {self.cam_subdir}: "
+                  f"skip stills, unreadable key-frame {self.kf_jpgs[kf_idxes[0]]}")
+            return viz_dir
+        draw_h, draw_w = probe.shape[:2]
+        out_dir = viz_dir / "trace2d_stills"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        decoded: dict[int, np.ndarray] = {kf_idxes[0]: probe}
+        n = 0
+        for i, s in enumerate(union_abs):
+            intr, extr, shape = self._pose_at(self.seg_depth_dir, s)
+            # intrinsics sit at the npz depth resolution; scale them row-wise
+            # onto the key-frame resolution — the convention of _render_2d
+            # (shape missing -> treat the npz intrinsics as already key-frame)
+            if shape is not None and (draw_h, draw_w) != tuple(shape):
+                intr[0, :] *= (draw_w - 1) / (shape[1] - 1)
+                intr[1, :] *= (draw_h - 1) / (shape[0] - 1)
+            # advance every prompt's trail state on the stem — also the
+            # non-snapped ones, so the drawn trail matches the video's at
+            # the snap stem (same ordering as the _render_2d loop)
+            px_at: dict[str, np.ndarray] = {}
+            for p in prompts:
+                r = p["row_of"].get(s)
+                if r is None:
+                    continue
+                px_at[p["slug"]] = _project_points(p["coords"][r], intr, extr)
+                p["trail_px"].append(px_at[p["slug"]])
+                p["trail_vis"].append(p["visibs"][r])
+                if self.args.trail_len > 0:
+                    del p["trail_px"][:-self.args.trail_len]
+                    del p["trail_vis"][:-self.args.trail_len]
+            for k in by_stem.get(s, []):
+                frame = decoded.get(k)
+                if frame is None:
+                    frame = self._decode_kf(k)
+                    if frame is None:
+                        print(f"  [subtask {self.k:02d}] camera "
+                              f"{self.cam_subdir}: skip kf {k}, unreadable "
+                              f"{self.kf_jpgs[k]}")
+                        continue
+                    decoded[k] = frame
+                overlay = frame.copy()
+                for p in prompts:
+                    if p["slug"] not in px_at:
+                        continue
+                    self._draw_trail(overlay, p)
+                    r = p["row_of"][s]
+                    self._draw_points(overlay, px_at[p["slug"]],
+                                      p["visibs"][r], ROLE_COLORS[p["role"]])
+                out = cv2.addWeighted(frame, 0.3, overlay, 0.7, 0)
+                label = (f"ep{self.ep_idx:06d} subtask_{self.k:02d} "
+                         f"{self.cam_subdir} | kf {k:04d} ~ stem {s:04d}")
+                _hud_text(out, label, (8, 22), (255, 255, 255))
+                _draw_legend(out, [p["role"] for p in prompts], 46)
+                cv2.imwrite(str(out_dir / f"frame_{k:06d}.png"), out)
+                n += 1
+                print(f"  rendered still {n}/{len(kf_idxes)}: "
+                      f"kf {k:04d} ~ stem {s:04d}")
+        print(f"    -> {out_dir} ({n} still(s))")
+        return out_dir
+
+    def _decode_kf(self, abs_idx: int) -> np.ndarray | None:
+        """One Step-3 key-frame jpg of the current camera, decoded as BGR
+        uint8 at its native resolution."""
+        return cv2.imread(str(self.kf_jpgs[abs_idx]))
 
     # --- 3D scene -----------------------------------------------------------
 

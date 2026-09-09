@@ -136,6 +136,26 @@ python tools/astribot/visualize_step4_traces.py \
     --episode-idxes 0
 ```
 
+Instead of the videos, `--render stills` saves one trace2d PNG per
+Step-3 key-frame of the camera — the same 2D overlay (role-colored
+keypoints + trails, occluded red, HUD + legend) composited on the
+key-frame image itself, read off the Step-3 `key_frames/` tree (no
+online frame decode), under
+`<out-dir>/visualization/<episode>/subtask_XX/<camera>/trace2d_stills/frame_<k>.png`.
+The Step-3 key-frames sit at arbitrary dataset indices while the trace
+rows live on the strided Step-2 stems, so each key-frame draws the trace
+state of the stem nearest to it in time (the HUD reads
+`kf <k> ~ stem <s>`); prompts without a row there (e.g. the object
+before its transport window) stay undrawn, exactly as in the video:
+
+```bash
+python tools/astribot/visualize_step4_traces.py \
+    --repo-id Kronze157/astri_making_coffee_vlva \
+    --data-root /data/astri_making_coffee \
+    --episode-idxes 0 --render stills
+# --keyframes-root overrides the default <out-dir>/sampling_points/key_frames
+```
+
 ## Output
 
 ```

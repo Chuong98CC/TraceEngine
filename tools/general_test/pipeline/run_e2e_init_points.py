@@ -39,7 +39,7 @@ Examples
     # --skip-3a skips the RexOmni pass and reuses the detections JSON —
     # ep{episode_idx:06d}.json must already be on disk (missing -> error)
     python tools/general_test/pipeline/run_e2e_init_points.py
-        --keyframes-dir .../subtask_00/cam_head --skip-3a --top-k 64
+        --keyframes-dir .../subtask_00/cam_head --skip-3a --object-top-k 64
 """
 
 from __future__ import annotations
@@ -51,7 +51,7 @@ from pathlib import Path
 
 DEFAULT_PROMPTS = ["brown coffee cup", "left robot arm black gripper", "right robot arm black gripper"]
 DEFAULT_MAX_KEYFRAMES = 8
-DEFAULT_TOP_K = 128
+DEFAULT_OBJECT_TOP_K = 128
 DEFAULT_BBOX_SCALE = 1.25
 DEFAULT_NUM_CORRESP = 2000
 DEFAULT_STRATEGY = "reference"
@@ -92,7 +92,8 @@ def parse_args(argv: list[str] | None = None):
     parser.add_argument("--max-keyframes", type=int, default=DEFAULT_MAX_KEYFRAMES,
                         help="cap the key-frames (evenly spaced); None "
                              "disables the cap (default: %(default)s)")
-    parser.add_argument("--top-k", type=int, default=DEFAULT_TOP_K,
+    parser.add_argument("--object-top-k", type=int,
+                        default=DEFAULT_OBJECT_TOP_K,
                         help="final keypoints kept per prompt (Step 3b, "
                              "default: %(default)s)")
     parser.add_argument("--bbox-scale", type=float, default=DEFAULT_BBOX_SCALE,
@@ -177,7 +178,7 @@ def _build_3b_cmd(args, repo_root: Path) -> list[str]:
     if args.camera_key:
         cmd += ["--camera-key", args.camera_key]
     cmd += ["--max-keyframes", str(args.max_keyframes),
-            "--top-k", str(args.top_k),
+            "--object-top-k", str(args.object_top_k),
             "--bbox-scale", str(args.bbox_scale),
             "--num-corresp", str(args.num_corresp),
             "--strategy", args.strategy]

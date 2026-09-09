@@ -106,6 +106,15 @@ _PALETTE = np.array(
 )
 
 
+def _prompt_top_k(top_k: int, manipulator_top_k: int | None,
+                  role: str | None) -> int:
+    """Per-prompt keypoint cap of one prompt: the manipulator role samples
+    ``manipulator_top_k`` (falling back to ``top_k``), every other prompt
+    ``top_k``. The manipulator is sampled denser so enough of its points
+    survive the Step-4 static filters (--filter-static-*)."""
+    return (manipulator_top_k or top_k) if role == "manipulator" else top_k
+
+
 def parse_args(argv: list[str] | None = None):
     parser = argparse.ArgumentParser(
         description="Step 3b: SAM3 masks + RoMAv2 keypoints on the saved "
@@ -144,9 +153,18 @@ def parse_args(argv: list[str] | None = None):
                         help="output root (default: <data-root>/eps_data/"
                              "sampling_points); results land under "
                              "<out-dir>/init_points/")
-    parser.add_argument("--top-k", type=int, default=128,
-                        help="final keypoints kept per prompt per sub-task "
-                             "(default: %(default)s)")
+    parser.add_argument("--object-top-k", type=int, default=128,
+                        help="final keypoints kept per object prompt per "
+                             "sub-task (also the cap of role-less prompts, "
+                             "e.g. folder mode; default: %(default)s)")
+    parser.add_argument("--manipulator-top-k", type=int, default=None,
+                        help="final keypoints kept per manipulator-role "
+                             "prompt per sub-task — the manipulator is "
+                             "sampled denser so enough of its points "
+                             "survive the Step-4 static filters "
+                             "(overrides --object-top-k for the "
+                             "manipulator role; default: same as "
+                             "--object-top-k)")
     parser.add_argument("--bbox-scale", type=float, default=1.5,
                         help="enlargement factor of the bounding-box crops fed "
                              "to RoMAv2 (centered, clamped to the frame) "
@@ -372,8 +390,8 @@ class InitPointsExtract:
         return np.ascontiguousarray(rgb[c0y:c1y, c0x:c1x]), (c0x, c0y)
 
     def _match_object(self, crops: list[np.ndarray],
-                      crop_masks: list[np.ndarray | None] | None = None
-                      ) -> np.ndarray | None:
+                      crop_masks: list[np.ndarray | None] | None = None,
+                      top_k: int | None = None) -> np.ndarray | None:
         """RoMAv2 matching of the crops: returns (K, N, 2) pixel coordinates
         in crop space (already ranked by worst-case overlap), or None.
 
@@ -382,11 +400,16 @@ class InitPointsExtract:
         the sampled points lie inside the object masks. Pass None (or omit)
         for uniform sampling over the crops — the caller's in-mask top-k
         filter then decides alone (--sampling-mode uniform).
+
+        top_k: the prompt's keypoint cap (default: --object-top-k; the RoMAv2
+        candidate pool is 4x the cap).
         """
+        if top_k is None:
+            top_k = self.args.object_top_k
         positions, _ = self._ensure_romav2().match(
             crops, strategy=self.args.strategy,
             num_corresp=self.args.num_corresp,
-            overlap_th=None, top_k=self.args.top_k * 4, cycle_th=CYCLE_TH,
+            overlap_th=None, top_k=top_k * 4, cycle_th=CYCLE_TH,
             masks=crop_masks)
         if positions.shape[0] == 0:
             return None
@@ -396,16 +419,19 @@ class InitPointsExtract:
              for j in range(len(crops))], dim=1).cpu().numpy()
 
     def _filter_top_k(self, matches_crop: np.ndarray, masks: np.ndarray,
-                      offsets: list[tuple[int, int]], h: int, w: int
-                      ) -> tuple[np.ndarray, int]:
+                      offsets: list[tuple[int, int]], h: int, w: int,
+                      top_k: int | None = None) -> tuple[np.ndarray, int]:
         """Full-frame keypoints + the required in-mask frame count.
 
         A track must lie inside the object mask on at least half of the
         key-frames that have a mask (ceil, min 1) — objects are occluded or
         move between key-frames, so a strict all-frames check would drop
-        every point. Survivors are capped at --top-k; they are already
-        ranked by worst-case overlap across the key-frames.
+        every point. Survivors are capped at the prompt's top-k (default:
+        --object-top-k); they are already ranked by worst-case overlap across the
+        key-frames.
         """
+        if top_k is None:
+            top_k = self.args.object_top_k
         n = matches_crop.shape[1]
         full = matches_crop.copy()
         for j in range(n):
@@ -422,7 +448,7 @@ class InitPointsExtract:
                     hits += 1
             if hits >= need:
                 keep.append(i)
-        return full[keep][: self.args.top_k], need
+        return full[keep][:top_k], need
 
     def _sample_in_mask(self, mask: np.ndarray, n: int, seed: int
                         ) -> np.ndarray:
@@ -610,6 +636,8 @@ class InitPointsExtract:
         if role == "object":
             keyframes = keyframes[1:-1]
             frames = frames[1:-1]
+        top_k = _prompt_top_k(self.args.object_top_k, self.args.manipulator_top_k,
+                              role)
         n = len(keyframes)
         h, w = frames[0].shape[:2] if frames else (0, 0)
         empty_reason = None
@@ -654,7 +682,7 @@ class InitPointsExtract:
             else:
                 seed = zlib.crc32(
                     f"{self.ep_idx}:{k}:{self.cam_key}:{prompt}".encode())
-                pts = self._sample_in_mask(masks[0], self.args.top_k, seed)
+                pts = self._sample_in_mask(masks[0], top_k, seed)
                 if len(pts):
                     keypoints = np.repeat(pts[:, None, :], n, axis=1)
                     in_mask_need = 1
@@ -711,12 +739,12 @@ class InitPointsExtract:
                             if m.any() else None)
                 if empty_reason is None:
                     matches = self._match_object(
-                        crops, crop_masks if mask_gated else None)
+                        crops, crop_masks if mask_gated else None, top_k)
                     if matches is None:
                         empty_reason = "no matches"
                     else:
                         keypoints, in_mask_need = self._filter_top_k(
-                            matches, masks, offsets, h, w)
+                            matches, masks, offsets, h, w, top_k)
 
         # Save (uniform schema; failures are recorded in init_points.json).
         np.savez(npz_path,
@@ -740,10 +768,10 @@ class InitPointsExtract:
             "role": role,
             "keyframes": [int(t) for t in keyframes],
             "num_keypoints": int(len(keypoints)),
-            "top_k": self.args.top_k,
+            "top_k": top_k,
             "bbox_scale": self.args.bbox_scale if roma else None,
             "num_corresp": self.args.num_corresp if roma else None,
-            "match_top_k": self.args.top_k * 4 if roma else None,
+            "match_top_k": top_k * 4 if roma else None,
             "in_mask_min_frames": int(in_mask_need),
             "strategy": self.args.strategy if roma else None,
             "sampling_mode": self.args.sampling_mode,
