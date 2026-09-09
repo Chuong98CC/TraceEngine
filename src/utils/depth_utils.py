@@ -13,7 +13,20 @@ QUANT_MAX = 255  # 8-bit quantization levels of the log-depth codec
 def unproject_depth_map_to_point_map(
     depth_map: np.ndarray, extrinsic: np.ndarray, intrinsic: np.ndarray
 ) -> np.ndarray:
-    depth = depth_map[..., 0] if depth_map.ndim == 4 else depth_map
+    """Unproject batched depth maps to 3D world-space points.
+
+    Depth follows the repo's channel-first convention: a 4D map is
+    ``(N, 1, H, W)`` (channel dim at index 1), not channel-last ``(N, H, W, 1)``.
+
+    Args:
+        depth_map: (N, H, W) or (N, 1, H, W) float32 depth in metres.
+        extrinsic: (N, 3, 4) or (N, 4, 4) world-to-camera.
+        intrinsic: (N, 3, 3).
+
+    Returns:
+        (N, H, W, 3) world-space points.
+    """
+    depth = depth_map[:, 0] if depth_map.ndim == 4 else depth_map  # (N,1,H,W)->(N,H,W)
     N, H, W = depth.shape
 
     y, x = np.meshgrid(np.arange(H), np.arange(W), indexing="ij")

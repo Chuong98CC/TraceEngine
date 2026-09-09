@@ -89,17 +89,32 @@ def build_parser() -> argparse.ArgumentParser:
 def _load_folder_pair(rgb_dir: Path, npz_dir: Path, stem: str):
     """Load ``(rgb, depth_m, ext, ixt)`` for one stem from the folder pair.
 
-    ``<npz_dir>/<stem>.lz4`` holds the log-encoded uint8 depth (see
-    utils.depth_utils.load_depth_lz4), decoded to float32 metres and
-    reshaped to the RGB frame size; ``<npz_dir>/<stem>.npz`` holds
-    ``extrinsics`` (3x4/4x4) and ``intrinsics`` (3x3). The intrinsics are
-    recorded at the depth resolution, so resizing RGB to the depth
-    resolution needs no intrinsic
-    rescaling here.
+    ``<npz_dir>/<stem>.npz`` holds the recorded depth ``shape`` (H, W),
+    ``extrinsics`` (3x4/4x4) and ``intrinsics`` (3x3); ``<stem>.lz4`` is the
+    log-encoded uint8 depth (see utils.depth_utils.load_depth_lz4) at that
+    shape, decoded to float32 metres. RGB is resized to the recorded depth
+    resolution — the intrinsics are recorded at the depth resolution, so no
+    intrinsic rescaling is needed (the same convention as the camera mode).
     """
+    npz_path = npz_dir / f"{stem}.npz"
+    if not npz_path.exists():
+        raise FileNotFoundError(f"No pose npz with stem {stem!r}: {npz_path}")
+    with np.load(npz_path) as data:
+        assert "extrinsics" in data, f"{npz_path} missing required 'extrinsics' key"
+        assert "intrinsics" in data, f"{npz_path} missing required 'intrinsics' key"
+        assert "shape" in data, f"{npz_path} missing required 'shape' key"
+        h_d, w_d = (int(v) for v in data["shape"])
+        ext = data["extrinsics"].astype(np.float32)
+        ixt = data["intrinsics"].astype(np.float32)
+
+    lz4_path = npz_dir / f"{stem}.lz4"
+    if not lz4_path.exists():
+        raise FileNotFoundError(f"No depth lz4 with stem {stem!r}: {lz4_path}")
+    depth_m = load_depth_lz4(lz4_path, shape=(h_d, w_d))
+
     img_path = None
-    for ext in (".jpg", ".jpeg", ".png"):
-        candidate = rgb_dir / f"{stem}{ext}"
+    for suffix in (".jpg", ".jpeg", ".png"):
+        candidate = rgb_dir / f"{stem}{suffix}"
         if candidate.exists():
             img_path = candidate
             break
@@ -109,20 +124,8 @@ def _load_folder_pair(rgb_dir: Path, npz_dir: Path, stem: str):
     if rgb_bgr is None:
         raise FileNotFoundError(f"Cannot read RGB frame: {img_path}")
     rgb = cv2.cvtColor(rgb_bgr, cv2.COLOR_BGR2RGB)
-
-    lz4_path = npz_dir / f"{stem}.lz4"
-    if not lz4_path.exists():
-        raise FileNotFoundError(f"No depth lz4 with stem {stem!r}: {lz4_path}")
-    depth_m = load_depth_lz4(lz4_path, shape=rgb.shape[:2])
-
-    npz_path = npz_dir / f"{stem}.npz"
-    if not npz_path.exists():
-        raise FileNotFoundError(f"No pose npz with stem {stem!r}: {npz_path}")
-    with np.load(npz_path) as data:
-        assert "extrinsics" in data, f"{npz_path} missing required 'extrinsics' key"
-        assert "intrinsics" in data, f"{npz_path} missing required 'intrinsics' key"
-        ext = data["extrinsics"].astype(np.float32)
-        ixt = data["intrinsics"].astype(np.float32)
+    if rgb.shape[:2] != (h_d, w_d):
+        rgb = cv2.resize(rgb, (w_d, h_d))
 
     return rgb, depth_m, ext, ixt
 
