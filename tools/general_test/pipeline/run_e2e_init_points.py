@@ -118,6 +118,12 @@ def parse_args(argv: list[str] | None = None):
                              "of a previous run — the JSON must exist under "
                              "--detections-dir / <out-dir>/detections "
                              "(missing -> error)")
+    parser.add_argument("--refine-detections", action="store_true",
+                        help="hard-filter the raw RexOmni predictions in "
+                             "Step 3a: duplicate boxes of one instance "
+                             "merge into their union, and a side-named "
+                             "prompt keeps only the box on its side (Step "
+                             "3a default: off — every raw box is kept)")
     parser.add_argument("--rexomni-env", default=REXOMNI_ENV_DIR,
                         help=f"RexOmni environment dir, relative to the repo "
                              f"root (default: {REXOMNI_ENV_DIR})")
@@ -151,6 +157,8 @@ def _build_3a_cmd(args, repo_root: Path) -> list[str]:
         cmd += ["--camera-key", args.camera_key]
     cmd += ["--text-prompts", *args.text_prompts,
             "--max-keyframes", str(args.max_keyframes)]
+    if args.refine_detections:
+        cmd += ["--refine-detections"]
     if args.skip_done:
         cmd += ["--skip-done"]
     return cmd

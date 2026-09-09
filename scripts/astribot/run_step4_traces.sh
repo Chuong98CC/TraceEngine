@@ -14,4 +14,5 @@ DATA_ROOT=/data/astri_making_coffee_v1
 python tools/astribot/run_step4_traces.py \
     --repo-id $REPO_ID \
     --data-root $DATA_ROOT --episode-idxes 0 \
+    --filter-visible --filter-static \
     --camera-idxes 0 4 5

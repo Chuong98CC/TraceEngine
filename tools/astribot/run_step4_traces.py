@@ -108,8 +108,6 @@ ROLE_ORDER = ("object", "manipulator")
 #: 64 object-query slots + 32x32 = 1024 support-grid slots = 1088 total).
 MAX_OBJECT_QUERIES = 64
 SUPPORT_GRID_SIZE = 32
-#: default inference resolution (H W) of the shipped encoder graph.
-DEFAULT_IMAGE_SIZE = (480, 640)
 
 _EP_RE = re.compile(r"^ep(\d{6})$")
 _SUB_RE = re.compile(r"^subtask_(\d+)$")
@@ -139,13 +137,10 @@ def parse_args(argv: list[str] | None = None):
                              "(default: all; the tracked cameras of each "
                              "sub-task are the ones with Step-3 init "
                              "points on disk)")
-    select = parser.add_mutually_exclusive_group()
-    select.add_argument("--episode-idxes", "-e", nargs="*", type=int,
+    parser.add_argument("--episode-idxes", "-e", nargs="*", type=int,
                         default=None,
                         help="only process these episode indices (default: "
                              "all episodes with Step-3 init points on disk)")
-    select.add_argument("--one-per-task", action="store_true",
-                        help="select the first episode of each task")
     parser.add_argument("--max-episodes", "-x", type=int, default=None,
                         help="cap the number of processed episodes")
     parser.add_argument("--out-dir", "-o", default=None,
@@ -156,26 +151,41 @@ def parse_args(argv: list[str] | None = None):
                              "from the sampling_points root "
                              "(<data-root>/eps_data/sampling_points/"
                              "{detections,init_points})")
-    parser.add_argument("--image-size", nargs=2, type=int,
-                        default=list(DEFAULT_IMAGE_SIZE),
-                        help="inference resolution (H W), must match the "
-                             "encoder graph (default: %(default)s)")
-    parser.add_argument("--encoder", default=_DEFAULT_ENCODER,
-                        help="TAPIP3D encoder .pt2 artifact")
-    parser.add_argument("--iteration", default=_DEFAULT_ITERATION,
-                        help="TAPIP3D fused corr+updater .pt2 artifact "
-                             "(query count auto-detected from the graph)")
-    parser.add_argument("--num-iters", type=int, default=6,
-                        help="fused corr+updater iterations inside each "
-                             "window (default: %(default)s)")
     parser.add_argument("--vis-threshold", type=float, default=0.5,
                         help="sigmoid visibility threshold for visibs "
                              "(default: %(default)s)")
+    parser.add_argument("--filter-visible", action="store_true",
+                        help="drop the tracked columns that are not always "
+                             "visible, or whose invisible runs are long or "
+                             "reappear far from where they were last "
+                             "visible (see --max-invisible-stems / "
+                             "--max-reappear-displacement)")
+    parser.add_argument("--filter-static", action="store_true",
+                        help="additionally drop the columns that never "
+                             "move: their max displacement from the first "
+                             "visible (first-appear) stem to any later "
+                             "visible stem is at most "
+                             "--min-motion-displacement. Applied after "
+                             "--filter-visible when both are on")
+    parser.add_argument("--max-invisible-stems", type=int, default=4,
+                        help="an invisible run of this many consecutive "
+                             "trace stems or more drops the column (the "
+                             "threshold is strict; default: %(default)s)")
+    parser.add_argument("--max-reappear-displacement", type=float,
+                        default=0.01,
+                        help="max 3D displacement in metres between the "
+                             "last visible stem and the reappearance of a "
+                             "bounded invisible run (default: %(default)s)")
+    parser.add_argument("--min-motion-displacement", type=float,
+                        default=0.02,
+                        help="a column whose max displacement from its "
+                             "first-appear stem is at most this many "
+                             "metres is static and dropped by "
+                             "--filter-static (the criterion is strict; "
+                             "default: %(default)s m)")
     parser.add_argument("--seed", type=int, default=0,
                         help="RNG seed for the support-grid padding "
                              "(per role: seed + 0/1) (default: %(default)s)")
-    parser.add_argument("--device", default=None, choices=["cuda", "cpu"],
-                        help="device (default: auto; TAPIP3D is GPU-only)")
     parser.add_argument("--skip-done", action="store_true",
                         help="skip prompts whose coords.npy already exists")
     return parser.parse_args(argv)
@@ -320,6 +330,9 @@ class SubtaskTraceExtract(DataExtract):
     def __init__(self, args):
         args.mode = "videos"  # DataExtract needs one of its modes; only the
                              # dataset/camera machinery is reused
+        args.one_per_task = False  # DataExtract's episode picker reads this
+                                   # flag; Step 4 selects episodes via
+                                   # --episode-idxes (see run())
         if args.camera_idxes is None:
             keys = LeRobotDatasetMetadata(repo_id=args.repo_id,
                                           root=args.data_root).camera_keys
@@ -340,8 +353,6 @@ class SubtaskTraceExtract(DataExtract):
             self.subtask_meta = load_subtask_meta(args.data_root)
         except FileNotFoundError:
             self.subtask_meta = {}
-        self._device = args.device or ("cuda" if torch.cuda.is_available()
-                                       else "cpu")
         self._pt2 = None
         # per-camera state, set by _process_camera()
         self.ep_idx = self.k = self.cam_key = None
@@ -355,13 +366,11 @@ class SubtaskTraceExtract(DataExtract):
 
     def _ensure_pt2(self) -> Tapip3D_PT2:
         if self._pt2 is None:
-            print(f"Loading TAPIP3D .pt2 artifacts...")
-            print(f"  Encoder: {self.args.encoder}")
-            print(f"  Iteration: {self.args.iteration}")
-            self._pt2 = Tapip3D_PT2(
-                self.args.encoder, self.args.iteration,
-                image_size=tuple(self.args.image_size),
-                num_iters=self.args.num_iters)
+            print("Loading TAPIP3D .pt2 artifacts...")
+            # the shipped artifacts and their fixed graph config (encoder
+            # 480x640, 1088-query iteration graph, 6 window iterations) —
+            # see _DEFAULT_ENCODER / _DEFAULT_ITERATION in tapip3d.py
+            self._pt2 = Tapip3D_PT2()
             if self._pt2.num_queries != SUPPORT_GRID_SIZE ** 2 + MAX_OBJECT_QUERIES:
                 raise SystemExit(
                     f"iteration graph has {self._pt2.num_queries} fixed "
@@ -666,18 +675,36 @@ class SubtaskTraceExtract(DataExtract):
                   f"frame window; the trace will stay at the anchor points "
                   f"(all visibs false)")
         t0 = time.perf_counter()
-        coords, visibs_logits = self._track(steps, queries)
+        tracked = self._track(steps, queries)
         print(f"    tracked {len(steps)} steps in "
               f"{time.perf_counter() - t0:.1f}s")
-        visibs = (torch.sigmoid(visibs_logits) >=
-                  self.args.vis_threshold).cpu().numpy()
+        if self.args.filter_visible or self.args.filter_static:
+            # The stream filtered inside run(): coords/visibs hold the
+            # surviving columns only (visibs already bool at
+            # --vis-threshold); keep_t (full-width, original column order)
+            # and drop_reasons map the survivors back to the prompts.
+            coords, visibs, keep_t, drop_reasons = tracked
+            visibs = visibs.numpy()
+        else:
+            coords, visibs_logits = tracked
+            visibs = (torch.sigmoid(visibs_logits) >=
+                      self.args.vis_threshold).numpy()
+            keep_t = None
+            drop_reasons = None
 
         # --- save: one folder per prompt (its own query columns only) --------
+        # Prompt blocks are contiguous in column order both in the full
+        # layout and — survivors only — in the filtered arrays, so the
+        # prompt cursor (col) walks keep_t while a kept-column cursor
+        # (kept_col) walks the filtered coords/visibs.
         col = 0
+        kept_col = 0
         pass_meta = {"role": role, "anchor_frame": int(anchor_abs),
                      "num_steps": int(len(steps)),
                      "num_queries": int(queries.shape[0]),
                      "num_object_queries": int(n_obj)}
+        if keep_t is not None:
+            pass_meta["num_kept_queries"] = int(keep_t.sum())
         seg_report["passes"].append(pass_meta)
         for (p, d, rows, px_kf, px_dep) in per_prompt:
             n = len(rows) if rows is not None else 0
@@ -688,13 +715,30 @@ class SubtaskTraceExtract(DataExtract):
                                  "no usable keypoints on the pass anchor "
                                  f"key-frame {anchor_abs}", seg_report)
                 continue
+            rows = np.asarray(rows)
+            px_kf = np.asarray(px_kf)
+            if keep_t is not None:
+                # run() returns CPU tensors (see Tapip3DStreamPT2.run), so
+                # the column mask and coords slice on cpu directly
+                sel_t = keep_t[start:col]                # (n,) bool
+                sel = sel_t.numpy()                      # (n,) survivors
+                n = int(sel.sum())
+                coords_save = coords[:, kept_col:kept_col + n].numpy()
+                visibs_save = visibs[:, kept_col:kept_col + n]
+                queries_save = queries[start:col][sel_t].numpy()
+                kept_col += n
+                rows_keep = rows[sel]
+                px_keep = px_kf[sel]
+            else:
+                coords_save = coords[:, start:col].numpy()
+                visibs_save = visibs[:, start:col]
+                queries_save = queries[start:col].numpy()
+                rows_keep, px_keep = rows, px_kf
             out_dir = Path(d)
             out_dir.mkdir(parents=True, exist_ok=True)
-            np.save(out_dir / "coords.npy",
-                    coords[:, start:col].cpu().numpy())
-            np.save(out_dir / "visibs.npy", visibs[:, start:col])
-            np.save(out_dir / "queries.npy",
-                    queries[start:col].cpu().numpy())
+            np.save(out_dir / "coords.npy", coords_save)
+            np.save(out_dir / "visibs.npy", visibs_save)
+            np.save(out_dir / "queries.npy", queries_save)
             entry = {
                 "episode": int(self.ep_idx), "subtask": int(k),
                 "role": role, "prompt": p["prompt"],
@@ -707,19 +751,38 @@ class SubtaskTraceExtract(DataExtract):
                 "num_queries": int(n),
                 "pass_queries": int(queries.shape[0]),
                 "query_keypoint_rows":
-                    [int(i) for i in rows],
-                "pixels": [[float(x), float(y)] for x, y in
-                           (px_kf if px_kf is not None else [])],
-                "model": {"encoder": str(Path(self.args.encoder).absolute()),
+                    [int(i) for i in rows_keep],
+                "pixels": [[float(x), float(y)] for x, y in px_keep],
+                "model": {"encoder": str(Path(_DEFAULT_ENCODER).absolute()),
                           "iteration":
-                              str(Path(self.args.iteration).absolute()),
-                          "num_iters": self.args.num_iters},
-                "image_size": list(self.args.image_size),
+                              str(Path(_DEFAULT_ITERATION).absolute()),
+                          "num_iters": self._pt2.num_iters},
+                "image_size": list(self._pt2.image_size),
                 "vis_threshold": self.args.vis_threshold,
                 "seed": self.args.seed,
                 "inputs": {"init_points_dir": str(p["dir"]),
                            "depth_dir": str(self.seg_depth_dir)},
             }
+            if keep_t is not None:
+                dropped = np.nonzero(~sel)[0]
+                entry["filter"] = {
+                    "num_kept": int(n),
+                    "num_dropped": int(len(dropped)),
+                    "dropped_keypoint_rows": [int(i) for i in rows[dropped]],
+                    "dropped_reasons": [drop_reasons[start + int(i)]
+                                        for i in dropped],
+                }
+                if self.args.filter_visible:
+                    entry["filter"]["visible"] = {
+                        "max_invisible_stems": self.args.max_invisible_stems,
+                        "max_reappear_displacement":
+                            self.args.max_reappear_displacement,
+                    }
+                if self.args.filter_static:
+                    entry["filter"]["static"] = {
+                        "min_motion_displacement":
+                            self.args.min_motion_displacement,
+                    }
             with open(out_dir / "metadata.json", "w") as f:
                 json.dump(entry, f, indent=2)
             print(f"    [{p['slug']}] {n} keypoints -> {d}")
@@ -748,8 +811,12 @@ class SubtaskTraceExtract(DataExtract):
     def _track(self, steps: list[int], queries: torch.Tensor):
         """Streamed TAPIP3D over the sequence steps: batches of seq_len
         frames decoded online + Step-2 geometry resized to the inference
-        resolution (the same math as load_resized_batch). Returns
-        (coords (T, Q, 3), visibs_logits (T, Q)) CPU."""
+        resolution (the same math as load_resized_batch). With both
+        filters off returns (coords (T, Q, 3), visibs_logits (T, Q));
+        with --filter-visible and/or --filter-static on, returns the
+        stream's filtered 4-tuple (coords, visibs bool, keep (Q,) bool,
+        reasons) instead. All returned tensors are CPU — the stream moves
+        its outputs back from the GPU."""
         pt2 = self._ensure_pt2()
         inf_h, inf_w = pt2.image_size
         file_list = [(int(t), None) for t in steps]
@@ -763,10 +830,18 @@ class SubtaskTraceExtract(DataExtract):
 
         depth_roi = compute_global_depth_roi(str(self.seg_depth_dir),
                                              file_list, inf_h, inf_w)
-        si = Tapip3DStreamPT2(pt2, queries, depth_roi=depth_roi)
+        si = Tapip3DStreamPT2(pt2, queries, depth_roi=depth_roi,
+                              vis_threshold=self.args.vis_threshold,
+                              max_invisible_stems=self.args.max_invisible_stems,
+                              max_reappear_displacement=(
+                                  self.args.max_reappear_displacement),
+                              min_motion_displacement=(
+                                  self.args.min_motion_displacement))
         with torch.inference_mode():
-            coords, visibs = si.run(batches(), len(steps))
-        return coords, visibs
+            out = si.run(batches(), len(steps),
+                         filter_visible=self.args.filter_visible,
+                         filter_static=self.args.filter_static)
+        return out
 
 
 def main() -> None:

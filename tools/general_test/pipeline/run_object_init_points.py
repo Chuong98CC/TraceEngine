@@ -25,8 +25,9 @@ detections JSONs of Step 3a (folder mode writes the flat
 Prompts are read per sub-task from the Step-3a detections JSON (Step 3a
 recorded them from the dataset's meta/subtasks.csv in episode mode —
 together with each prompt's role, the column it was read from — or from
-its --text-prompts in folder mode, without roles). Episode mode processes
-every --camera-keys entry whose JSON exists under
+its --text-prompts in folder mode, without roles).
+
+Episode mode processes every --camera-keys entry whose JSON exists under
 detections/ep{ep:06d}/<camera>.json (default: all such cameras). An
 **object** prompt is matched only between the sub-task's 2nd and
 2nd-to-last key-frame (the gripper close .. open transport span, where
@@ -35,17 +36,15 @@ the object is static on the dropped boundary frames anyway); the
 older Step-3a JSONs) — is matched across all key-frames. There is no
 JSON-less fallback — run Step 3a first.
 
-By default RoMAv2 samples its candidate points inside the object masks
-(--sampling-mode mask); with --sampling-mode uniform it samples over the
-whole enlarged crops instead and the in-mask top-k filter alone decides —
-same crops and output criterion, different pool (run both modes into
-separate --out-dirs to compare). --sampling-mode no_roma is the simple
-baseline: no RoMAv2 — top-k points are uniformly sampled inside the mask
-of the span's first frame only (the manipulator's 1st key-frame, the
-object's 2nd — the first of its transport span), with the same full-span
-SAM3 masks, frame_indices and outputs as the matching modes, so Step 4
-sees identical windows and gating minus the matching. All checkpoints are
-the repo defaults.
+By default RoMAv2
+--sampling-mode mask: samples its candidate points inside the object masks
+--sampling-mode uniform: samples over the whole enlarged crops instead
+and the in-mask top-k filter alone decides —same crops and output criterion,
+different pool.
+--sampling-mode no_roma: is the simple baseline: no RoMAv2 — top-k points
+are uniformly sampled inside the mask of the span's first frame only
+(the manipulator's 1st key-frame, the object's 2nd — the first of its transport span),
+
 
 Examples
 --------

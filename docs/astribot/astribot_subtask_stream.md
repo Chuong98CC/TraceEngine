@@ -139,12 +139,12 @@ holds the `extrinsics` (3×4, world→camera), `intrinsics` (3×3) and the depth
 | `--stride` | 4 | subsample every N-th frame; with WAFT also the flow pair gap |
 | `--with-optical-flow` | off | enable WAFT optical-flow motion masks (default: off — full-confidence alignment) |
 | `--motion-threshold`, `-thr` | 2.0 | flow-magnitude (pixel displacement) above which a pixel counts as moving |
-| `--waft-checkpoint` | `weights/waftv2/waftv2_dinov3_i5_640x480_bf16.pt2` | WAFTv2 `.pt2` artifact; a `.pt2` path is used as-is, otherwise `.pt2` is appended (legacy `.onnx` / `.engine` rejected) |
-| `--model-path` | backend default | VGGT-Omega artifact override (`.pt2`) |
-| `--anyview-model-path` / `--metric-model-path` | backend default | DA3 any-view / metric-depth `.pt2` overrides |
 | `--config` | `src/depth_models/streaming/configs/base_config.yaml` | alignment library/method, loop-closure settings |
-| `--device` | auto | `cuda` or `cpu` |
 | `--skip-done` | off | skip sub-tasks whose `depth_*` outputs already exist |
+
+The model artifacts are the shipped defaults (each backend's own `.pt2`
+checkpoints, plus `weights/waftv2/waftv2_dinov3_i5_640x480_bf16.pt2` for the
+WAFT motion masks); the device is auto-detected.
 
 ## Visualization
 

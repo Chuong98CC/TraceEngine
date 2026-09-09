@@ -21,6 +21,122 @@ def plan_windows(total_frames: int, seq_len: int) -> tuple[list[tuple[int, int]]
     windows = [(we - seq_len, we) for we in range(seq_len, T + 1, stride)]
     return windows, pad
 
+def _require_bool_visibs(visibs: torch.Tensor) -> torch.Tensor:
+    visibs = torch.as_tensor(visibs)
+    if visibs.dtype != torch.bool:
+        # an implicit cast would map any nonzero value to visible — every
+        # column would pass and the filter would silently do nothing
+        raise TypeError(f"visibs must be bool (thresholded) visibility "
+                        f"flags, got dtype {visibs.dtype}")
+    return visibs
+
+
+def filter_visible_tracks(coords: torch.Tensor, visibs: torch.Tensor, *,
+                          max_invisible_stems: int = 4,
+                          max_reappear_displacement: float = 0.01):
+    """Keep the tracked columns that are always visible, or whose every
+    invisible run (maximal run of consecutive False stems) is shorter than
+    max_invisible_stems — and, when the run is bounded by visible stems on
+    both sides, reappears within max_reappear_displacement metres of the
+    last visible position. A run touching the trace's first or last stem
+    has no reappearance side to measure, so only the length criterion
+    applies to it.
+
+    Args:
+        coords: (T, Q, 3) world-space trace positions (metres).
+        visibs: (T, Q) bool visibility flags (already thresholded by the
+            caller's own criterion).
+
+    Returns:
+        (keep (Q,) bool, reasons (Q,) list[str | None]) — keep marks the
+        surviving columns of the input order; reasons carries one entry
+        per column (None for a kept column, the drop reason otherwise).
+    """
+    coords = torch.as_tensor(coords)
+    visibs = _require_bool_visibs(visibs)
+    t, q = visibs.shape
+    keep = torch.ones(q, dtype=torch.bool, device=visibs.device)
+    if t == 0 or q == 0:
+        return keep, [None] * q
+    reasons: list[str | None] = [None] * q
+    for col in range(q):
+        if visibs[:, col].all():
+            continue
+        for a, b in _invisible_runs(visibs[:, col]):
+            run_len = b - a + 1
+            if run_len >= max_invisible_stems:
+                reasons[col] = (f"invisible {run_len} stems "
+                                f"(>= {max_invisible_stems})")
+                keep[col] = False
+                break
+            if a > 0 and b < t - 1:  # bounded: reappearance measurable
+                d = float(torch.norm(
+                    coords[b + 1, col] - coords[a - 1, col]))
+                if d >= max_reappear_displacement:
+                    reasons[col] = (
+                        f"reappears {d:.3f} m away "
+                        f"(>= {max_reappear_displacement} m)")
+                    keep[col] = False
+                    break
+    return keep, reasons
+
+
+def filter_static_tracks(coords: torch.Tensor, visibs: torch.Tensor, *,
+                         min_motion_displacement: float = 0.01):
+    """Keep only the tracked columns that move: the max displacement from
+    the first visible (first-appear) stem to any later visible stem must
+    exceed min_motion_displacement metres. Positions of invisible stems
+    are the tracker's un-observed extrapolations, so they never count
+    toward the displacement. A column without any visible stem has no
+    first appearance to measure motion from and is dropped.
+
+    Args:
+        coords: (T, Q, 3) world-space trace positions (metres).
+        visibs: (T, Q) bool visibility flags (already thresholded by the
+            caller's own criterion).
+
+    Returns:
+        (keep (Q,) bool, reasons (Q,) list[str | None]) — same convention
+        as filter_visible_tracks.
+    """
+    coords = torch.as_tensor(coords)
+    visibs = _require_bool_visibs(visibs)
+    t, q = visibs.shape
+    keep = torch.ones(q, dtype=torch.bool, device=visibs.device)
+    if t == 0 or q == 0:
+        return keep, [None] * q
+    reasons: list[str | None] = [None] * q
+    for col in range(q):
+        vis = visibs[:, col]
+        if not vis.any():
+            reasons[col] = "no visible stem (cannot measure motion)"
+            keep[col] = False
+            continue
+        f = int(torch.nonzero(vis)[0])
+        moved = coords[torch.nonzero(vis).flatten(), col] - coords[f, col]
+        d = float(torch.norm(moved, dim=1).max())
+        if d <= min_motion_displacement:
+            reasons[col] = (f"static: max displacement {d:.3f} m "
+                            f"(<= {min_motion_displacement} m)")
+            keep[col] = False
+    return keep, reasons
+
+
+def _invisible_runs(vis: torch.Tensor) -> list[tuple[int, int]]:
+    """(a, b) spans (inclusive) of the maximal consecutive-False runs."""
+    runs = []
+    a = None
+    for i in range(len(vis)):
+        if not vis[i] and a is None:
+            a = i
+        elif vis[i] and a is not None:
+            runs.append((a, i - 1))
+            a = None
+    if a is not None:
+        runs.append((a, len(vis) - 1))
+    return runs
+
+
 @dataclass
 class Prediction:
     coords: torch.Tensor # (B, T, N, 3)
@@ -55,7 +171,11 @@ class Prediction:
 class Tapip3DStreamPT2:
     def __init__(self, pt2_model, queries: torch.Tensor,
                  depth_roi: Optional[torch.Tensor] = None,
-                 device: str = "cuda"):
+                 device: str = "cuda",
+                 *, vis_threshold: float = 0.5,
+                 max_invisible_stems: int = 4,
+                 max_reappear_displacement: float = 0.01,
+                 min_motion_displacement: float = 0.01):
         self.pt2_model = pt2_model
         self.queries = queries.to(device)
         assert self.queries.shape[0] == pt2_model.num_queries, (
@@ -69,12 +189,36 @@ class Tapip3DStreamPT2:
         self.device = device
         self.seq_len = pt2_model.seq_len
         self.stride = pt2_model.seq_len // 2
+        #: filter knobs of run(filter_visible=True) / run(filter_static=True)
+        #: — see filter_visible_tracks / filter_static_tracks.
+        self.vis_threshold = vis_threshold
+        self.max_invisible_stems = max_invisible_stems
+        self.max_reappear_displacement = max_reappear_displacement
+        self.min_motion_displacement = min_motion_displacement
 
     @torch.inference_mode()
-    def run(self, batches, total_frames: int) -> Tuple[torch.Tensor, torch.Tensor]:
+    def run(self, batches, total_frames: int,
+            filter_visible: bool = False, filter_static: bool = False):
         """Run all windows; `batches` yields CPU tuples
-        (video (T,3,H,W) in [0,1], depths, intrs, extrs). Returns
-        (coords (total_frames, N, 3), visibs (total_frames, N) logits).
+        (video (T,3,H,W) in [0,1], depths, intrs, extrs).
+
+        All returned tensors are CPU — the windows run on ``self.device``
+        and only the outputs are moved back (callers need no device
+        handling).
+
+        With both filters off returns the raw traces of every query column
+        as (coords (total_frames, N, 3), visibs (total_frames, N) logits).
+        With filter_visible and/or filter_static on, the failing columns
+        are dropped instead and the call returns (coords (total_frames,
+        N', 3), visibs (total_frames, N') bool at vis_threshold, keep (N,)
+        bool, reasons (N,) list[str | None]) — keep/reasons cover the
+        original column order (see filter_visible_tracks /
+        filter_static_tracks), coords/visibs hold the surviving columns
+        only. When both filters are on the static filter runs after the
+        visible one: only visible survivors can be dropped as static, and
+        a visible drop keeps its own reason. filter_static alone still
+        thresholds visibs internally to locate the first-appear stems.
+
         All query frames must be < seq_len (asserted in __init__);
         late-frame queries would be window-masked, which the static iteration
         graph cannot represent."""
@@ -164,7 +308,28 @@ class Tapip3DStreamPT2:
 
         assert n_windows == len(windows), \
             f"scheduling mismatch: ran {n_windows}, plan says {len(windows)}"
-        return pred.coords[0, :total_frames], pred.visibs[0, :total_frames]
+        coords = pred.coords[0, :total_frames]
+        visibs = pred.visibs[0, :total_frames]
+        if not (filter_visible or filter_static):
+            return coords.cpu(), visibs.cpu()
+        visible = torch.sigmoid(visibs) >= self.vis_threshold
+        keep = torch.ones(self.queries.shape[0], dtype=torch.bool,
+                          device=coords.device)
+        reasons: list[str | None] = [None] * self.queries.shape[0]
+        if filter_visible:
+            keep, reasons = filter_visible_tracks(
+                coords, visible,
+                max_invisible_stems=self.max_invisible_stems,
+                max_reappear_displacement=self.max_reappear_displacement)
+        if filter_static:
+            keep_s, reasons_s = filter_static_tracks(
+                coords, visible,
+                min_motion_displacement=self.min_motion_displacement)
+            for col in range(self.queries.shape[0]):
+                if keep[col] and not keep_s[col]:
+                    keep[col], reasons[col] = False, reasons_s[col]
+        return (coords[:, keep].cpu(), visible[:, keep].cpu(),
+                keep.cpu(), reasons)
 
     def _run_window(self, feats_w, depths_w, intrs_w, extrs_w, ws, we, pred,
                     query_point, query_coords, query_frames, shared_corr_ctx):

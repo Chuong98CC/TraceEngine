@@ -93,7 +93,7 @@ DEFAULT_TOP_K = 64
 DEFAULT_BBOX_SCALE = 1.25
 DEFAULT_NUM_CORRESP = 2000
 DEFAULT_STRATEGY = "reference"
-DEFAULT_SAMPLING_MODE = "uniform"
+DEFAULT_SAMPLING_MODE = "no_roma"
 #: default path of the RexOmni environment (relative to the repo root).
 REXOMNI_ENV_DIR = ".venv-rexomni"
 
@@ -195,6 +195,12 @@ def parse_args(argv: list[str] | None = None):
                              "every selected episode (missing -> error); "
                              "implies --skip-extract (the detections were "
                              "made from the key-frames on disk)")
+    parser.add_argument("--refine-detections", action="store_true",
+                        help="hard-filter the raw RexOmni predictions in "
+                             "Step 3a: duplicate boxes of one instance "
+                             "merge into their union, and a side-named "
+                             "prompt keeps only the box on its side (Step "
+                             "3a default: off — every raw box is kept)")
     parser.add_argument("--rexomni-env", default=REXOMNI_ENV_DIR,
                         help=f"RexOmni environment dir, relative to the repo "
                              f"root (default: {REXOMNI_ENV_DIR})")
@@ -345,6 +351,8 @@ def _build_3a_cmd(args, repo_root: Path) -> list[str]:
         cmd += ["--max-episodes", str(args.max_episodes)]
     cmd += ["--out-dir", str(_out_root(args))]
     cmd += ["--max-keyframes", str(args.max_keyframes)]
+    if args.refine_detections:
+        cmd += ["--refine-detections"]
     if args.skip_done:
         cmd += ["--skip-done"]
     return cmd
