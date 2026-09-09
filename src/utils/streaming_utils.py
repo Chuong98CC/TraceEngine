@@ -292,7 +292,7 @@ def resize_batch_to_inference(video_u8: torch.Tensor, geo: dict,
       intrs: (T, 3, 3) float32, fx/fy/cx/cy scaled to the inference resolution
       extrs: (T, 4, 4) float32
     """
-    orig_h, orig_w = video_u8.shape[1:3]
+    orig_h, orig_w = video_u8.shape[2:4]  # video_u8 is (T, 3, H0, W0) CHW
     video_rs = torch.stack([
         F_resize(video_u8[t], (inference_h, inference_w),
                  interpolation=_v2.InterpolationMode.BILINEAR, antialias=False)
