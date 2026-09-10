@@ -42,10 +42,18 @@ a segment without a recorded label is tracked unlabelled, never
 role-matched by the segment ordinal.
 
 The shipped TAPIP3D iteration graph has a fixed query count (1088), so
-each pass tracks up to 64 role keypoints + a full-frame support grid
-trimmed/padded deterministically to reach exactly 1088 (random padding
-points are sampled among the anchor frame's valid-depth pixels,
-np.random.default_rng(seed + role_index)).
+each pass tracks up to 64 object / 128 manipulator role keypoints (the
+manipulator is seeded denser so enough points survive the static
+filters) + a full-frame support grid trimmed/padded deterministically to
+reach exactly 1088 (a full 128-query manipulator pass runs 960 support
+points: the 32x32 grid minus the cells nearest the role keypoints'
+anchor-frame pixels — see _support_queries — so the surviving support
+spreads away from the tracked points; random padding points are sampled
+among the anchor frame's valid-depth pixels,
+np.random.default_rng(seed + role_index)). The filters only remove
+points, so the output keeps at most MAX_KEPT_KEYPOINTS (64) keypoints
+per prompt — a 128-seed manipulator prompt that outlives the filters
+with more survivors is truncated to its first 64 in seed order.
 
 Every camera of a sub-task is tracked separately over its own Step-2
 depth_<camera> outputs — the cameras come from the per-camera init-points
@@ -104,12 +112,34 @@ from utils.visualize.visualize_mask import to_pil
 
 #: role output order of the sub-task annotations (meta/subtasks.csv columns).
 ROLE_ORDER = ("object", "manipulator")
-#: max tracked role keypoints per pass (the shipped iteration graph is
-#: 64 object-query slots + 32x32 = 1024 support-grid slots = 1088 total).
-MAX_OBJECT_QUERIES = 64
+
+#: keep the 64-keypoint density.
+ROLE_MAX_KEYPOINTS = {"object": 64, "manipulator": 128}
 SUPPORT_GRID_SIZE = 32
-#: default inference resolution (H W) of the shipped encoder graph.
-DEFAULT_IMAGE_SIZE = (480, 640)
+MAX_KEPT_KEYPOINTS = ROLE_MAX_KEYPOINTS["object"]
+MIN_PIXEL_MOVING=5
+
+def _role_keypoint_cap(role: str | None) -> int:
+    """Max role keypoints of one pass: 128 for the manipulator, 64 for
+    object and role-less (unlabelled) prompts."""
+    return ROLE_MAX_KEYPOINTS.get(role, ROLE_MAX_KEYPOINTS["object"])
+
+
+def _cap_keypoint_survivors(sel: np.ndarray, cap: int
+                            ) -> tuple[np.ndarray, np.ndarray]:
+    """Per-prompt output cap on the filtered survivors.
+
+    A prompt's survivor mask (True = survived the filters, in seed order)
+    is truncated to its first ``cap`` survivors. Returns (sel_capped,
+    over) where over holds the original positions capped away (empty when
+    nothing was). The input mask is not mutated.
+    """
+    keep_idx = np.nonzero(sel)[0]
+    if len(keep_idx) <= cap:
+        return sel, np.empty(0, dtype=np.int64)
+    out = sel.copy()
+    out[keep_idx[cap:]] = False
+    return out, keep_idx[cap:]
 
 _EP_RE = re.compile(r"^ep(\d{6})$")
 _SUB_RE = re.compile(r"^subtask_(\d+)$")
@@ -139,13 +169,10 @@ def parse_args(argv: list[str] | None = None):
                              "(default: all; the tracked cameras of each "
                              "sub-task are the ones with Step-3 init "
                              "points on disk)")
-    select = parser.add_mutually_exclusive_group()
-    select.add_argument("--episode-idxes", "-e", nargs="*", type=int,
+    parser.add_argument("--episode-idxes", "-e", nargs="*", type=int,
                         default=None,
                         help="only process these episode indices (default: "
                              "all episodes with Step-3 init points on disk)")
-    select.add_argument("--one-per-task", action="store_true",
-                        help="select the first episode of each task")
     parser.add_argument("--max-episodes", "-x", type=int, default=None,
                         help="cap the number of processed episodes")
     parser.add_argument("--out-dir", "-o", default=None,
@@ -156,26 +183,55 @@ def parse_args(argv: list[str] | None = None):
                              "from the sampling_points root "
                              "(<data-root>/eps_data/sampling_points/"
                              "{detections,init_points})")
-    parser.add_argument("--image-size", nargs=2, type=int,
-                        default=list(DEFAULT_IMAGE_SIZE),
-                        help="inference resolution (H W), must match the "
-                             "encoder graph (default: %(default)s)")
-    parser.add_argument("--encoder", default=_DEFAULT_ENCODER,
-                        help="TAPIP3D encoder .pt2 artifact")
-    parser.add_argument("--iteration", default=_DEFAULT_ITERATION,
-                        help="TAPIP3D fused corr+updater .pt2 artifact "
-                             "(query count auto-detected from the graph)")
-    parser.add_argument("--num-iters", type=int, default=6,
-                        help="fused corr+updater iterations inside each "
-                             "window (default: %(default)s)")
     parser.add_argument("--vis-threshold", type=float, default=0.5,
                         help="sigmoid visibility threshold for visibs "
                              "(default: %(default)s)")
+    parser.add_argument("--filter-visible", action="store_true",
+                        help="drop the tracked columns that are not always "
+                             "visible, or whose invisible runs are long or "
+                             "reappear far from where they were last "
+                             "visible (see --max-invisible-stems / "
+                             "--max-reappear-ratio; the reappearance "
+                             "displacement is pixel-space, projected "
+                             "through the reappearance stem's own pose, "
+                             "so camera motion between the stems cancels "
+                             "and briefly-occluded movers are not read "
+                             "as track failures)")
+    parser.add_argument("--filter-static-pixel", action="store_true",
+                        help="additionally drop the columns that never "
+                             "move in the tracked camera's pixels: the "
+                             "max displacement of the column's "
+                             "reprojection (per stem, through that "
+                             "stem's own pose) from its first-appear "
+                             "pixel is at most --min-motion-pixels. "
+                             "Pixel motion is robust to depth noise and "
+                             "pose drift — depth-noise wander along the "
+                             "viewing ray barely moves the "
+                             "reprojection. Applied after "
+                             "--filter-visible")
+    parser.add_argument("--max-invisible-stems", type=int, default=8,
+                        help="an invisible run of this many consecutive "
+                             "trace stems or more drops the column (the "
+                             "threshold is strict; default: %(default)s)")
+    parser.add_argument("--max-reappear-ratio", type=float, default=3.0,
+                        help="the reappearance allowance of a bounded "
+                             "invisible run is this many times the "
+                             "column's fastest per-stem pixel step while "
+                             "continuously visible — a genuinely fast "
+                             "mover blinks out and comes back ~1x its own "
+                             "step (kept), a snapped static column jumps "
+                             "against a ~0px envelope (dropped); the "
+                             "criterion is strict; default: %(default)s)")
+    parser.add_argument("--min-motion-pixels", type=float, default=MIN_PIXEL_MOVING,
+                        help="a column whose max pixel displacement from "
+                             "its first-appear stem is at most this many "
+                             "pixels (at the tracking resolution) is "
+                             "static and dropped by --filter-static-pixel "
+                             "(the criterion is strict; default: "
+                             "%(default)s px)")
     parser.add_argument("--seed", type=int, default=0,
                         help="RNG seed for the support-grid padding "
                              "(per role: seed + 0/1) (default: %(default)s)")
-    parser.add_argument("--device", default=None, choices=["cuda", "cpu"],
-                        help="device (default: auto; TAPIP3D is GPU-only)")
     parser.add_argument("--skip-done", action="store_true",
                         help="skip prompts whose coords.npy already exists")
     return parser.parse_args(argv)
@@ -279,31 +335,95 @@ def _row_pixels(keypoints: np.ndarray, masks: np.ndarray, j: int,
     return rows, kp[rows], px[rows]
 
 
+def _grid_pixels(world: torch.Tensor, intrs: torch.Tensor,
+                 extr: torch.Tensor) -> torch.Tensor:
+    """(G, 2) continuous anchor-frame pixels of the unprojected grid
+    points: world -> camera with extr, then /z * (fx, fy) + (cx, cy) —
+    the exact inverse of the cells' unprojection (get_grid_queries), so
+    the recovered pixels stay aligned with the returned rows."""
+    h = torch.cat([world, torch.ones_like(world[:, :1])], dim=-1)  # (G, 4)
+    cam = (extr @ h.t()).t()[:, :3]                                # (G, 3)
+    fx, fy = intrs[0, 0], intrs[1, 1]
+    cx, cy = intrs[0, 2], intrs[1, 2]
+    z = cam[:, 2]
+    return torch.stack([cam[:, 0] / z * fx + cx,
+                        cam[:, 1] / z * fy + cy], dim=-1)
+
+
+def _drop_cells_near_px(grid_px: np.ndarray, query_px: np.ndarray,
+                        drop_budget: int) -> np.ndarray:
+    """Grid cells to drop so the surviving support spreads away from the
+    tracked points.
+
+    Cyclically, each query removes its closest not-yet-dropped grid cell
+    (anchor-frame pixel distance, squared Euclidean) until drop_budget
+    cells are gone — the even per-query split of the budget (a query
+    whose neighbours were already claimed falls back to its next
+    closest). Deterministic: cells are claimed in query rank order;
+    among equal distances the lowest-index cell wins.
+
+    Args:
+        grid_px: (G, 2) continuous grid-cell pixels, in grid row order.
+        query_px: (Q, 2) keypoint pixels in the same frame.
+        drop_budget: number of cells to drop (<= G).
+
+    Returns:
+        (G,) bool mask, True = drop the cell.
+    """
+    drop = np.zeros(grid_px.shape[0], dtype=bool)
+    if drop_budget <= 0:
+        return drop
+    q = query_px.shape[0]
+    d2 = ((grid_px[:, None, :] - query_px[None, :, :]) ** 2).sum(-1)  # (G, Q)
+    for i in range(drop_budget):
+        dist = d2[:, i % q].copy()
+        dist[drop] = np.inf
+        drop[int(np.argmin(dist))] = True
+    return drop
+
+
 def _support_queries(depth: np.ndarray, intrs: np.ndarray, extr: np.ndarray,
-                     n_points: int, rng: np.random.Generator) -> torch.Tensor:
+                     n_points: int, rng: np.random.Generator,
+                     query_px: np.ndarray | None = None) -> torch.Tensor:
     """n_points support queries at the anchor frame: the full-frame
     SUPPORT_GRID_SIZE^2 grid (valid-depth pixels only), trimmed to
     n_points; a shortfall is padded with uniformly sampled valid-depth
-    pixels. Returns (n_points, 4) with home frame 0."""
+    pixels. Returns (n_points, 4) with home frame 0.
+
+    With query_px ((Q, 2), the role keypoints' anchor-frame pixels at the
+    depth resolution — the same space the grid cells are sampled in) the
+    trim is query-aware: the grid cells nearest the keypoints are dropped
+    (see _drop_cells_near_px), so the surviving support spreads away from
+    the tracked points instead of sampling the same surfaces. Without
+    query_px the grid is trimmed by an even linspace spread.
+    """
     dh, dw = depth.shape
     depth_t = torch.from_numpy(depth).float()
     intrs_t = torch.from_numpy(intrs).float()
     extr_t = torch.from_numpy(extr).float()
     grid = get_grid_queries(SUPPORT_GRID_SIZE, depth_t[None], intrs_t[None],
                             extr_t[None]).squeeze(0)          # (G, 4)
-    if grid.shape[0] >= n_points:
-        # even spread when the grid outgrows its share (never with the
-        # shipped 1088 graph: 1024 grid slots >= 1088 - 64)
-        pick = np.linspace(0, grid.shape[0] - 1, n_points).round().astype(int)
+    n = grid.shape[0]
+    if n > n_points and query_px is not None:
+        # a pass with more role keypoints than the graph's 64 object-query
+        # slots must shed support cells 1-for-1; drop those nearest the
+        # keypoints and keep the rest in grid order
+        drop = _drop_cells_near_px(
+            _grid_pixels(grid[:, 1:], intrs_t, extr_t).numpy(),
+            np.asarray(query_px, dtype=np.float32), int(n - n_points))
+        return grid[~drop].contiguous()
+    if n >= n_points:
+        # even spread fallback (no query pixels)
+        pick = np.linspace(0, n - 1, n_points).round().astype(int)
         return grid[pick].contiguous()
     parts = [grid]
     ys, xs = np.nonzero(depth > 0)
     if xs.size == 0:
         raise ValueError("anchor depth has no valid pixels (> 0)")
-    idx = rng.choice(xs.size, size=n_points - grid.shape[0], replace=False)
+    idx = rng.choice(xs.size, size=n_points - n, replace=False)
     xy = np.stack([xs[idx], ys[idx]], axis=-1).astype(np.float32)
     pad = unproject_xy_queries(xy, depth, intrs, extr)
-    if pad is None or pad.shape[0] < n_points - grid.shape[0]:
+    if pad is None or pad.shape[0] < n_points - n:
         raise ValueError("could not sample enough valid-depth support pixels")
     return torch.cat(parts + [pad])
 
@@ -320,6 +440,9 @@ class SubtaskTraceExtract(DataExtract):
     def __init__(self, args):
         args.mode = "videos"  # DataExtract needs one of its modes; only the
                              # dataset/camera machinery is reused
+        args.one_per_task = False  # DataExtract's episode picker reads this
+                                   # flag; Step 4 selects episodes via
+                                   # --episode-idxes (see run())
         if args.camera_idxes is None:
             keys = LeRobotDatasetMetadata(repo_id=args.repo_id,
                                           root=args.data_root).camera_keys
@@ -340,8 +463,6 @@ class SubtaskTraceExtract(DataExtract):
             self.subtask_meta = load_subtask_meta(args.data_root)
         except FileNotFoundError:
             self.subtask_meta = {}
-        self._device = args.device or ("cuda" if torch.cuda.is_available()
-                                       else "cpu")
         self._pt2 = None
         # per-camera state, set by _process_camera()
         self.ep_idx = self.k = self.cam_key = None
@@ -355,20 +476,23 @@ class SubtaskTraceExtract(DataExtract):
 
     def _ensure_pt2(self) -> Tapip3D_PT2:
         if self._pt2 is None:
-            print(f"Loading TAPIP3D .pt2 artifacts...")
-            print(f"  Encoder: {self.args.encoder}")
-            print(f"  Iteration: {self.args.iteration}")
-            self._pt2 = Tapip3D_PT2(
-                self.args.encoder, self.args.iteration,
-                image_size=tuple(self.args.image_size),
-                num_iters=self.args.num_iters)
-            if self._pt2.num_queries != SUPPORT_GRID_SIZE ** 2 + MAX_OBJECT_QUERIES:
+            print("Loading TAPIP3D .pt2 artifacts...")
+            # the shipped artifacts and their fixed graph config (encoder
+            # 480x640, 1088-query iteration graph, 6 window iterations) —
+            # see _DEFAULT_ENCODER / _DEFAULT_ITERATION in tapip3d.py
+            self._pt2 = Tapip3D_PT2()
+            # the graph total is fixed at the export-time split (32x32
+            # support grid + 64 object-query slots); a pass splits the
+            # total between its role keypoints and the support block, so
+            # the role caps (64/128) never change the total
+            expected = SUPPORT_GRID_SIZE ** 2 + ROLE_MAX_KEYPOINTS["object"]
+            if self._pt2.num_queries != expected:
                 raise SystemExit(
                     f"iteration graph has {self._pt2.num_queries} fixed "
-                    f"queries, expected {SUPPORT_GRID_SIZE ** 2 + MAX_OBJECT_QUERIES} "
-                    f"({SUPPORT_GRID_SIZE}x{SUPPORT_GRID_SIZE} support grid + "
-                    f"{MAX_OBJECT_QUERIES} object slots) — re-export the "
-                    f"iteration program for this query count")
+                    f"queries, expected {expected} "
+                    f"({SUPPORT_GRID_SIZE}x{SUPPORT_GRID_SIZE} support grid "
+                    f"+ {ROLE_MAX_KEYPOINTS['object']} object slots) — "
+                    f"re-export the iteration program for this query count")
         return self._pt2
 
     # --- dataset access -----------------------------------------------------
@@ -423,17 +547,19 @@ class SubtaskTraceExtract(DataExtract):
                 cands.append(t)
         return cands
 
-    def _usable_at(self, prompt: dict, kf_abs: int, depth: np.ndarray):
+    def _usable_at(self, prompt: dict, kf_abs: int, depth: np.ndarray,
+                   max_rows: int):
         """(rows, px_keyframe, px_depth) of a prompt's keypoints usable on
         the Step-2 stem kf_abs: the prompt's own key-frame column when the
         stem is one of its key-frames, else the first column's keypoints
         tested against kf_abs's depth — valid for the window's leading stem
         (at-or-before the first key-frame), where the object is still
-        static. Empty rows when nothing is usable there."""
+        static. Rows are capped at max_rows (the role's per-prompt cap).
+        Empty rows when nothing is usable there."""
         kfs = list(prompt["frame_indices"])
         j = kfs.index(kf_abs) if kf_abs in kfs else 0
         return _row_pixels(prompt["keypoints"], prompt["masks"], j, depth,
-                           MAX_OBJECT_QUERIES)
+                           max_rows)
 
     # --- orchestration ------------------------------------------------------
 
@@ -600,13 +726,14 @@ class SubtaskTraceExtract(DataExtract):
             self.seg_stems,
             [int(p["frame_indices"][0]) for p in prompts],
             [int(p["frame_indices"][-1]) for p in prompts])
+        cap = _role_keypoint_cap(role)
         depth = None
         anchor_abs = None
         usable: dict[str, tuple] = {}
         for cand in self._candidate_frames(prompts, window):
             depth, intrs, extr = _geometry_at(self.seg_depth_dir, cand)
             for p in prompts:
-                usable[p["slug"]] = self._usable_at(p, cand, depth)
+                usable[p["slug"]] = self._usable_at(p, cand, depth, cap)
             if any(len(u[0]) for u in usable.values()):
                 anchor_abs = cand
                 break
@@ -618,14 +745,14 @@ class SubtaskTraceExtract(DataExtract):
                 self._save_empty(p, role, d, reason, seg_report)
             return
 
-        # --- object queries: rows per prompt, rank order, <= 64 total --------
+        # --- object queries: rows per prompt, rank order, <= role cap ---------
         per_prompt = []          # (prompt, rows, px_keyframe, px_depth)
         n_obj = 0
         for p, d in zip(prompts, pdirs):
             rows, px_kf, px_dep = usable[p["slug"]]
             n_here = len(rows)
-            if n_here and n_obj < MAX_OBJECT_QUERIES:
-                n_here = min(n_here, MAX_OBJECT_QUERIES - n_obj)
+            if n_here and n_obj < cap:
+                n_here = min(n_here, cap - n_obj)
                 rows, px_kf, px_dep = rows[:n_here], px_kf[:n_here], px_dep[:n_here]
                 n_obj += n_here
             else:
@@ -633,8 +760,7 @@ class SubtaskTraceExtract(DataExtract):
             per_prompt.append((p, d, rows, px_kf, px_dep))
         n_obj = sum(len(r[2]) if r[2] is not None else 0 for r in per_prompt)
         if n_obj == 0:
-            reason = f"pass query cap of {MAX_OBJECT_QUERIES} reached by " \
-                     "the earlier prompts"
+            reason = f"pass query cap of {cap} reached by the earlier prompts"
             print(f"  [subtask {k:02d}] {label} pass: empty ({reason})")
             for p, d in zip(prompts, pdirs):
                 self._save_empty(p, role, d, reason, seg_report)
@@ -642,14 +768,15 @@ class SubtaskTraceExtract(DataExtract):
 
         # --- exact-N query assembly ------------------------------------------
         xy_blocks = [r[4] for r in per_prompt if r[4] is not None]
-        init = unproject_xy_queries(np.concatenate(xy_blocks), depth,
-                                    intrs, extr)
+        xy = np.concatenate(xy_blocks)     # keypoint px on the anchor depth
+        init = unproject_xy_queries(xy, depth, intrs, extr)
         assert init is not None, "anchor rows already depth-filtered"
         need = self._ensure_pt2().num_queries - init.shape[0]
         pass_seed = self.args.seed + (ROLE_ORDER.index(role)
                                       if role in ROLE_ORDER else 2)
         rng = np.random.default_rng(pass_seed)
-        support = _support_queries(depth, intrs, extr, need, rng)
+        support = _support_queries(depth, intrs, extr, need, rng,
+                                   query_px=xy)
         queries = torch.cat([init, support])
         if queries.shape[0] != self._pt2.num_queries:
             raise SystemExit(
@@ -666,14 +793,33 @@ class SubtaskTraceExtract(DataExtract):
                   f"frame window; the trace will stay at the anchor points "
                   f"(all visibs false)")
         t0 = time.perf_counter()
-        coords, visibs_logits = self._track(steps, queries)
+        tracked = self._track(steps, queries)
         print(f"    tracked {len(steps)} steps in "
               f"{time.perf_counter() - t0:.1f}s")
-        visibs = (torch.sigmoid(visibs_logits) >=
-                  self.args.vis_threshold).cpu().numpy()
+        if (self.args.filter_visible or self.args.filter_static_pixel):
+            # The stream filtered inside run(): coords/visibs hold the
+            # surviving columns only (visibs already bool at
+            # --vis-threshold); keep_t (full-width, original column order)
+            # and drop_reasons map the survivors back to the prompts.
+            coords, visibs, keep_t, drop_reasons = tracked
+            visibs = visibs.numpy()
+        else:
+            coords, visibs_logits = tracked
+            visibs = (torch.sigmoid(visibs_logits) >=
+                      self.args.vis_threshold).numpy()
+            keep_t = None
+            drop_reasons = None
 
         # --- save: one folder per prompt (its own query columns only) --------
+        # Prompt blocks are contiguous in column order both in the full
+        # layout and — survivors only — in the filtered arrays, so the
+        # prompt cursor (col) walks keep_t while a kept-column cursor
+        # (kept_col) walks the filtered coords/visibs. Filtered runs cap
+        # each prompt's output at MAX_KEPT_KEYPOINTS survivors (a 128-seed
+        # manipulator prompt can outlive the filters with more).
         col = 0
+        kept_col = 0
+        kept_total = 0
         pass_meta = {"role": role, "anchor_frame": int(anchor_abs),
                      "num_steps": int(len(steps)),
                      "num_queries": int(queries.shape[0]),
@@ -688,13 +834,36 @@ class SubtaskTraceExtract(DataExtract):
                                  "no usable keypoints on the pass anchor "
                                  f"key-frame {anchor_abs}", seg_report)
                 continue
+            rows = np.asarray(rows)
+            px_kf = np.asarray(px_kf)
+            if keep_t is not None:
+                # run() returns CPU tensors (see Tapip3DStreamPT2.run), so
+                # the column mask and coords slice on cpu directly
+                sel_t = keep_t[start:col]                # (n,) bool
+                sel = sel_t.numpy()                      # (n,) survivors
+                sel, over = _cap_keypoint_survivors(sel, MAX_KEPT_KEYPOINTS)
+                for i in over:
+                    drop_reasons[start + int(i)] = (
+                        f"beyond the {MAX_KEPT_KEYPOINTS}-keypoint output "
+                        f"cap after filtering")
+                n = int(sel.sum())
+                kept_total += n
+                coords_save = coords[:, kept_col:kept_col + n].numpy()
+                visibs_save = visibs[:, kept_col:kept_col + n]
+                queries_save = queries[start:col][sel_t].numpy()
+                kept_col += n
+                rows_keep = rows[sel]
+                px_keep = px_kf[sel]
+            else:
+                coords_save = coords[:, start:col].numpy()
+                visibs_save = visibs[:, start:col]
+                queries_save = queries[start:col].numpy()
+                rows_keep, px_keep = rows, px_kf
             out_dir = Path(d)
             out_dir.mkdir(parents=True, exist_ok=True)
-            np.save(out_dir / "coords.npy",
-                    coords[:, start:col].cpu().numpy())
-            np.save(out_dir / "visibs.npy", visibs[:, start:col])
-            np.save(out_dir / "queries.npy",
-                    queries[start:col].cpu().numpy())
+            np.save(out_dir / "coords.npy", coords_save)
+            np.save(out_dir / "visibs.npy", visibs_save)
+            np.save(out_dir / "queries.npy", queries_save)
             entry = {
                 "episode": int(self.ep_idx), "subtask": int(k),
                 "role": role, "prompt": p["prompt"],
@@ -707,23 +876,43 @@ class SubtaskTraceExtract(DataExtract):
                 "num_queries": int(n),
                 "pass_queries": int(queries.shape[0]),
                 "query_keypoint_rows":
-                    [int(i) for i in rows],
-                "pixels": [[float(x), float(y)] for x, y in
-                           (px_kf if px_kf is not None else [])],
-                "model": {"encoder": str(Path(self.args.encoder).absolute()),
+                    [int(i) for i in rows_keep],
+                "pixels": [[float(x), float(y)] for x, y in px_keep],
+                "model": {"encoder": str(Path(_DEFAULT_ENCODER).absolute()),
                           "iteration":
-                              str(Path(self.args.iteration).absolute()),
-                          "num_iters": self.args.num_iters},
-                "image_size": list(self.args.image_size),
+                              str(Path(_DEFAULT_ITERATION).absolute()),
+                          "num_iters": self._pt2.num_iters},
+                "image_size": list(self._pt2.image_size),
                 "vis_threshold": self.args.vis_threshold,
                 "seed": self.args.seed,
                 "inputs": {"init_points_dir": str(p["dir"]),
                            "depth_dir": str(self.seg_depth_dir)},
             }
+            if keep_t is not None:
+                dropped = np.nonzero(~sel)[0]
+                entry["filter"] = {
+                    "num_kept": int(n),
+                    "num_dropped": int(len(dropped)),
+                    "dropped_keypoint_rows": [int(i) for i in rows[dropped]],
+                    "dropped_reasons": [drop_reasons[start + int(i)]
+                                        for i in dropped],
+                }
+                if self.args.filter_visible:
+                    entry["filter"]["visible"] = {
+                        "max_invisible_stems": self.args.max_invisible_stems,
+                        "max_reappear_ratio":
+                            self.args.max_reappear_ratio,
+                    }
+                if self.args.filter_static_pixel:
+                    entry["filter"]["static_pixel"] = {
+                        "min_motion_pixels": self.args.min_motion_pixels,
+                    }
             with open(out_dir / "metadata.json", "w") as f:
                 json.dump(entry, f, indent=2)
             print(f"    [{p['slug']}] {n} keypoints -> {d}")
             seg_report["prompts"].append(entry)
+        if keep_t is not None:
+            pass_meta["num_kept_queries"] = kept_total
 
     def _save_empty(self, prompt: dict, role: str | None, out_dir: str,
                     reason: str, seg_report: dict) -> None:
@@ -748,8 +937,12 @@ class SubtaskTraceExtract(DataExtract):
     def _track(self, steps: list[int], queries: torch.Tensor):
         """Streamed TAPIP3D over the sequence steps: batches of seq_len
         frames decoded online + Step-2 geometry resized to the inference
-        resolution (the same math as load_resized_batch). Returns
-        (coords (T, Q, 3), visibs_logits (T, Q)) CPU."""
+        resolution (the same math as load_resized_batch). With all
+        filters off returns (coords (T, Q, 3), visibs_logits (T, Q));
+        with --filter-visible and/or --filter-static-pixel on, returns
+        the stream's filtered 4-tuple (coords, visibs bool, keep (Q,)
+        bool, reasons) instead. All returned tensors are CPU — the
+        stream moves its outputs back from the GPU."""
         pt2 = self._ensure_pt2()
         inf_h, inf_w = pt2.image_size
         file_list = [(int(t), None) for t in steps]
@@ -763,10 +956,16 @@ class SubtaskTraceExtract(DataExtract):
 
         depth_roi = compute_global_depth_roi(str(self.seg_depth_dir),
                                              file_list, inf_h, inf_w)
-        si = Tapip3DStreamPT2(pt2, queries, depth_roi=depth_roi)
+        si = Tapip3DStreamPT2(pt2, queries, depth_roi=depth_roi,
+                              vis_threshold=self.args.vis_threshold,
+                              max_invisible_stems=self.args.max_invisible_stems,
+                              max_reappear_ratio=self.args.max_reappear_ratio,
+                              min_motion_pixels=self.args.min_motion_pixels)
         with torch.inference_mode():
-            coords, visibs = si.run(batches(), len(steps))
-        return coords, visibs
+            out = si.run(batches(), len(steps),
+                         filter_visible=self.args.filter_visible,
+                         filter_static_pixel=self.args.filter_static_pixel)
+        return out
 
 
 def main() -> None:

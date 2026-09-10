@@ -11,9 +11,9 @@ DATA_ROOT=/data/astribot_making_coffee_vlva_full
 python tools/astribot/run_step3_init_points.py \
     --repo-id $REPO_ID \
     --data-root $DATA_ROOT --episode-idxes 0 \
-    --use-inferred-splits \
-    --camera-idx 0 \
+    --camera-idxes 0 4 5 \
     --use-inferred-splits \
     --object-top-k 64 --manipulator-top-k 128 \
     --sampling-mode no_roma \
     --with-optical-flow-mask --visualize-motion --motion-ratio 0.03
+

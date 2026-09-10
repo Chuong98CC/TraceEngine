@@ -12,4 +12,5 @@ python tools/astribot/visualize_step4_traces.py \
     --repo-id $REPO_ID \
     --data-root $DATA_ROOT \
     --episode-idxes 0 \
-    --camera-idxes 0 4 5  --render both
+    --camera-idxes 0 5 --render 2d
+    # --render stills

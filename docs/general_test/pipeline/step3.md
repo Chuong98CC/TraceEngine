@@ -111,7 +111,7 @@ python tools/astribot/run_step3_init_points.py \
 # (--skip-3a requires the detections JSON on disk — missing -> error, in
 # both drivers: no silent text-only fallback)
 python tools/general_test/pipeline/run_e2e_init_points.py \
-    --keyframes-dir .../subtask_00/cam_head --skip-3a --top-k 64
+    --keyframes-dir .../subtask_00/cam_head --skip-3a --object-top-k 64
 
 # Dataset mode: --skip-3a implies --skip-extract — the reused detections
 # were made from the key-frames on disk, so Step 1 is skipped too. The
@@ -119,9 +119,9 @@ python tools/general_test/pipeline/run_e2e_init_points.py \
 # episode and the detections JSON must exist (missing -> error, in the
 # episode driver: no ordinal fallback)
 python tools/astribot/run_step3_init_points.py \
-    --repo-id Kronze157/astribot_making_coffee_vlva_full \
-    --data-root /data/astribot_making_coffee_vlva_full --episode-idxes 0 \
-    --skip-3a --top-k 64
+    --repo-id Kronze157/astri_making_coffee_vlva \
+    --data-root /data/astri_making_coffee_v1 --episode-idxes 0 \
+    --skip-3a --object-top-k 64
 
 # A/B the RoMAv2 candidate pool (3b-only re-run): --sampling-mode mask
 # (default) samples inside the object masks; --sampling-mode uniform
@@ -205,7 +205,7 @@ uniform, so downstream consumers always find the same files.
       `ep*/subtask_XX/<camera>/`) with all four files per prompt
       (`init_points.npz`, `masks_rle.json`, `init_points.json`,
       `viz.png`).
-- [ ] `init_points.npz` keypoints are `(K, N, 2)` — K ≤ `--top-k` points
+- [ ] `init_points.npz` keypoints are `(K, N, 2)` — K ≤ `--object-top-k` points
       visible in all N key-frames (N = number of matched key-frames
       (dataset mode: 2 for an object prompt of a canonical 4-frame
       sub-task — the close/open pair — all key-frames otherwise)).

@@ -57,16 +57,13 @@ from depth_models.streaming.da3_streaming import DA3_Streaming
 from depth_models.streaming.loop_utils.config_utils import load_config
 from depth_models.streaming.vggt_omg_streaming import VGGT_OMG_Streaming
 from tools.astribot.extract_frames import DataExtract
-from tools.general_test.module.infer_waft import (
-    _compute_motion_mask_gray,
-    _resolve_checkpoint,
-)
+from tools.general_test.module.infer_waft import _compute_motion_mask_gray
 from tools.general_test.pipeline.run_depth_stream import _report_run_stats
 from utils.depth_utils import depth_frame_to_uint16_mm, is_raw_depth_feature
 from utils.visualize.visualize_mask import to_pil
 
-# WAFTv2 torch.export artifact (legacy .engine / .onnx checkpoints are
-# rejected — see _resolve_checkpoint).
+# WAFTv2 torch.export artifact backing the motion masks (the .pt2 programs
+# are the only supported checkpoint format).
 DEFAULT_WAFT_PT2 = "weights/waftv2/waftv2_dinov3_i5_640x480_bf16.pt2"
 
 
@@ -114,21 +111,6 @@ def parse_args(argv: list[str] | None = None):
     parser.add_argument("--motion-threshold", "-thr", type=float, default=2.0,
                         help="flow-magnitude (pixel displacement) threshold above which "
                              "a pixel counts as moving (default: %(default)s)")
-    parser.add_argument("--waft-checkpoint", default=DEFAULT_WAFT_PT2,
-                        help="WAFTv2 .pt2 artifact; a .pt2 path is used as-is, "
-                             "otherwise .pt2 is appended (legacy .onnx/.engine "
-                             "checkpoints are rejected) "
-                             "(default: %(default)s)")
-    parser.add_argument("--model-path", default=None,
-                        help="VGGT-Omega model artifact path (.pt2); overrides the "
-                             "backend's default")
-    parser.add_argument("--anyview-model-path", default=None,
-                        help="DA3 any-view .pt2 override")
-    parser.add_argument("--metric-model-path", default=None,
-                        help="DA3 metric-depth .pt2 override")
-    parser.add_argument("--a2f-model-path", default=None,
-                        help="Any2Full model artifact path (.pt2); overrides the "
-                             "a2f backend's default")
     parser.add_argument("--no-depth-enhance", action="store_true",
                         help="a2f backend only: skip the Any2Full depth-enhance "
                              "model and feed the raw sensor depth directly into "
@@ -139,8 +121,6 @@ def parse_args(argv: list[str] | None = None):
     parser.add_argument("--config",
                         default="src/depth_models/streaming/configs/base_config.yaml",
                         help="alignment library/method, loop-closure settings")
-    parser.add_argument("--device", default=None, choices=["cuda", "cpu"],
-                        help="device (default: auto)")
     parser.add_argument("--skip-done", action="store_true",
                         help="skip sub-tasks whose pipeline output already exists")
     parser.add_argument("--use-inferred-splits", action="store_true",
@@ -406,14 +386,12 @@ class SubtaskStreamExtract(DataExtract):
                 f"vggt_omega for RGB-only cameras.")
 
     def _ensure_waft(self) -> None:
-        """Load the WAFTv2 torch.export model (.pt2 artifact) backing the
-        per-chunk motion masks (RGB input — the shared image_io path)."""
+        """Load the WAFTv2 torch.export model (the shipped .pt2 artifact)
+        backing the per-chunk motion masks (RGB input — the shared image_io
+        path)."""
         from flow_models.waftv2.waftv2_pt2 import WAFTv2_PT2
-        ckpt = _resolve_checkpoint(self.args.waft_checkpoint)
-        device = self.args.device or ("cuda" if torch.cuda.is_available()
-                                      else "cpu")
-        print(f"Loading WAFTv2 .pt2 artifact: {ckpt}")
-        self.waft_model = WAFTv2_PT2(ckpt, device=device)
+        print(f"Loading WAFTv2 .pt2 artifact: {DEFAULT_WAFT_PT2}")
+        self.waft_model = WAFTv2_PT2(DEFAULT_WAFT_PT2)  # CUDA by default
 
     def _ensure_stream(self) -> OnlineStreaming:
         """Construct the streaming backend once; run() is called once per
@@ -421,26 +399,23 @@ class SubtaskStreamExtract(DataExtract):
         if self.stream is None:
             config = load_config(self.args.config)
             input_dirs = [self._camera_subdir(k) for k in self.cam_keys.values()]
+            # each backend loads its shipped default .pt2 artifacts and
+            # auto-detects the device — see the backend constructors
             if self.args.backend == "vggt_omega":
                 self.stream = OnlineVGGTStreaming(
                     input_dirs=input_dirs, save_dir=self.depth_pose_dir,
-                    config=config, device=self.args.device,
-                    model_path=self.args.model_path)
+                    config=config)
             elif self.args.backend == "da3":
                 self.stream = OnlineDA3Streaming(
                     input_dirs=input_dirs, save_dir=self.depth_pose_dir,
-                    config=config, device=self.args.device,
-                    anyview_model_path=self.args.anyview_model_path,
-                    metric_model_path=self.args.metric_model_path)
+                    config=config)
             else:
                 # virtual depth folders: the raw depth is decoded from the
                 # dataset per chunk (OnlineStreaming._load_depth_paths), the
                 # folders only satisfy the a2f input contract
                 self.stream = OnlineA2FStreaming(
                     input_dirs=input_dirs, save_dir=self.depth_pose_dir,
-                    config=config, device=self.args.device,
-                    anyview_model_path=self.args.anyview_model_path,
-                    a2f_model_path=self.args.a2f_model_path,
+                    config=config,
                     depth_dirs=[f"depth_{d}" for d in input_dirs],
                     depth_scale=self.args.depth_scale,
                     use_depth_enhance=not self.args.no_depth_enhance)

@@ -136,6 +136,26 @@ python tools/astribot/visualize_step4_traces.py \
     --episode-idxes 0
 ```
 
+Instead of the videos, `--render stills` saves one trace2d PNG per
+Step-3 key-frame of the camera — the same 2D overlay (role-colored
+keypoints + trails, occluded red, HUD + legend) composited on the
+key-frame image itself, read off the Step-3 `key_frames/` tree (no
+online frame decode), under
+`<out-dir>/visualization/<episode>/subtask_XX/<camera>/trace2d_stills/frame_<k>.png`.
+The Step-3 key-frames sit at arbitrary dataset indices while the trace
+rows live on the strided Step-2 stems, so each key-frame draws the trace
+state of the stem nearest to it in time (the HUD reads
+`kf <k> ~ stem <s>`); prompts without a row there (e.g. the object
+before its transport window) stay undrawn, exactly as in the video:
+
+```bash
+python tools/astribot/visualize_step4_traces.py \
+    --repo-id Kronze157/astri_making_coffee_vlva \
+    --data-root /data/astri_making_coffee \
+    --episode-idxes 0 --render stills
+# --keyframes-root overrides the default <out-dir>/sampling_points/key_frames
+```
+
 ## Output
 
 ```
@@ -170,18 +190,17 @@ prompts skipped by a role carry a `metadata.json` with
 | `--repo-id`, `-id` | — (required) | dataset repo id as seen by LeRobotDataset |
 | `--data-root`, `-d` | — (required) | root of the local dataset copy |
 | `--camera-idxes`, `-c` | all | dataset camera indices eligible for tracking (the tracked cameras of each sub-task are the ones with Step-3 init points on disk) |
-| `--episode-idxes`, `-e` | all | only process these episode indices (mutually exclusive with `--one-per-task`) |
-| `--one-per-task` | off | select the first episode of each task |
+| `--episode-idxes`, `-e` | all | only process these episode indices (default: all episodes with Step-3 init points on disk) |
 | `--max-episodes`, `-x` | — | cap the number of processed episodes |
 | `--out-dir`, `-o` | `<data-root>/eps_data` | output root; Step-2 results read under `<out-dir>/depth_pose`, traces saved under `<out-dir>/traces`. The Step-3 inputs are always read from the sampling_points root (`<data-root>/eps_data/sampling_points/{detections,init_points}`) |
-| `--image-size` | `480 640` | inference resolution (H W), must match the encoder graph |
-| `--encoder` | `weights/tapip3d/tapip3d_encoder_480x640_bf16.pt2` | TAPIP3D encoder `.pt2` artifact |
-| `--iteration` | `weights/tapip3d/tapip3d_iteration_1088_bf16.pt2` | fused corr+updater `.pt2` (query count auto-detected; 1088 = 32x32 support grid + 64 object slots expected) |
-| `--num-iters` | 6 | fused corr+updater iterations inside each window |
 | `--vis-threshold` | 0.5 | sigmoid visibility threshold for `visibs` |
 | `--seed` | 0 | RNG seed for the support padding (per role: seed + 0 object, +1 manipulator, +2 unlabelled) |
-| `--device` | auto | `cuda` or `cpu` (TAPIP3D is GPU-only) |
 | `--skip-done` | off | skip prompts whose `coords.npy` already exists |
+
+The TAPIP3D artifacts and graph config are the shipped defaults (encoder
+`weights/tapip3d/tapip3d_encoder_480x640_bf16.pt2`, fused corr+updater
+`weights/tapip3d/tapip3d_iteration_1088_bf16.pt2` — 1088 = 32x32 support
+grid + 64 object slots, 6 iterations inside each window).
 
 ## Notes
 

@@ -25,8 +25,9 @@ detections JSONs of Step 3a (folder mode writes the flat
 Prompts are read per sub-task from the Step-3a detections JSON (Step 3a
 recorded them from the dataset's meta/subtasks.csv in episode mode —
 together with each prompt's role, the column it was read from — or from
-its --text-prompts in folder mode, without roles). Episode mode processes
-every --camera-keys entry whose JSON exists under
+its --text-prompts in folder mode, without roles).
+
+Episode mode processes every --camera-keys entry whose JSON exists under
 detections/ep{ep:06d}/<camera>.json (default: all such cameras). An
 **object** prompt is matched only between the sub-task's 2nd and
 2nd-to-last key-frame (the gripper close .. open transport span, where
@@ -35,17 +36,30 @@ the object is static on the dropped boundary frames anyway); the
 older Step-3a JSONs) — is matched across all key-frames. There is no
 JSON-less fallback — run Step 3a first.
 
-By default RoMAv2 samples its candidate points inside the object masks
-(--sampling-mode mask); with --sampling-mode uniform it samples over the
-whole enlarged crops instead and the in-mask top-k filter alone decides —
-same crops and output criterion, different pool (run both modes into
-separate --out-dirs to compare). --sampling-mode no_roma is the simple
-baseline: no RoMAv2 — top-k points are uniformly sampled inside the mask
-of the span's first frame only (the manipulator's 1st key-frame, the
-object's 2nd — the first of its transport span), with the same full-span
-SAM3 masks, frame_indices and outputs as the matching modes, so Step 4
-sees identical windows and gating minus the matching. All checkpoints are
-the repo defaults.
+By default RoMAv2
+--sampling-mode mask: samples its candidate points inside the object masks
+--sampling-mode uniform: samples over the whole enlarged crops instead
+and the in-mask top-k filter alone decides —same crops and output criterion,
+different pool.
+--sampling-mode no_roma: is the simple baseline: no RoMAv2 — top-k points
+are uniformly sampled inside the mask of the span's first frame only
+(the manipulator's 1st key-frame, the object's 2nd — the first of its transport span),
+
+--with-optical-flow-mask (episode mode, off by default) unions the
+sub-task's WAFT motion mask (Step 3a', run_step3_motion_masks.py, read
+from the sub-task's own folder in this tree:
+init_points/.../subtask_XX/<camera>/motion_rle.json) into the
+**manipulator** prompt's row-0 SAM3 mask before sampling — the SAM ∪
+optical-flow mask that rescues the arm when the Step-3a detection missed
+it. The flow mask is anchored at the manipulator's 1st key-frame (the
+same frame row 0 samples from), so it ORs in-place. Step 3a' saves the
+mask only for significant pairs, so a sub-task without one (no file)
+simply keeps its SAM mask; a stale/mismatched mask is skipped with a
+note. --viz-motion-union renders that union (union_mask.png next to the
+manipulator prompt's init points: the row-0 key-frame tinted SAM-only /
+SAM ∩ motion / motion-only) — the motion-only pixels being exactly what
+the rescue added.
+
 
 Examples
 --------
@@ -89,7 +103,7 @@ from utils.keyframe_utils import (
     sampling_points_root,
     select_episodes,
 )
-from utils.file_io.mask_rle import encode_rle
+from utils.file_io.mask_rle import decode_rle, encode_rle
 
 DEFAULT_SAM3_CKPT = "weights/sam3/sam3_image_exported_bf16.pt2"
 DEFAULT_ROMAV2_CKPT = "weights/romav2/romav2.pt2"
@@ -105,6 +119,15 @@ _PALETTE = np.array(
         [0, 255, 255], [255, 0, 255], [255, 128, 0], [128, 0, 255],
     ]
 )
+
+
+def _prompt_top_k(top_k: int, manipulator_top_k: int | None,
+                  role: str | None) -> int:
+    """Per-prompt keypoint cap of one prompt: the manipulator role samples
+    ``manipulator_top_k`` (falling back to ``top_k``), every other prompt
+    ``top_k``. The manipulator is sampled denser so enough of its points
+    survive the Step-4 static filters (--filter-static-*)."""
+    return (manipulator_top_k or top_k) if role == "manipulator" else top_k
 
 
 def parse_args(argv: list[str] | None = None):
@@ -145,9 +168,18 @@ def parse_args(argv: list[str] | None = None):
                         help="output root (default: <data-root>/eps_data/"
                              "sampling_points); results land under "
                              "<out-dir>/init_points/")
-    parser.add_argument("--top-k", type=int, default=128,
-                        help="final keypoints kept per prompt per sub-task "
-                             "(default: %(default)s)")
+    parser.add_argument("--object-top-k", type=int, default=128,
+                        help="final keypoints kept per object prompt per "
+                             "sub-task (also the cap of role-less prompts, "
+                             "e.g. folder mode; default: %(default)s)")
+    parser.add_argument("--manipulator-top-k", type=int, default=None,
+                        help="final keypoints kept per manipulator-role "
+                             "prompt per sub-task — the manipulator is "
+                             "sampled denser so enough of its points "
+                             "survive the Step-4 static filters "
+                             "(overrides --object-top-k for the "
+                             "manipulator role; default: same as "
+                             "--object-top-k)")
     parser.add_argument("--bbox-scale", type=float, default=1.5,
                         help="enlargement factor of the bounding-box crops fed "
                              "to RoMAv2 (centered, clamped to the frame) "
@@ -183,6 +215,26 @@ def parse_args(argv: list[str] | None = None):
                              "applied to the Step-3a list or the discovered "
                              "frames); None disables the cap (default: "
                              "%(default)s)")
+    parser.add_argument("--with-optical-flow-mask", action="store_true",
+                        help="union the sub-task's WAFT motion mask (Step "
+                             "3a', motion_rle.json read from the "
+                             "sub-task's own folder under --init-points-dir) "
+                             "into the manipulator prompt's row-0 SAM3 mask "
+                             "before sampling — the SAM + optical-flow rescue "
+                             "of a manipulator the detection missed (episode "
+                             "mode only; default: off)")
+    parser.add_argument("--init-points-dir", default=None,
+                        help="init-points root Step 3a' writes its "
+                             "motion-mask artefacts into and this pass reads "
+                             "them from (default: <out-dir>/init_points — the "
+                             "same tree the per-prompt outputs land in)")
+    parser.add_argument("--viz-motion-union", action="store_true",
+                        help="render the manipulator's SAM ∪ motion union "
+                             "(union_mask.png next to that prompt's init "
+                             "points): the row-0 key-frame tinted SAM-only / "
+                             "SAM ∩ motion / motion-only, i.e. the pixels the "
+                             "flow rescue added — requires "
+                             "--with-optical-flow-mask (default: off)")
     parser.add_argument("--device", default=None, choices=["cuda", "cpu"],
                         help="device (default: auto)")
     parser.add_argument("--skip-done", action="store_true",
@@ -205,6 +257,10 @@ class InitPointsExtract:
     def __init__(self, args):
         self.args = args
         self.folder_mode = args.keyframes_dir is not None
+        if self.folder_mode and args.with_optical_flow_mask:
+            sys.exit("--with-optical-flow-mask needs the dataset (the WAFT "
+                     "motion masks are computed online from it): the "
+                     "--keyframes-dir folder mode cannot run it")
         if self.folder_mode:
             self.folder = Path(args.keyframes_dir)
             if not self.folder.is_dir():
@@ -235,7 +291,8 @@ class InitPointsExtract:
             print(f"key-frames: {self.root}")
             print(f"episodes on disk: {len(discover_episodes(self.root))} -> "
                   f"{len(self.ep_idxes)} selected")
-        self.init_dir = os.path.join(self.out_dir, "init_points")
+        self.init_dir = str(args.init_points_dir) if args.init_points_dir \
+            else os.path.join(self.out_dir, "init_points")
         os.makedirs(self.init_dir, exist_ok=True)
         if args.detections_dir is None:
             args.detections_dir = os.path.join(self.out_dir, "detections")
@@ -373,8 +430,8 @@ class InitPointsExtract:
         return np.ascontiguousarray(rgb[c0y:c1y, c0x:c1x]), (c0x, c0y)
 
     def _match_object(self, crops: list[np.ndarray],
-                      crop_masks: list[np.ndarray | None] | None = None
-                      ) -> np.ndarray | None:
+                      crop_masks: list[np.ndarray | None] | None = None,
+                      top_k: int | None = None) -> np.ndarray | None:
         """RoMAv2 matching of the crops: returns (K, N, 2) pixel coordinates
         in crop space (already ranked by worst-case overlap), or None.
 
@@ -383,11 +440,16 @@ class InitPointsExtract:
         the sampled points lie inside the object masks. Pass None (or omit)
         for uniform sampling over the crops — the caller's in-mask top-k
         filter then decides alone (--sampling-mode uniform).
+
+        top_k: the prompt's keypoint cap (default: --object-top-k; the RoMAv2
+        candidate pool is 4x the cap).
         """
+        if top_k is None:
+            top_k = self.args.object_top_k
         positions, _ = self._ensure_romav2().match(
             crops, strategy=self.args.strategy,
             num_corresp=self.args.num_corresp,
-            overlap_th=None, top_k=self.args.top_k * 4, cycle_th=CYCLE_TH,
+            overlap_th=None, top_k=top_k * 4, cycle_th=CYCLE_TH,
             masks=crop_masks)
         if positions.shape[0] == 0:
             return None
@@ -397,16 +459,19 @@ class InitPointsExtract:
              for j in range(len(crops))], dim=1).cpu().numpy()
 
     def _filter_top_k(self, matches_crop: np.ndarray, masks: np.ndarray,
-                      offsets: list[tuple[int, int]], h: int, w: int
-                      ) -> tuple[np.ndarray, int]:
+                      offsets: list[tuple[int, int]], h: int, w: int,
+                      top_k: int | None = None) -> tuple[np.ndarray, int]:
         """Full-frame keypoints + the required in-mask frame count.
 
         A track must lie inside the object mask on at least half of the
         key-frames that have a mask (ceil, min 1) — objects are occluded or
         move between key-frames, so a strict all-frames check would drop
-        every point. Survivors are capped at --top-k; they are already
-        ranked by worst-case overlap across the key-frames.
+        every point. Survivors are capped at the prompt's top-k (default:
+        --object-top-k); they are already ranked by worst-case overlap across the
+        key-frames.
         """
+        if top_k is None:
+            top_k = self.args.object_top_k
         n = matches_crop.shape[1]
         full = matches_crop.copy()
         for j in range(n):
@@ -423,7 +488,7 @@ class InitPointsExtract:
                     hits += 1
             if hits >= need:
                 keep.append(i)
-        return full[keep][: self.args.top_k], need
+        return full[keep][:top_k], need
 
     def _sample_in_mask(self, mask: np.ndarray, n: int, seed: int
                         ) -> np.ndarray:
@@ -441,6 +506,45 @@ class InitPointsExtract:
         rng = np.random.default_rng(seed)
         idx = rng.choice(len(xs), size=k, replace=False)
         return np.stack([xs[idx], ys[idx]], axis=1).astype(np.float32)
+
+    def _motion_mask_union(self, k: int, keyframes: list[int],
+                           h: int, w: int) -> tuple[np.ndarray | None, dict]:
+        """(motion mask of the sub-task, meta) of the manipulator's
+        SAM-∪-flow rescue, or (None, {}) when there is nothing to union.
+
+        Reads the sub-task's Step-3a' mask — this tree's (sub-task,
+        camera) folder, beside the prompt subtrees:
+        init_points/ep{ep}/subtask_{k}/<camera>/motion_rle.json
+        (COCO RLE + the provenance of the significant pair that produced
+        it). Step 3a' writes the file only for significant pairs, so a
+        missing file is the normal "no rescue" case. The mask must be
+        anchored at the prompt's row-0 key-frame (its 1st — the flow
+        window's fixed first frame) and match the frame resolution; a
+        stale/mismatched mask is skipped with a note — it must never
+        corrupt the SAM masks.
+        """
+        path = Path(self.init_dir) / f"ep{self.ep_idx:06d}" \
+            / f"subtask_{k:02d}" / self.cam_key / "motion_rle.json"
+        if not path.is_file():
+            print(f"    no significant motion mask for subtask {k} "
+                  f"({path.parent}) — SAM mask only")
+            return None, {}
+        with open(path) as f:
+            meta = json.load(f)
+        frame_a, frame_b = (int(t) for t in meta["chosen"])
+        mask = decode_rle(meta["mask"])
+        if frame_a != keyframes[0]:
+            print(f"    motion mask {path} anchored at frame {frame_a}, "
+                  f"row-0 key-frame {keyframes[0]} — skipped")
+            return None, {}
+        if mask.shape != (h, w):
+            print(f"    motion mask {path} is {mask.shape}, frame is "
+                  f"({h}, {w}) — skipped")
+            return None, {}
+        return mask, {"motion_mask_file": str(path),
+                      "motion_flow_pair": [frame_a, frame_b],
+                      "motion_moving_pixels": int(meta.get("moving_pixels",
+                                                           [-1])[-1])}
 
     # --- orchestration ---------------------------------------------------------
 
@@ -611,6 +715,8 @@ class InitPointsExtract:
         if role == "object":
             keyframes = keyframes[1:-1]
             frames = frames[1:-1]
+        top_k = _prompt_top_k(self.args.object_top_k, self.args.manipulator_top_k,
+                              role)
         n = len(keyframes)
         h, w = frames[0].shape[:2] if frames else (0, 0)
         empty_reason = None
@@ -638,6 +744,28 @@ class InitPointsExtract:
                 boxes[j] = b
                 scores[j] = s if s is not None else -1.0
 
+        # Optional motion-mask rescue of the manipulator (the driver's
+        # --with-optical-flow-mask): the SAM ∪ optical-flow union of the
+        # row-0 mask — the row the no_roma baseline samples from (and
+        # RoMAv2's mask gate/crop of the 1st key-frame). The flow mask
+        # comes from Step 3a' (run_step3_motion_masks.py), anchored at the
+        # same 1st key-frame, so it ORs in-place — an arm the detection
+        # missed still gets a mask from its own motion.
+        motion_meta: dict = {}
+        if role == "manipulator" and n >= 1 \
+                and self.args.with_optical_flow_mask:
+            fm, motion_meta = self._motion_mask_union(k, keyframes, h, w)
+            if fm is not None and fm.any():
+                before = int(masks[0].sum())
+                sam0 = masks[0].copy()  # pre-union SAM, for the union viz
+                masks[0] |= fm
+                added = int(masks[0].sum()) - before
+                print(f"    motion mask +{added} px onto the row-0 "
+                      f"SAM mask")
+                any_mask = any_mask or bool(added)
+                if self.args.viz_motion_union:
+                    self._visualize_union(pdir, frames[0], sam0, fm)
+
         keypoints = np.zeros((0, n, 2), dtype=np.float32)
         if empty_reason is None and self.args.sampling_mode == "no_roma":
             # Simple baseline (no RoMAv2): uniformly sample top-k points
@@ -655,7 +783,7 @@ class InitPointsExtract:
             else:
                 seed = zlib.crc32(
                     f"{self.ep_idx}:{k}:{self.cam_key}:{prompt}".encode())
-                pts = self._sample_in_mask(masks[0], self.args.top_k, seed)
+                pts = self._sample_in_mask(masks[0], top_k, seed)
                 if len(pts):
                     keypoints = np.repeat(pts[:, None, :], n, axis=1)
                     in_mask_need = 1
@@ -712,12 +840,12 @@ class InitPointsExtract:
                             if m.any() else None)
                 if empty_reason is None:
                     matches = self._match_object(
-                        crops, crop_masks if mask_gated else None)
+                        crops, crop_masks if mask_gated else None, top_k)
                     if matches is None:
                         empty_reason = "no matches"
                     else:
                         keypoints, in_mask_need = self._filter_top_k(
-                            matches, masks, offsets, h, w)
+                            matches, masks, offsets, h, w, top_k)
 
         # Save (uniform schema; failures are recorded in init_points.json).
         np.savez(npz_path,
@@ -741,10 +869,10 @@ class InitPointsExtract:
             "role": role,
             "keyframes": [int(t) for t in keyframes],
             "num_keypoints": int(len(keypoints)),
-            "top_k": self.args.top_k,
+            "top_k": top_k,
             "bbox_scale": self.args.bbox_scale if roma else None,
             "num_corresp": self.args.num_corresp if roma else None,
-            "match_top_k": self.args.top_k * 4 if roma else None,
+            "match_top_k": top_k * 4 if roma else None,
             "in_mask_min_frames": int(in_mask_need),
             "strategy": self.args.strategy if roma else None,
             "sampling_mode": self.args.sampling_mode,
@@ -754,6 +882,11 @@ class InitPointsExtract:
             "romav2_checkpoint": DEFAULT_ROMAV2_CKPT if roma else None,
             "empty_reason": empty_reason,
         }
+        if self.args.with_optical_flow_mask:
+            meta["motion_mask_file"] = motion_meta.get("motion_mask_file")
+            meta["motion_flow_pair"] = motion_meta.get("motion_flow_pair")
+            meta["motion_moving_pixels"] = motion_meta.get(
+                "motion_moving_pixels")
         with open(os.path.join(pdir, "init_points.json"), "w") as f:
             json.dump(meta, f, indent=2)
         if not self.args.no_viz and len(keypoints):
@@ -761,6 +894,35 @@ class InitPointsExtract:
                             col0_only=self.args.sampling_mode == "no_roma")
         status = empty_reason or f"{len(keypoints)} keypoints"
         print(f"    [{slug}] {status} -> {pdir}")
+
+    #: union-viz colours in BGR, keyed to the legend below: SAM only,
+    #: SAM ∩ motion, motion only.
+    _UNION_COLORS = ((0, 0, 255), (0, 255, 255), (0, 255, 0))
+    #: legend entries drawn with _UNION_COLORS, in the same order.
+    _UNION_LABELS = ("SAM only", "SAM + motion", "motion only")
+
+    def _visualize_union(self, pdir: str, frame: np.ndarray,
+                         sam: np.ndarray, motion: np.ndarray) -> None:
+        """union_mask.png (--viz-motion-union): the manipulator's row-0
+        key-frame tinted with the SAM ∪ motion union — SAM-only red,
+        SAM ∩ motion yellow, motion-only green (the pixels the flow
+        rescue added, i.e. what the SAM mask alone would have missed),
+        blended at the same 0.35 alpha as viz.png."""
+        vis = np.ascontiguousarray(frame[:, :, ::-1])  # RGB -> BGR for cv2
+        overlay = np.zeros_like(vis)
+        overlay[sam & ~motion] = self._UNION_COLORS[0]
+        overlay[sam & motion] = self._UNION_COLORS[1]
+        overlay[motion & ~sam] = self._UNION_COLORS[2]
+        vis = cv2.addWeighted(vis, 1.0, overlay, 0.35, 0)
+        # darkened legend strip so the colours stay self-describing
+        vis[0:66, 0:150] = (vis[0:66, 0:150] * 0.35).astype(np.uint8)
+        for i, label in enumerate(self._UNION_LABELS):
+            y = 22 + 20 * i
+            cv2.rectangle(vis, (8, y - 9), (24, y + 3),
+                          self._UNION_COLORS[i], -1)
+            cv2.putText(vis, label, (32, y + 3), cv2.FONT_HERSHEY_SIMPLEX,
+                        0.42, (255, 255, 255), 1, cv2.LINE_AA)
+        cv2.imwrite(os.path.join(pdir, "union_mask.png"), vis)
 
     def _visualize(self, pdir: str, frames: list[np.ndarray],
                    keypoints: np.ndarray, masks: np.ndarray,

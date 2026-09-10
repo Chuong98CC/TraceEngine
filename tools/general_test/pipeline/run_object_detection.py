@@ -17,13 +17,14 @@ The JSONs land under <out-dir>/detections/ep{ep:06d}/<camera>.json — every
 camera saved), so a multi-camera run never overwrites itself and a later
 run for one more camera only writes that camera's JSON.
 
-Per category per frame the raw predictions are hard-filtered (see
+The JSON holds the raw predictions as RexOmni returns them; the optional
+``--refine-detections`` flag turns on per-category hard filters (see
 ``_refine_detections``): boxes that duplicate one instance (same image
 half, close centers) merge into their union — one hand occasionally fires
 twice — and when the category's prompt names a side (left/right robot arm),
 only that side's box is kept — the model often returns both arms for a
-side prompt. The JSON therefore holds at most one box per side-named
-category per frame.
+side prompt. With the flag the JSON holds at most one box per side-named
+category per frame; without it (the default) every raw box is kept.
 
 Object prompts are per sub-task: the [object, manipulator] of the sub-task's
 row in the dataset's meta/subtasks.csv, recorded in the JSON next to the
@@ -106,9 +107,10 @@ _SIDE_RE = re.compile(r"\b(left|right)\b")
 # RexOmni struggles with the dataset's side-named arm prompts: a prompt like
 # "left robot arm's black grippers" sometimes returns one box per arm, and
 # one hand occasionally returns two nearby boxes. These helpers run per
-# category per frame, so the detections JSON only ever holds the refined
-# boxes: duplicates first collapse into their union, then a side prompt with
-# several remaining boxes keeps only the one on its side.
+# category per frame under --refine-detections (off by default — the JSON
+# then keeps every raw box): duplicates first collapse into their union,
+# then a side prompt with several remaining boxes keeps only the one on its
+# side.
 
 def _box_center(coords: list[float]) -> tuple[float, float]:
     """Center (x, y) of an absolute-pixel box."""
@@ -260,6 +262,12 @@ def parse_args(argv: list[str] | None = None):
     parser.add_argument("--max-keyframes", type=int, default=8,
                         help="cap the key-frames per sub-task (evenly spaced); "
                              "None disables the cap (default: %(default)s)")
+    parser.add_argument("--refine-detections", action="store_true",
+                        help="hard-filter the raw predictions per category "
+                             "before saving: duplicate boxes of one instance "
+                             "merge into their union, and a side-named "
+                             "prompt keeps only the box on its side (off by "
+                             "default — the JSON then holds every raw box)")
     parser.add_argument("--skip-done", action="store_true",
                         help="skip episodes whose detections JSON already exists")
     return parser.parse_args(argv)
@@ -507,8 +515,9 @@ class SubtaskDetectExtract:
         """RexOmni detection over the segment's key-frames: one batched
         call; returns {frame_idx: extracted_predictions} — per-category
         lists of {"type": "box", "coords": [x0, y0, x1, y1]} in absolute
-        pixels, no scores — hard-filtered by ``_refine_detections``
-        (duplicates merged; side prompts keep their side's box only)."""
+        pixels, no scores — the raw boxes as returned, hard-filtered by
+        ``_refine_detections`` only under --refine-detections (duplicates
+        merged; side prompts keep their side's box only)."""
         model = self._ensure_model()
         imgs = [self._load_keyframe(cam, k, t) for t in keys]
         results = model.inference(images=imgs, task="detection",
@@ -517,7 +526,7 @@ class SubtaskDetectExtract:
         for i, (t, res) in enumerate(zip(keys, results)):
             preds = res["extracted_predictions"] if res["success"] else {}
             notes = {}
-            if preds:
+            if preds and self.args.refine_detections:
                 preds, notes = _refine_detections(preds, imgs[i].width)
             dets[str(t)] = preds
             n = sum(len(boxes) for boxes in preds.values())
