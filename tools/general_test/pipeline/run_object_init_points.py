@@ -45,6 +45,16 @@ different pool.
 are uniformly sampled inside the mask of the span's first frame only
 (the manipulator's 1st key-frame, the object's 2nd — the first of its transport span),
 
+--with-optical-flow-mask (episode mode, off by default) unions the
+sub-task's WAFT motion mask (Step 3a', run_step3_motion_masks.py, read
+from motion_masks/.../mask_rle.json) into the **manipulator** prompt's
+row-0 SAM3 mask before sampling — the SAM ∪ optical-flow mask that
+rescues the arm when the Step-3a detection missed it. The flow mask is
+anchored at the manipulator's 1st key-frame (the same frame row 0 samples
+from), so it ORs in-place. Step 3a' saves the mask only for significant
+pairs, so a sub-task without one (no file) simply keeps its SAM mask; a
+stale/mismatched mask is skipped with a note.
+
 
 Examples
 --------
@@ -88,7 +98,7 @@ from utils.keyframe_utils import (
     sampling_points_root,
     select_episodes,
 )
-from utils.file_io.mask_rle import encode_rle
+from utils.file_io.mask_rle import decode_rle, encode_rle
 
 DEFAULT_SAM3_CKPT = "weights/sam3/sam3_image_exported_bf16.pt2"
 DEFAULT_ROMAV2_CKPT = "weights/romav2/romav2.pt2"
@@ -200,6 +210,16 @@ def parse_args(argv: list[str] | None = None):
                              "applied to the Step-3a list or the discovered "
                              "frames); None disables the cap (default: "
                              "%(default)s)")
+    parser.add_argument("--with-optical-flow-mask", action="store_true",
+                        help="union the sub-task's WAFT motion mask (Step "
+                             "3a', read from --motion-masks-dir) into the "
+                             "manipulator prompt's row-0 SAM3 mask before "
+                             "sampling — the SAM + optical-flow rescue of a "
+                             "manipulator the detection missed (episode "
+                             "mode only; default: off)")
+    parser.add_argument("--motion-masks-dir", default=None,
+                        help="Step-3a' motion-masks root (default: "
+                             "<out-dir>/motion_masks)")
     parser.add_argument("--device", default=None, choices=["cuda", "cpu"],
                         help="device (default: auto)")
     parser.add_argument("--skip-done", action="store_true",
@@ -222,6 +242,10 @@ class InitPointsExtract:
     def __init__(self, args):
         self.args = args
         self.folder_mode = args.keyframes_dir is not None
+        if self.folder_mode and args.with_optical_flow_mask:
+            sys.exit("--with-optical-flow-mask needs the dataset (the WAFT "
+                     "motion masks are computed online from it): the "
+                     "--keyframes-dir folder mode cannot run it")
         if self.folder_mode:
             self.folder = Path(args.keyframes_dir)
             if not self.folder.is_dir():
@@ -256,6 +280,8 @@ class InitPointsExtract:
         os.makedirs(self.init_dir, exist_ok=True)
         if args.detections_dir is None:
             args.detections_dir = os.path.join(self.out_dir, "detections")
+        if args.motion_masks_dir is None:
+            args.motion_masks_dir = os.path.join(self.out_dir, "motion_masks")
         self._device = args.device or ("cuda" if torch.cuda.is_available()
                                        else "cpu")
         self.sam3 = None
@@ -467,6 +493,43 @@ class InitPointsExtract:
         idx = rng.choice(len(xs), size=k, replace=False)
         return np.stack([xs[idx], ys[idx]], axis=1).astype(np.float32)
 
+    def _motion_mask_union(self, k: int, keyframes: list[int],
+                           h: int, w: int) -> tuple[np.ndarray | None, dict]:
+        """(motion mask of the sub-task, meta) of the manipulator's
+        SAM-∪-flow rescue, or (None, {}) when there is nothing to union.
+
+        Reads the sub-task's Step-3a' mask
+        (motion_masks/ep{ep}/subtask_{k}/<camera>/mask_rle.json, COCO RLE
+        + the provenance of the significant pair that produced it). Step
+        3a' writes the file only for significant pairs, so a missing file
+        is the normal "no rescue" case. The mask must be anchored at the
+        prompt's row-0 key-frame (its 1st — the flow window's fixed first
+        frame) and match the frame resolution; a stale/mismatched mask is
+        skipped with a note — it must never corrupt the SAM masks.
+        """
+        path = Path(self.args.motion_masks_dir) / f"ep{self.ep_idx:06d}" \
+            / f"subtask_{k:02d}" / self.cam_key / "mask_rle.json"
+        if not path.is_file():
+            print(f"    no significant motion mask for subtask {k} "
+                  f"({path.parent}) — SAM mask only")
+            return None, {}
+        with open(path) as f:
+            meta = json.load(f)
+        frame_a, frame_b = (int(t) for t in meta["chosen"])
+        mask = decode_rle(meta["mask"])
+        if frame_a != keyframes[0]:
+            print(f"    motion mask {path} anchored at frame {frame_a}, "
+                  f"row-0 key-frame {keyframes[0]} — skipped")
+            return None, {}
+        if mask.shape != (h, w):
+            print(f"    motion mask {path} is {mask.shape}, frame is "
+                  f"({h}, {w}) — skipped")
+            return None, {}
+        return mask, {"motion_mask_file": str(path),
+                      "motion_flow_pair": [frame_a, frame_b],
+                      "motion_moving_pixels": int(meta.get("moving_pixels",
+                                                           [-1])[-1])}
+
     # --- orchestration ---------------------------------------------------------
 
     def run(self) -> None:
@@ -665,6 +728,25 @@ class InitPointsExtract:
                 boxes[j] = b
                 scores[j] = s if s is not None else -1.0
 
+        # Optional motion-mask rescue of the manipulator (the driver's
+        # --with-optical-flow-mask): the SAM ∪ optical-flow union of the
+        # row-0 mask — the row the no_roma baseline samples from (and
+        # RoMAv2's mask gate/crop of the 1st key-frame). The flow mask
+        # comes from Step 3a' (run_step3_motion_masks.py), anchored at the
+        # same 1st key-frame, so it ORs in-place — an arm the detection
+        # missed still gets a mask from its own motion.
+        motion_meta: dict = {}
+        if role == "manipulator" and n >= 1 \
+                and self.args.with_optical_flow_mask:
+            fm, motion_meta = self._motion_mask_union(k, keyframes, h, w)
+            if fm is not None and fm.any():
+                before = int(masks[0].sum())
+                masks[0] |= fm
+                added = int(masks[0].sum()) - before
+                print(f"    motion mask +{added} px onto the row-0 "
+                      f"SAM mask")
+                any_mask = any_mask or bool(added)
+
         keypoints = np.zeros((0, n, 2), dtype=np.float32)
         if empty_reason is None and self.args.sampling_mode == "no_roma":
             # Simple baseline (no RoMAv2): uniformly sample top-k points
@@ -781,6 +863,11 @@ class InitPointsExtract:
             "romav2_checkpoint": DEFAULT_ROMAV2_CKPT if roma else None,
             "empty_reason": empty_reason,
         }
+        if self.args.with_optical_flow_mask:
+            meta["motion_mask_file"] = motion_meta.get("motion_mask_file")
+            meta["motion_flow_pair"] = motion_meta.get("motion_flow_pair")
+            meta["motion_moving_pixels"] = motion_meta.get(
+                "motion_moving_pixels")
         with open(os.path.join(pdir, "init_points.json"), "w") as f:
             json.dump(meta, f, indent=2)
         if not self.args.no_viz and len(keypoints):

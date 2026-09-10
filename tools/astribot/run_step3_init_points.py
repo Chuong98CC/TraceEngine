@@ -21,6 +21,12 @@ The pipeline of one episode:
     │  detections JSON per ep+cam  │
     └──────────────────────────────┘
                │
+               ▼  Step 3a' (only with --with-optical-flow-mask):
+               │     run_step3_motion_masks.py (WAFT, online frames)
+    ┌──────────────────────────────┐
+    │  motion_mask per sub-task    │
+    └──────────────────────────────┘
+               │
                ▼  Step 3b: run_object_init_points.py (SAM3 + RoMAv2)
     ┌──────────────────────────────┐
     │  init_points per cam/prompt  │
@@ -44,7 +50,17 @@ in the dataset's meta/subtasks.csv — there is no prompt flag. Step 1
 (key_frames) labels every saved segment with its canonical ground-truth
 sub-task (subtask_labels.json, matched by execution order), Step 3a reads
 the labels to fetch the row of the segment's own sub-task and records the
-prompts in its JSON, Step 3b re-reads them from there. For a standalone
+prompts in its JSON, Step 3b re-reads them from there. With --with-optical-flow-mask the driver additionally runs **Step 3a'**
+(run_step3_motion_masks.py — WAFTv2 motion masks of the sub-task starts,
+computed online over the dataset frames between Step 3a and Step 3b) and
+forwards the flag to Step 3b, which unions each sub-task's motion mask
+into the **manipulator** prompt's row-0 SAM3 mask (SAM ∪ optical flow,
+see run_step3_motion_masks.py) — the rescue for an arm the RexOmni
+detection missed. Step 3a' saves a mask only when a flow pair in the
+window is significant (mask_rle.json, COCO RLE); with
+--visualize-motion it also writes the chosen pair's flow.png next to it.
+
+For a standalone
 key-frame folder (no dataset), run_e2e_init_points.py (tools/general_test/)
 drives the same 3a/3b tools. Usage:
 
@@ -61,6 +77,13 @@ Examples
         --repo-id Kronze157/astri_making_coffee_vlva
         --data-root /data/astri_making_coffee_v1 --episode-idxes 0
         --use-inferred-splits
+
+    # Same, with the manipulator mask rescued by optical flow (Step 3a' +
+    # Step 3b --with-optical-flow-mask, off by default)
+    python tools/astribot/run_step3_init_points.py
+        --repo-id Kronze157/astri_making_coffee_vlva
+        --data-root /data/astri_making_coffee_v1 --episode-idxes 0
+        --with-optical-flow-mask
 
     # Re-run only 3b (tuned params), reusing what is on disk: --skip-3a
     # implies --skip-extract (the reused detections were made from the
@@ -103,9 +126,13 @@ DEFAULT_STRATEGY = "reference"
 DEFAULT_SAMPLING_MODE = "no_roma"
 #: default path of the RexOmni environment (relative to the repo root).
 REXOMNI_ENV_DIR = ".venv-rexomni"
+#: defaults of the Step-3a' WAFT motion-mask knobs (see the pass's --help).
+DEFAULT_MOTION_THRESHOLD = 2.0
+DEFAULT_MOTION_RATIO = 0.05
 
 _STEP_1 = "tools/astribot/extract_frames.py"
 _STEP_3A = "tools/general_test/pipeline/run_object_detection.py"
+_STEP_3AP = "tools/astribot/run_step3_motion_masks.py"
 _STEP_3B = "tools/general_test/pipeline/run_object_init_points.py"
 
 
@@ -193,6 +220,28 @@ def parse_args(argv: list[str] | None = None):
                              "transport span)")
     parser.add_argument("--device", default=None, choices=["cuda", "cpu"],
                         help="device (Step 3b; default: auto)")
+    parser.add_argument("--with-optical-flow-mask", action="store_true",
+                        help="rescue the manipulator mask with optical flow: "
+                             "run the Step-3a' WAFT motion-mask pass (WAFTv2 "
+                             "online over each sub-task's opening frames — "
+                             "run_step3_motion_masks.py) after Step 3a and "
+                             "let Step 3b union each sub-task's motion mask "
+                             "into the manipulator prompt's row-0 SAM mask "
+                             "(default: off)")
+    parser.add_argument("--motion-threshold", type=float,
+                        default=DEFAULT_MOTION_THRESHOLD,
+                        help="flow-magnitude (pixel displacement) threshold "
+                             "of the moving-pixel masks (Step 3a', default: "
+                             "%(default)s)")
+    parser.add_argument("--motion-ratio", type=float,
+                        default=DEFAULT_MOTION_RATIO,
+                        help="moving-pixel fraction of the frame above which "
+                             "a motion mask is significant (Step 3a' "
+                             "early-stops on it; default: %(default)s)")
+    parser.add_argument("--visualize-motion", action="store_true",
+                        help="Step 3a' also writes the chosen flow pair's flow.png next "
+                             "to its mask_rle.json — requires "
+                             "--with-optical-flow-mask (default: off)")
     parser.add_argument("--skip-extract", action="store_true",
                         help="do not run Step 1: reuse the key-frames already "
                              "on disk under the output root's key_frames/ "
@@ -374,6 +423,32 @@ def _build_3a_cmd(args, repo_root: Path) -> list[str]:
     return cmd
 
 
+def _build_motion_masks_cmd(args, repo_root: Path) -> list[str]:
+    """Step 3a' command: WAFT motion masks of the sub-task starts (main
+    env, frames decoded online from the dataset). Runs after Step 3a
+    against the same (episode, camera) grid — every camera of the
+    --camera-idxes whose detections JSON exists — and writes the
+    motion_masks/ tree Step 3b reads under --with-optical-flow-mask."""
+    cmd = [sys.executable,
+           str(repo_root / _STEP_3AP),
+           "--repo-id", args.repo_id,
+           "--data-root", args.data_root,
+           "--camera-idxes", *(str(c) for c in args.camera_idxes)]
+    if args.episode_idxes is not None:
+        cmd += ["--episode-idxes", *(str(e) for e in args.episode_idxes)]
+    if args.max_episodes is not None:
+        cmd += ["--max-episodes", str(args.max_episodes)]
+    cmd += ["--out-dir", str(_out_root(args)),
+            "--max-keyframes", str(args.max_keyframes),
+            "--motion-threshold", str(args.motion_threshold),
+            "--motion-ratio", str(args.motion_ratio)]
+    if args.visualize_motion:
+        cmd += ["--visualize"]
+    if args.skip_done:
+        cmd += ["--skip-done"]
+    return cmd
+
+
 def _build_3b_cmd(args, repo_root: Path) -> list[str]:
     """Step 3b command: SAM3 masks + RoMAv2 keypoints in the main env."""
     cmd = [sys.executable,
@@ -395,6 +470,8 @@ def _build_3b_cmd(args, repo_root: Path) -> list[str]:
             "--num-corresp", str(args.num_corresp),
             "--strategy", args.strategy,
             "--sampling-mode", args.sampling_mode]
+    if args.with_optical_flow_mask:
+        cmd += ["--with-optical-flow-mask"]
     if args.device:
         cmd += ["--device", args.device]
     if args.skip_done:
@@ -455,6 +532,14 @@ def main() -> None:
         sys.exit(f"--skip-3a: Step-3a detections missing for {shown} under "
                  f"{_detections_root(args)} — run Step 3a first (or drop "
                  f"--skip-3a to run it now)")
+    if args.visualize_motion and not args.with_optical_flow_mask:
+        sys.exit("--visualize-motion requires --with-optical-flow-mask "
+                 "(there is no Step-3a' pass to visualize)")
+    if args.with_optical_flow_mask:
+        # Step 3a' reads the detections JSON of the same grid (works under
+        # --skip-3a too) and writes the motion masks Step 3b unions.
+        _run(_build_motion_masks_cmd(args, repo_root),
+             "Step 3a' — WAFT motion masks (sub-task starts, online)")
     _run(_build_3b_cmd(args, repo_root),
          "Step 3b — SAM3 masks + RoMAv2 init points")
     print("\nstep 3 done", flush=True)

@@ -15,4 +15,4 @@ python tools/astribot/run_step4_traces.py \
     --repo-id $REPO_ID \
     --data-root $DATA_ROOT --episode-idxes 0 \
     --filter-visible --filter-static-pixel \
-    --camera-idxes 4
+    --camera-idxes 0 5
