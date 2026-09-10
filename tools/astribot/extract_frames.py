@@ -61,6 +61,7 @@ import warnings
 import cv2
 import numpy as np
 from lerobot.datasets import LeRobotDataset, LeRobotDatasetMetadata
+from lerobot.datasets.streaming_dataset import StreamingLeRobotDataset
 from tqdm import tqdm
 
 from utils.depth_utils import (depth_frame_to_uint16_mm, is_raw_depth_feature,
@@ -443,6 +444,7 @@ class DataExtract:
             self.dataset = LeRobotDataset(repo_id=self.args.repo_id,
                                           root=self.args.data_root,
                                           download_videos=False)
+
         return self.dataset
 
     # --- tabular (video-independent) episode data -------------------------------
@@ -1061,6 +1063,25 @@ class DataExtract:
         self.done_tasks.add(self.task_id)
 
 
+class DataExtractStream(DataExtract):
+    """A DataExtract variant that streams the dataset from the HuggingFace
+    Hub instead of downloading it first. The dataset is read-only and the
+    videos are not downloaded, so only the detect_subtask and key_frames
+    modes are supported."""
+
+    def _ensure_dataset(self):
+        """Return a streaming dataset (no video download)."""
+        self.dataset = StreamingLeRobotDataset(
+            repo_id=self.args.repo_id,
+            root=self.args.data_root,
+            streaming=True,
+            buffer_size=self.args.buffer_size,
+            shuffle=not self.args.no_shuffle,
+            repo_type=self.args.repo_type,
+            token=self.args.hf_token,
+        )
+
+        return self.dataset
 def main():
     DataExtract(parse_args()).run()
 

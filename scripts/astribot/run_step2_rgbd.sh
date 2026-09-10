@@ -2,8 +2,8 @@
 # sensor depth (uint16 mm) of a camera with a paired depth feature. Online,
 # nothing extracted to disk; requires the Step-1 subtask_splits.json when
 # --use-inferred-splits is passed.
-DATA_ROOT=/data/astri_making_coffee_v1
-REPO_ID=Kronze157/astri_making_coffee_vlva
+DATA_ROOT=/data/astribot_making_coffee_vlva_full
+REPO_ID=Kronze157/astribot_making_coffee_vlva_full
 # BACKEND=da3
 BACKEND=a2f
 CAMERA_IDX=${1:-0}  # 0: cam_head, 3: cam_torso (a camera with a paired raw-depth feature)
@@ -13,7 +13,7 @@ CAMERA_IDX=${1:-0}  # 0: cam_head, 3: cam_torso (a camera with a paired raw-dept
 python tools/astribot/run_step2_depth_stream.py \
     --repo-id $REPO_ID \
     --data-root $DATA_ROOT \
-    --episode-idxes 0 \
+    --episode-idxes 1 \
     --camera-idxes $CAMERA_IDX --backend $BACKEND \
     --with-optical-flow \
     --use-inferred-splits

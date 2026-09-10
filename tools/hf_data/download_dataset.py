@@ -4,6 +4,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 from huggingface_hub import snapshot_download
+from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from lerobot.datasets.streaming_dataset import StreamingLeRobotDataset
 
 # Always downloaded: the dataset metadata (meta/* also covers meta/*.jsonl).
@@ -13,8 +14,9 @@ ALWAYS_ALLOW_PATTERNS = ["meta/*", "*.json"]
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Download a LeRobotDataset's metadata + tabular data and "
-                    "open it as a StreamingLeRobotDataset."
+        description="Download a LeRobotDataset's metadata + tabular data, then open it "
+                    "either as a StreamingLeRobotDataset (default) or, with --local, as "
+                    "a LeRobotDataset reading the local copy."
     )
     parser.add_argument("repo_id_arg", nargs="?", default=None, metavar="repo_id",
                         help="dataset repo id as seen on the Hub, "
@@ -25,6 +27,10 @@ def parse_args():
     parser.add_argument("--local-dir", "-d", default=None,
                         help="directory to download the metadata/parquet into; "
                              "default: /data/<repo name>")
+    parser.add_argument("--stream", action="store_true",
+                        help="use LeRobotDataset on the downloaded copy instead of "
+                             "streaming; it reads data/ and videos/ from disk, so it "
+                             "needs those trees downloaded")
     parser.add_argument("--ignore-videos", action="store_true",
                         help="skip the videos/ tree — meta, *.json and data only")
     parser.add_argument("--ignore-data", action="store_true",
@@ -34,10 +40,11 @@ def parse_args():
                         choices=("dataset", "bucket"),
                         help="Hub repo type (default: %(default)s)")
     parser.add_argument("--buffer-size", type=int, default=1000,
-                        help="shuffle buffer size when streaming "
+                        help="shuffle buffer size, streaming only "
                              "(default: %(default)s)")
     parser.add_argument("--no-shuffle", action="store_true",
-                        help="iterate the dataset in order instead of shuffling")
+                        help="iterate the dataset in order instead of shuffling, "
+                             "streaming only")
 
     args = parser.parse_args()
     if args.repo_id_arg and args.repo_id_opt and args.repo_id_arg != args.repo_id_opt:
@@ -77,24 +84,35 @@ def main():
         token=hf_token,
     )
 
-    # 2. Instantiate StreamingLeRobotDataset pointing to the local directory
+    # 2. Open the downloaded copy. StreamingLeRobotDataset streams frames (so the
+    #    videos can stay on the Hub, as long as nothing asks for them);
+    #    LeRobotDataset reads the local files and needs data/ and videos/ on disk.
     try:
-        ds = StreamingLeRobotDataset(
-            repo_id=args.repo_id,
-            root=local_dir,
-            streaming=True,
-            buffer_size=args.buffer_size,
-            shuffle=not args.no_shuffle,
-            repo_type=args.repo_type,
-            token=hf_token,
-        )
+        if args.local or not(args.ignore_data and args.ignore_videos):
+            ds = LeRobotDataset(
+                repo_id=args.repo_id,
+                root=local_dir,
+                download_videos=not args.ignore_videos,
+                repo_type=args.repo_type,
+                token=hf_token,
+            )
+        else:
+            ds = StreamingLeRobotDataset(
+                repo_id=args.repo_id,
+                root=local_dir,
+                streaming=True,
+                buffer_size=args.buffer_size,
+                shuffle=not args.no_shuffle,
+                repo_type=args.repo_type,
+                token=hf_token,
+            )
 
         print("✅ Dataset loaded successfully!")
     except Exception as e:
         print("❌ Failed to load dataset:", str(e))
         return
 
-    sample = next(iter(ds))
+    sample = ds[0] if args.local else next(iter(ds))
     print("Sample keys:", list(sample.keys()))
     print("Action shape:", sample["action"].shape)
     print("Language instruction:", sample.get("language_instruction", "N/A"))
