@@ -45,11 +45,12 @@ dependencies = [
     "matplotlib",
     "regex",
     "ipykernel",
-    "lerobot[dataset,training,smolvla]==0.6.1",
+    "lerobot[dataset,training,smolvla]",
     "lz4",
     "rich",
     "flex_gemm",
     "utils3d_moge",
+    "python-dotenv",
 ]
 
 [project.optional-dependencies]
@@ -75,6 +76,8 @@ pointops2 = { path = "third_party/pointops2" }
 # Default build is pure-Triton (no compile); the optional CUDA extension
 # (FLEX_GEMM_BUILD_CUDA=1) would additionally need no-build-isolation.
 flex_gemm = { git = "https://github.com/JeffreyXiang/FlexGEMM.git", rev = "b2fadb29d41846c7981ade6801ffc689fae119cf" }
+# lerobot tracks the pr/4027 branch (bumped from the 0.6.1 PyPI release).
+lerobot = { git = "https://github.com/huggingface/lerobot.git", rev = "pr/4027" }
 utils3d_moge ={git ="https://github.com/EasternJournalist/utils3d-moge.git", rev = "62f09d58509485564e24d5d9f6aac9ee9ebc0c37" }
 
 [tool.uv]

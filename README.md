@@ -27,8 +27,17 @@ Install the environment simply by:
 uv sync
 ```
 
+or for dev
+```
+uv sync --extra dev
+```
+
 with pinned inference runtimes: `torch==2.11.0+cu128`,
 `torchvision==0.26.0+cu128`.
+For LeRobot dataset, we temporally use this branch to fix the HF streaming dataset bug:
+```
+lerobot = { git = "https://github.com/huggingface/lerobot.git", rev = "pr/4027" }
+```
 
 ### Rex-Omni environment
 
