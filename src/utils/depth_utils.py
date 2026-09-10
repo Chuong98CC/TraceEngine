@@ -181,6 +181,52 @@ def draw_measurement(
 # to uint8 over [MIN_DEPTH, MAX_DEPTH] (LogDepthToUint8Transform), lz4-frame
 # compressed; pose (extrinsics/intrinsics) lives in a separate .npz per frame.
 # ---------------------------------------------------------------------------
+#: LeRobot feature dtypes that carry the sensor's raw metric depth in
+#: millimetres. "uint16" is the native array layout; "image" is the same
+#: integers inside a 16-bit greyscale PNG (shape [H, W, 1]) — the encoder
+#: writes the millimetre value straight into the pixel with no scaling,
+#: offset or packing, and PIL decodes it back as mode I;16, so both dtypes
+#: round-trip to exact millimetres. Not to be confused with the colorized
+#: 8-bit depth *videos* of the older recordings, whose log compression is
+#: lossy and irreversible (see LogDepthToUint8Transform).
+RAW_DEPTH_FEATURE_DTYPES = ("uint16", "image")
+
+
+def is_raw_depth_feature(feature: Optional[dict]) -> bool:
+    """True when a LeRobot feature spec stores raw metric depth (mm).
+
+    See RAW_DEPTH_FEATURE_DTYPES: the array layout and the 16-bit-PNG
+    container hold identical values, so both are usable as an Any2Full
+    depth prompt.
+    """
+    return (feature or {}).get("dtype") in RAW_DEPTH_FEATURE_DTYPES
+
+
+def depth_frame_to_uint16_mm(value) -> np.ndarray:
+    """A LeRobotDataset depth frame -> (H, W) uint16 millimetres.
+
+    Handles both raw-depth layouts (RAW_DEPTH_FEATURE_DTYPES): a plain
+    (H, W) array, and the image-dtype feature the loader hands back with a
+    channel axis — (1, H, W) channel-first from the torch image transform,
+    or (H, W, 1) channel-last — which is squeezed away. The values are
+    already exact millimetres in both cases; nothing is rescaled.
+
+    Readings above 32767 are folded to 0: a signed 16-bit container wraps
+    them negative, and everything up there is the sensor's 65535
+    out-of-range marker or far-field noise, which 0 already denotes as
+    invalid in this format.
+    """
+    arr = np.asarray(value.cpu() if hasattr(value, "cpu") else value)
+    arr = np.squeeze(arr)  # drop the image-dtype channel axis
+    if arr.ndim != 2:
+        raise ValueError(f"depth frame is not a single 2D map: shape {arr.shape}")
+    if arr.dtype != np.uint16:
+        # signed/float containers: fold the wrapped out-of-range marker into
+        # the invalid value before the cast (a uint16 array cannot be < 0)
+        arr = np.where(arr < 0, 0, arr)
+    return np.rint(arr).astype(np.uint16)
+
+
 def _depth_to_float_metres(depth) -> np.ndarray:
     """Depth input -> float32 metres, units auto-detected.
 

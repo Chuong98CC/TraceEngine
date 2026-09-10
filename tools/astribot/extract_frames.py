@@ -63,7 +63,8 @@ import numpy as np
 from lerobot.datasets import LeRobotDataset, LeRobotDatasetMetadata
 from tqdm import tqdm
 
-from utils.depth_utils import save_depth_lz4
+from utils.depth_utils import (depth_frame_to_uint16_mm, is_raw_depth_feature,
+                               save_depth_lz4)
 from utils.keyframe_utils import SUBTASK_LABELS_FILE, SUBTASK_ORDER_FILE
 from utils.keyframe_utils import load_subtask_meta
 from utils.visualize.visualize_mask import to_pil
@@ -888,7 +889,7 @@ class DataExtract:
         # features; resolve it once per camera, not per segment
         depth_keys = {ci: dkey for ci, key in self.cam_keys.items()
                       if (dkey := self._depth_key_for(key)) is not None
-                      and self._feature(dkey).get("dtype") == "uint16"}
+                      and is_raw_depth_feature(self._feature(dkey))}
         for k, (lo, hi) in enumerate(self._segment_bounds(split_idxes)):
             end = hi if self.args.max_frames is None else min(
                 hi, lo + self.args.max_frames * self.args.interval)
@@ -913,7 +914,7 @@ class DataExtract:
                 for ci, dkey in depth_keys.items():
                     # raw uint16 mm depth, log-encoded by save_depth_lz4
                     save_depth_lz4(
-                        np.asarray(frame[dkey]).astype(np.uint16),
+                        depth_frame_to_uint16_mm(frame[dkey]),
                         os.path.join(depth_dirs[ci], f"frame_{t:06d}.lz4"),
                     )
 
@@ -925,11 +926,13 @@ class DataExtract:
     def _depth_key_for(self, cam_key):
         """Paired depth feature key for a camera key, or None.
 
-        Prefers the raw observation.depth.<name> feature (uint16 mm, the
-        astri_making_coffee_v1 layout). The legacy <cam_key>_depth video is
+        Prefers the raw observation.depth.<name> feature (mm, the
+        astribot layout — a uint16 array or a 16-bit-PNG image feature). The legacy <cam_key>_depth video is
         only trusted when the dataset metadata flags it as a real depth map
         (video.is_depth_map) — the astri_making_coffee recording is flagged
         false and its video depth is unusable."""
+        if cam_key.startswith("observation.depth."):
+            return None
         name = self._camera_subdir(cam_key)
         raw = f"observation.depth.{name}"
         if self._feature(raw):

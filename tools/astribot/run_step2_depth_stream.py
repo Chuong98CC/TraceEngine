@@ -15,7 +15,8 @@ renders them). The online counterpart of run_depth_stream.py:
     └──────────────────────────────┘
 
 Backends: da3 / vggt_omega for RGB-only cameras; a2f for cameras with a
-paired raw-depth feature (observation.depth.<name>, uint16 mm) — Any2Full
+paired raw-depth feature (observation.depth.<name>, mm — a uint16
+array or a 16-bit-PNG image feature) — Any2Full
 densifies the sensor depth. --with-optical-flow (off by default) runs WAFT
 motion masks per chunk, which zero the moving pixels' confidence during
 chunk alignment only (the run_depth_stream.py --mask-dirs contract).
@@ -61,6 +62,7 @@ from tools.general_test.module.infer_waft import (
     _resolve_checkpoint,
 )
 from tools.general_test.pipeline.run_depth_stream import _report_run_stats
+from utils.depth_utils import depth_frame_to_uint16_mm, is_raw_depth_feature
 from utils.visualize.visualize_mask import to_pil
 
 # WAFTv2 torch.export artifact (legacy .engine / .onnx checkpoints are
@@ -326,12 +328,14 @@ def _paired_depth_key(cam_key: str, features: dict) -> str | None:
     """Raw-depth feature key paired with ``cam_key``, or None when the camera
     has no usable depth.
 
-    Mirrors ``DataExtract._depth_key_for`` plus the uint16-dtype check of
-    ``_save_subtask_frames``, but works from the dataset metadata before the
+    Mirrors ``DataExtract._depth_key_for`` plus the raw-depth dtype check
+    of ``_save_subtask_frames``, but works from the dataset metadata before the
     extractor is constructed (camera selection happens pre-``__init__``)."""
+    if cam_key.startswith("observation.depth."):
+        return None  # a depth feature is never itself an RGB camera
     name = DataExtract._camera_subdir(cam_key)
     raw = f"observation.depth.{name}"
-    if raw in features and features[raw].get("dtype") == "uint16":
+    if raw in features and is_raw_depth_feature(features[raw]):
         return raw
     video = f"{cam_key}_depth"
     if video in features:
@@ -387,17 +391,17 @@ class SubtaskStreamExtract(DataExtract):
 
     def _validate_depth_cameras(self) -> None:
         """a2f backend: every selected camera must have a paired raw-depth
-        feature (uint16 mm, see _depth_key_for)."""
+        feature (mm, see _depth_key_for)."""
         if not self.cam_keys:
             raise ValueError(
                 "--backend a2f found no camera with a paired raw-depth feature "
                 "in this dataset; pass --camera-idxes explicitly, or use "
                 "--backend da3/vggt_omega for RGB-only cameras")
         missing = [k for k, dk in zip(self.cam_keys.values(), self.depth_keys)
-                   if dk is None or self._feature(dk).get("dtype") != "uint16"]
+                   if dk is None or not is_raw_depth_feature(self._feature(dk))]
         if missing:
             raise ValueError(
-                f"--backend a2f needs one paired raw-depth feature (uint16 mm) "
+                f"--backend a2f needs one paired raw-depth feature (mm) "
                 f"per camera; missing for: {missing}. Use --backend da3 or "
                 f"vggt_omega for RGB-only cameras.")
 
@@ -456,7 +460,7 @@ class SubtaskStreamExtract(DataExtract):
                 for key in self.cam_keys.values()}
         for key, dkey in zip(self.cam_keys.values(), self.depth_keys):
             if dkey is not None:
-                step[dkey] = np.asarray(frame[dkey]).astype(np.uint16)
+                step[dkey] = depth_frame_to_uint16_mm(frame[dkey])
         return step
 
     # --- orchestration ---------------------------------------------------------

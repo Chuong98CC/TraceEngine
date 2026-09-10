@@ -30,9 +30,14 @@ _strip_cflags(distutils_sysconfig.get_config_vars())
 from torch.utils.cpp_extension import BuildExtension, CUDAExtension
 
 src = 'src'
-sources = [os.path.join(root, file) for root, dirs, files in os.walk(src)
-           for file in files
-           if file.endswith('.cpp') or file.endswith('.cu')]
+# Empty sources are skipped: the vendored tree carries a 0-byte
+# src/knnquery/knnquery_cuda.cu whose object name collides with its
+# sibling knnquery_cuda.cpp, which ninja rejects ("multiple rules
+# generate ... knnquery_cuda.o"). It contributes no symbols — the real
+# kernels live in knnquery_cuda_kernel.cu.
+sources = [path for root, dirs, files in os.walk(src) for file in files
+           if (file.endswith('.cpp') or file.endswith('.cu'))
+           and os.path.getsize(path := os.path.join(root, file)) > 0]
 
 setup(
     name='pointops2',
