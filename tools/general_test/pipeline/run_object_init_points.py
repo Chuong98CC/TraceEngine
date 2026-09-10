@@ -47,13 +47,18 @@ are uniformly sampled inside the mask of the span's first frame only
 
 --with-optical-flow-mask (episode mode, off by default) unions the
 sub-task's WAFT motion mask (Step 3a', run_step3_motion_masks.py, read
-from motion_masks/.../mask_rle.json) into the **manipulator** prompt's
-row-0 SAM3 mask before sampling — the SAM ∪ optical-flow mask that
-rescues the arm when the Step-3a detection missed it. The flow mask is
-anchored at the manipulator's 1st key-frame (the same frame row 0 samples
-from), so it ORs in-place. Step 3a' saves the mask only for significant
-pairs, so a sub-task without one (no file) simply keeps its SAM mask; a
-stale/mismatched mask is skipped with a note.
+from the sub-task's own folder in this tree:
+init_points/.../subtask_XX/<camera>/motion_rle.json) into the
+**manipulator** prompt's row-0 SAM3 mask before sampling — the SAM ∪
+optical-flow mask that rescues the arm when the Step-3a detection missed
+it. The flow mask is anchored at the manipulator's 1st key-frame (the
+same frame row 0 samples from), so it ORs in-place. Step 3a' saves the
+mask only for significant pairs, so a sub-task without one (no file)
+simply keeps its SAM mask; a stale/mismatched mask is skipped with a
+note. --viz-motion-union renders that union (union_mask.png next to the
+manipulator prompt's init points: the row-0 key-frame tinted SAM-only /
+SAM ∩ motion / motion-only) — the motion-only pixels being exactly what
+the rescue added.
 
 
 Examples
@@ -212,14 +217,24 @@ def parse_args(argv: list[str] | None = None):
                              "%(default)s)")
     parser.add_argument("--with-optical-flow-mask", action="store_true",
                         help="union the sub-task's WAFT motion mask (Step "
-                             "3a', read from --motion-masks-dir) into the "
-                             "manipulator prompt's row-0 SAM3 mask before "
-                             "sampling — the SAM + optical-flow rescue of a "
-                             "manipulator the detection missed (episode "
+                             "3a', motion_rle.json read from the "
+                             "sub-task's own folder under --init-points-dir) "
+                             "into the manipulator prompt's row-0 SAM3 mask "
+                             "before sampling — the SAM + optical-flow rescue "
+                             "of a manipulator the detection missed (episode "
                              "mode only; default: off)")
-    parser.add_argument("--motion-masks-dir", default=None,
-                        help="Step-3a' motion-masks root (default: "
-                             "<out-dir>/motion_masks)")
+    parser.add_argument("--init-points-dir", default=None,
+                        help="init-points root Step 3a' writes its "
+                             "motion-mask artefacts into and this pass reads "
+                             "them from (default: <out-dir>/init_points — the "
+                             "same tree the per-prompt outputs land in)")
+    parser.add_argument("--viz-motion-union", action="store_true",
+                        help="render the manipulator's SAM ∪ motion union "
+                             "(union_mask.png next to that prompt's init "
+                             "points): the row-0 key-frame tinted SAM-only / "
+                             "SAM ∩ motion / motion-only, i.e. the pixels the "
+                             "flow rescue added — requires "
+                             "--with-optical-flow-mask (default: off)")
     parser.add_argument("--device", default=None, choices=["cuda", "cpu"],
                         help="device (default: auto)")
     parser.add_argument("--skip-done", action="store_true",
@@ -276,12 +291,11 @@ class InitPointsExtract:
             print(f"key-frames: {self.root}")
             print(f"episodes on disk: {len(discover_episodes(self.root))} -> "
                   f"{len(self.ep_idxes)} selected")
-        self.init_dir = os.path.join(self.out_dir, "init_points")
+        self.init_dir = str(args.init_points_dir) if args.init_points_dir \
+            else os.path.join(self.out_dir, "init_points")
         os.makedirs(self.init_dir, exist_ok=True)
         if args.detections_dir is None:
             args.detections_dir = os.path.join(self.out_dir, "detections")
-        if args.motion_masks_dir is None:
-            args.motion_masks_dir = os.path.join(self.out_dir, "motion_masks")
         self._device = args.device or ("cuda" if torch.cuda.is_available()
                                        else "cpu")
         self.sam3 = None
@@ -498,17 +512,19 @@ class InitPointsExtract:
         """(motion mask of the sub-task, meta) of the manipulator's
         SAM-∪-flow rescue, or (None, {}) when there is nothing to union.
 
-        Reads the sub-task's Step-3a' mask
-        (motion_masks/ep{ep}/subtask_{k}/<camera>/mask_rle.json, COCO RLE
-        + the provenance of the significant pair that produced it). Step
-        3a' writes the file only for significant pairs, so a missing file
-        is the normal "no rescue" case. The mask must be anchored at the
-        prompt's row-0 key-frame (its 1st — the flow window's fixed first
-        frame) and match the frame resolution; a stale/mismatched mask is
-        skipped with a note — it must never corrupt the SAM masks.
+        Reads the sub-task's Step-3a' mask — this tree's (sub-task,
+        camera) folder, beside the prompt subtrees:
+        init_points/ep{ep}/subtask_{k}/<camera>/motion_rle.json
+        (COCO RLE + the provenance of the significant pair that produced
+        it). Step 3a' writes the file only for significant pairs, so a
+        missing file is the normal "no rescue" case. The mask must be
+        anchored at the prompt's row-0 key-frame (its 1st — the flow
+        window's fixed first frame) and match the frame resolution; a
+        stale/mismatched mask is skipped with a note — it must never
+        corrupt the SAM masks.
         """
-        path = Path(self.args.motion_masks_dir) / f"ep{self.ep_idx:06d}" \
-            / f"subtask_{k:02d}" / self.cam_key / "mask_rle.json"
+        path = Path(self.init_dir) / f"ep{self.ep_idx:06d}" \
+            / f"subtask_{k:02d}" / self.cam_key / "motion_rle.json"
         if not path.is_file():
             print(f"    no significant motion mask for subtask {k} "
                   f"({path.parent}) — SAM mask only")
@@ -741,11 +757,14 @@ class InitPointsExtract:
             fm, motion_meta = self._motion_mask_union(k, keyframes, h, w)
             if fm is not None and fm.any():
                 before = int(masks[0].sum())
+                sam0 = masks[0].copy()  # pre-union SAM, for the union viz
                 masks[0] |= fm
                 added = int(masks[0].sum()) - before
                 print(f"    motion mask +{added} px onto the row-0 "
                       f"SAM mask")
                 any_mask = any_mask or bool(added)
+                if self.args.viz_motion_union:
+                    self._visualize_union(pdir, frames[0], sam0, fm)
 
         keypoints = np.zeros((0, n, 2), dtype=np.float32)
         if empty_reason is None and self.args.sampling_mode == "no_roma":
@@ -875,6 +894,35 @@ class InitPointsExtract:
                             col0_only=self.args.sampling_mode == "no_roma")
         status = empty_reason or f"{len(keypoints)} keypoints"
         print(f"    [{slug}] {status} -> {pdir}")
+
+    #: union-viz colours in BGR, keyed to the legend below: SAM only,
+    #: SAM ∩ motion, motion only.
+    _UNION_COLORS = ((0, 0, 255), (0, 255, 255), (0, 255, 0))
+    #: legend entries drawn with _UNION_COLORS, in the same order.
+    _UNION_LABELS = ("SAM only", "SAM + motion", "motion only")
+
+    def _visualize_union(self, pdir: str, frame: np.ndarray,
+                         sam: np.ndarray, motion: np.ndarray) -> None:
+        """union_mask.png (--viz-motion-union): the manipulator's row-0
+        key-frame tinted with the SAM ∪ motion union — SAM-only red,
+        SAM ∩ motion yellow, motion-only green (the pixels the flow
+        rescue added, i.e. what the SAM mask alone would have missed),
+        blended at the same 0.35 alpha as viz.png."""
+        vis = np.ascontiguousarray(frame[:, :, ::-1])  # RGB -> BGR for cv2
+        overlay = np.zeros_like(vis)
+        overlay[sam & ~motion] = self._UNION_COLORS[0]
+        overlay[sam & motion] = self._UNION_COLORS[1]
+        overlay[motion & ~sam] = self._UNION_COLORS[2]
+        vis = cv2.addWeighted(vis, 1.0, overlay, 0.35, 0)
+        # darkened legend strip so the colours stay self-describing
+        vis[0:66, 0:150] = (vis[0:66, 0:150] * 0.35).astype(np.uint8)
+        for i, label in enumerate(self._UNION_LABELS):
+            y = 22 + 20 * i
+            cv2.rectangle(vis, (8, y - 9), (24, y + 3),
+                          self._UNION_COLORS[i], -1)
+            cv2.putText(vis, label, (32, y + 3), cv2.FONT_HERSHEY_SIMPLEX,
+                        0.42, (255, 255, 255), 1, cv2.LINE_AA)
+        cv2.imwrite(os.path.join(pdir, "union_mask.png"), vis)
 
     def _visualize(self, pdir: str, frames: list[np.ndarray],
                    keypoints: np.ndarray, masks: np.ndarray,

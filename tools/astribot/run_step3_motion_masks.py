@@ -19,8 +19,8 @@ _compute_motion_mask_gray (infer_waft) at --motion-threshold.
                │
                ▼  WAFT pairs (kf0, kf0 + k*stride), first significant wins
     ┌──────────────────────────────┐
-    │  motion mask per sub-task    │   motion_masks/ep{ep}/subtask_XX/<cam>/
-    │  (significant pairs only)    │   mask_rle.json (COCO RLE)
+    │  motion mask per sub-task    │   init_points/ep{ep}/subtask_XX/<cam>/
+    │  (significant pairs only)    │   motion_rle.json (COCO RLE)
     └──────────────────────────────┘
 
 **Window.** The first frame is fixed at the sub-task's 1st key-frame
@@ -38,14 +38,19 @@ significant (moving pixels > --motion-ratio of the frame) ends the scan —
 longer baselines accumulate the sub-threshold per-stride motion, catching
 the onset.
 
-**Saving.** Only a *significant* mask is saved — as `mask_rle.json` (COCO
-RLE, `utils.file_io.mask_rle.encode_rle`, next to the provenance of the
-pair that produced it). When no pair in the window reaches significance
-nothing is written: the rescue only unions real motion, so Step 3b then
-keeps that sub-task's SAM mask alone. `--visualize` additionally writes
-the chosen pair's `flow.png` (flow_to_image) — the mask itself is in the
-RLE; a scan with no significant pair writes the strongest pair's
-instead (debug only, still no `mask_rle.json`).
+**Saving.** Only a *significant* mask is saved — as
+`motion_rle.json` (COCO RLE, `utils.file_io.mask_rle.encode_rle`,
+carrying the provenance of the pair that produced it) in the (sub-task,
+camera) folder of Step-3b's init-points tree
+(`<out-dir>/init_points/ep{ep}/subtask_XX/<camera>/`, beside the
+`<prompt_slug>/` subtrees Step 3b writes) — the rescue then sits next to
+the init points it shaped. When no pair in the window reaches
+significance nothing is written: the rescue only unions real motion, so
+Step 3b then keeps that sub-task's SAM mask alone. `--visualize`
+additionally writes the significant pair's `flow.png` (flow_to_image on a
+black background: pixels below --motion-threshold are zeroed, so the
+coloured area is exactly the moving-pixel set) — the mask itself is in
+the RLE, and a scan with no significant pair writes nothing at all.
 
 Usage
 -----
@@ -85,7 +90,7 @@ DEFAULT_STRIDE = 4
 DEFAULT_MOTION_THRESHOLD = 2.0
 #: default moving-pixel fraction of the frame that makes a mask
 #: "significant" (the scan then early-stops).
-DEFAULT_MOTION_RATIO = 0.05
+DEFAULT_MOTION_RATIO = 0.03
 
 _EP_RE = re.compile(r"^ep(\d{6})$")
 
@@ -111,9 +116,11 @@ def parse_args(argv: list[str] | None = None):
                         help="cap the number of processed episodes")
     parser.add_argument("--out-dir", "-o", default=None,
                         help="output root (default: <data-root>/eps_data/"
-                             "sampling_points); the motion masks land under "
-                             "<out-dir>/motion_masks/ next to the detections/ "
-                             "and init_points/ of Steps 3a/3b")
+                             "sampling_points); the motion masks land inside "
+                             "Step 3b's init-points tree — "
+                             "<out-dir>/init_points/ep{ep}/subtask_XX/"
+                             "<camera>/, next to the prompt subtrees of that "
+                             "same (sub-task, camera)")
     parser.add_argument("--detections-dir", default=None,
                         help="Step-3a detections root (default: "
                              "<out-dir>/detections)")
@@ -136,15 +143,15 @@ def parse_args(argv: list[str] | None = None):
                              "a mask is significant and the scan early-stops "
                              "(default: %(default)s)")
     parser.add_argument("--visualize", action="store_true",
-                        help="also write the chosen pair's flow.png "
-                             "(flow_to_image) next to the mask for "
-                             "eyeballing; a scan with no significant pair "
-                             "writes the strongest pair's instead "
-                             "(default: off)")
+                        help="also write the significant pair's flow.png "
+                             "(flow_to_image) next to its "
+                             "motion_rle.json for eyeballing; a "
+                             "sub-task with no significant pair writes "
+                             "nothing (default: off)")
     parser.add_argument("--skip-done", action="store_true",
-                        help="skip sub-tasks whose mask_rle.json already "
-                             "exists (a sub-task with no significant pair "
-                             "has no file and is re-scanned)")
+                        help="skip sub-tasks whose motion_rle.json "
+                             "already exists (a sub-task with no significant "
+                             "pair has no file and is re-scanned)")
     return parser.parse_args(argv)
 
 
@@ -156,8 +163,9 @@ class MotionMaskExtract:
     Step 3b caps identically — the JSON is the single source both steps
     agree on. The frames themselves are decoded online from the dataset;
     nothing is written to disk except the significant masks:
-    motion_masks/ep{ep}/subtask_XX/<camera>/mask_rle.json (plus the
-    --visualize flow.png of the chosen pair).
+    init_points/ep{ep}/subtask_XX/<camera>/motion_rle.json (plus the
+    --visualize flow.png of the chosen pair) — the same folder Step 3b
+    writes its <prompt_slug>/ init points into.
     """
 
     def __init__(self, args):
@@ -196,7 +204,11 @@ class MotionMaskExtract:
         if args.max_episodes is not None:
             eps = eps[: args.max_episodes]
         self.ep_idxes = eps
-        self.motion_dir = Path(self.out_dir) / "motion_masks"
+        # Step 3b's init-points tree: the motion-mask artefacts of a
+        # (sub-task, camera) land in that sub-task's folder itself (the
+        # parent of its <prompt_slug>/ subtrees), so they sit next to the
+        # init points they shaped.
+        self.init_dir = Path(self.out_dir) / "init_points"
         self.waft_model = None
         self.dataset = None  # LeRobotDataset handle, opened lazily
         self.ep_idx = 0
@@ -240,12 +252,17 @@ class MotionMaskExtract:
         # keep the same parity for the masks / flow artefacts below.
         return np.nan_to_num(flow, nan=0.0, posinf=0.0, neginf=0.0)
 
-    def _write_visuals(self, seg_dir: Path, flow: np.ndarray) -> None:
+    def _write_visuals(self, seg_dir: Path, flow: np.ndarray,
+                       thr: float) -> None:
         """Debug artefact of one flow pair (--visualize): flow.png
-        (flow_to_image, colour wheel)."""
+        (flow_to_image, colour wheel) on a black background — the static
+        pixels are zeroed (flow_to_image renders radius ~0 as bright
+        white), at the same --motion-threshold that decides the mask, so
+        the coloured area is exactly the pair's moving pixels."""
         seg_dir.mkdir(parents=True, exist_ok=True)
-        cv2.imwrite(str(seg_dir / "flow.png"),
-                    flow_to_image(flow, convert_to_bgr=True))
+        vis = flow_to_image(flow, convert_to_bgr=True)
+        vis[np.linalg.norm(flow, axis=-1) <= thr] = 0
+        cv2.imwrite(str(seg_dir / "flow.png"), vis)
 
     # --- orchestration -------------------------------------------------------
 
@@ -256,7 +273,7 @@ class MotionMaskExtract:
         print(f"\n{len(self.ep_idxes)} episode(s) selected: {self.ep_idxes}")
         for ep_idx in tqdm(self.ep_idxes, desc="episodes"):
             self._process_episode(ep_idx)
-        print(f"\ndone: {len(self.ep_idxes)} episode(s) -> {self.motion_dir}")
+        print(f"\ndone: {len(self.ep_idxes)} episode(s) -> {self.init_dir}")
 
     def _process_episode(self, ep_idx: int) -> None:
         self.ep_idx = ep_idx
@@ -301,14 +318,15 @@ class MotionMaskExtract:
         """Opening-window scan of one sub-task: fixed first frame keys[0],
         walking second frame keys[0] + m*stride up to keys[1]; the first
         significant mask wins the scan. Only that mask is saved — as
-        mask_rle.json (COCO RLE) under motion_masks/ep{ep}/subtask_{k}/
-        <cam>/; a sub-task with no significant pair writes nothing (Step
-        3b then keeps its SAM mask alone). --visualize writes the chosen
-        (or, on a miss, the strongest) pair's flow artefacts too.
+        motion_rle.json (COCO RLE) under init_points/ep{ep}/
+        subtask_{k}/<cam>/ (Step 3b's folder for that sub-task, beside its
+        <prompt_slug>/ subtrees); a sub-task with no significant pair
+        writes nothing (Step 3b then keeps its SAM mask alone).
+        --visualize writes the same pair's flow.png too.
         """
-        seg_dir = self.motion_dir / f"ep{self.ep_idx:06d}" \
+        seg_dir = self.init_dir / f"ep{self.ep_idx:06d}" \
             / f"subtask_{k:02d}" / cam
-        rle_path = seg_dir / "mask_rle.json"
+        rle_path = seg_dir / "motion_rle.json"
         if self.args.skip_done and rle_path.is_file():
             print(f"  [subtask {k:02d}] ({cam}) skip: {rle_path} exists")
             return
@@ -328,29 +346,22 @@ class MotionMaskExtract:
         counts: list[int] = []
         chosen: tuple[int, int] | None = None
         chosen_mask: np.ndarray | None = None
+        chosen_flow: np.ndarray | None = None
         b = a + stride
         while b <= b_max:
-            mask = _compute_motion_mask_gray(self._pair_flow(a, b), thr)
+            flow = self._pair_flow(a, b)
+            mask = _compute_motion_mask_gray(flow, thr)
             n = int((mask > 0).sum())
             pairs.append([a, b])
             counts.append(n)
             if n > ratio * mask.size:
-                chosen, chosen_mask = (a, b), mask
+                chosen, chosen_mask, chosen_flow = (a, b), mask, flow
                 break
             b += stride
         if chosen is None:
             sig = "no significant pair" if counts else "no flow pair"
             print(f"  [subtask {k:02d}] ({cam}) skip: {sig} in "
                   f"[{a}, {b_max}] at stride {stride} — nothing saved")
-            if counts and self.args.visualize:
-                # Debug affordance: show the strongest pair's flow even
-                # though it stays out of the pipeline.
-                best = max(range(len(counts)), key=lambda i: counts[i])
-                dbg = (pairs[best][0], pairs[best][1])
-                self._write_visuals(seg_dir, self._pair_flow(*dbg))
-                print(f"  [subtask {k:02d}] ({cam}) --visualize: strongest "
-                      f"pair {dbg} ({counts[best]} moving px, below "
-                      f"{ratio:.0%}) -> {seg_dir}")
             return
         n = int((chosen_mask > 0).sum())
 
@@ -373,7 +384,7 @@ class MotionMaskExtract:
         with open(rle_path, "w") as f:
             json.dump(meta, f, indent=2)
         if self.args.visualize:
-            self._write_visuals(seg_dir, self._pair_flow(*chosen))
+            self._write_visuals(seg_dir, chosen_flow, thr)
         print(f"  [subtask {k:02d}] ({cam}) chosen pair {chosen} "
               f"({n} moving px, significant) -> {rle_path}")
 

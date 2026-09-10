@@ -57,8 +57,12 @@ forwards the flag to Step 3b, which unions each sub-task's motion mask
 into the **manipulator** prompt's row-0 SAM3 mask (SAM ∪ optical flow,
 see run_step3_motion_masks.py) — the rescue for an arm the RexOmni
 detection missed. Step 3a' saves a mask only when a flow pair in the
-window is significant (mask_rle.json, COCO RLE); with
---visualize-motion it also writes the chosen pair's flow.png next to it.
+window is significant, as motion_rle.json (COCO RLE) in the
+(sub-task, camera) folder of the init-points tree — next to the prompt
+subfolders of the init points it shaped; with --visualize-motion it also
+writes that pair's flow.png beside it, and Step 3b renders the resulting
+SAM ∪ motion union as union_mask.png inside the manipulator prompt's
+folder.
 
 For a standalone
 key-frame folder (no dataset), run_e2e_init_points.py (tools/general_test/)
@@ -128,7 +132,7 @@ DEFAULT_SAMPLING_MODE = "no_roma"
 REXOMNI_ENV_DIR = ".venv-rexomni"
 #: defaults of the Step-3a' WAFT motion-mask knobs (see the pass's --help).
 DEFAULT_MOTION_THRESHOLD = 2.0
-DEFAULT_MOTION_RATIO = 0.05
+DEFAULT_MOTION_RATIO = 0.03
 
 _STEP_1 = "tools/astribot/extract_frames.py"
 _STEP_3A = "tools/general_test/pipeline/run_object_detection.py"
@@ -239,9 +243,13 @@ def parse_args(argv: list[str] | None = None):
                              "a motion mask is significant (Step 3a' "
                              "early-stops on it; default: %(default)s)")
     parser.add_argument("--visualize-motion", action="store_true",
-                        help="Step 3a' also writes the chosen flow pair's flow.png next "
-                             "to its mask_rle.json — requires "
-                             "--with-optical-flow-mask (default: off)")
+                        help="Step 3a' also writes the significant pair's "
+                             "flow.png next to its motion_rle.json (the "
+                             "sub-task's init-points folder), and Step 3b "
+                             "renders the manipulator's SAM ∪ motion union as "
+                             "union_mask.png next to that prompt's init "
+                             "points — requires --with-optical-flow-mask "
+                             "(default: off)")
     parser.add_argument("--skip-extract", action="store_true",
                         help="do not run Step 1: reuse the key-frames already "
                              "on disk under the output root's key_frames/ "
@@ -427,8 +435,9 @@ def _build_motion_masks_cmd(args, repo_root: Path) -> list[str]:
     """Step 3a' command: WAFT motion masks of the sub-task starts (main
     env, frames decoded online from the dataset). Runs after Step 3a
     against the same (episode, camera) grid — every camera of the
-    --camera-idxes whose detections JSON exists — and writes the
-    motion_masks/ tree Step 3b reads under --with-optical-flow-mask."""
+    --camera-idxes whose detections JSON exists — and writes each
+    significant mask into the (sub-task, camera) folder of the
+    init-points tree Step 3b reads under --with-optical-flow-mask."""
     cmd = [sys.executable,
            str(repo_root / _STEP_3AP),
            "--repo-id", args.repo_id,
@@ -472,6 +481,8 @@ def _build_3b_cmd(args, repo_root: Path) -> list[str]:
             "--sampling-mode", args.sampling_mode]
     if args.with_optical_flow_mask:
         cmd += ["--with-optical-flow-mask"]
+    if args.visualize_motion:
+        cmd += ["--viz-motion-union"]
     if args.device:
         cmd += ["--device", args.device]
     if args.skip_done:
