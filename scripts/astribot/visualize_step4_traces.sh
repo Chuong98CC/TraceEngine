@@ -11,6 +11,6 @@ DATA_ROOT=/data/astribot_making_coffee_vlva_full
 python tools/astribot/visualize_step4_traces.py \
     --repo-id $REPO_ID \
     --data-root $DATA_ROOT \
-    --episode-idxes 0 \
-    --camera-idxes 0 5 --render 2d
+    --episode-idxes 1 \
+    --camera-idxes 0 --render 2d
     # --render stills

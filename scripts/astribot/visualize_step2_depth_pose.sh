@@ -11,4 +11,4 @@ python tools/astribot/visualize_step2_depth_pose.py \
     --repo-id $REPO_ID \
     --data-root $DATA_ROOT \
     --episode-idxes 0 \
-    --camera-idxes 0 4 5 --fps 30
+    --camera-idxes 0  --fps 30

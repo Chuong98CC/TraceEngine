@@ -13,7 +13,7 @@ CAMERA_IDX=${1:-0}  # 0: cam_head, 3: cam_torso (a camera with a paired raw-dept
 python tools/astribot/run_step2_depth_stream.py \
     --repo-id $REPO_ID \
     --data-root $DATA_ROOT \
-    --episode-idxes 1 \
+    --episode-idxes 0 \
     --camera-idxes $CAMERA_IDX --backend $BACKEND \
     --with-optical-flow \
     --use-inferred-splits
