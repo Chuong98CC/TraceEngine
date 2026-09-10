@@ -46,7 +46,7 @@ Examples
     # Episode mode: all sub-tasks of episode 0, prompts from the dataset's
     # meta/subtasks.csv
     .venv-rexomni/bin/python tools/general_test/pipeline/run_object_detection.py
-        --data-root /data/astri_making_coffee_v1 --episode-idxes 0
+        --data-root /data/astribot_making_coffee_vlva_full --episode-idxes 0
 
     # One sub-task's key-frame folder: prompts passed explicitly
     .venv-rexomni/bin/python tools/general_test/pipeline/run_object_detection.py

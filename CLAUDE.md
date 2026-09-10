@@ -266,14 +266,14 @@ bash scripts/general_test/pipeline/infer_tapip3d.sh
 
 # --- Extract sample frames from a LeRobotDataset (feeds the general_test tools) ---
 python tools/astribot/extract_frames.py \
-    --repo-id Kronze157/astri_making_coffee_vlva \
-    --data-root /data/astri_making_coffee_v1 --mode frames \
+    --repo-id Kronze157/astribot_making_coffee_vlva_full \
+    --data-root /data/astribot_making_coffee_vlva_full --mode frames \
     --camera-idxes 0 1 --interval 4 --max-frames 50
 
 # --- Online per-sub-task streaming straight from the dataset (no frame extraction) ---
 python tools/astribot/run_step2_depth_stream.py \
-    --repo-id Kronze157/astri_making_coffee_vlva \
-    --data-root /data/astri_making_coffee_v1 --episode-idxes 0 --backend vggt_omega
+    --repo-id Kronze157/astribot_making_coffee_vlva_full \
+    --data-root /data/astribot_making_coffee_vlva_full --episode-idxes 0 --backend vggt_omega
 ```
 
 ## Dataset loading

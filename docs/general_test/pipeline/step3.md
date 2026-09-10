@@ -93,7 +93,7 @@ run_e2e_init_points.py / run_step3_init_points.py  (drivers)
 ```bash
 # Folder mode (Case 1): one sub-task's key-frame folder, full Step 3
 python tools/general_test/pipeline/run_e2e_init_points.py \
-    --keyframes-dir astri_making_coffee_v1/eps_data/sampling_points/key_frames/ep000000/subtask_00/cam_head
+    --keyframes-dir astribot_making_coffee_vlva_full/eps_data/sampling_points/key_frames/ep000000/subtask_00/cam_head
 # or the wrapper script (extra args pass through)
 bash scripts/general_test/infer_step3.sh <key-frames-dir> [extra args...]
 
@@ -103,8 +103,8 @@ bash scripts/general_test/infer_step3.sh <key-frames-dir> [extra args...]
 # extracts their key-frames, and 3a/3b run on each of them — outputs are
 # per camera (detections/ep*/<camera>.json, init_points/.../<camera>/)
 python tools/astribot/run_step3_init_points.py \
-    --repo-id Kronze157/astri_making_coffee_vlva \
-    --data-root /data/astri_making_coffee_v1 --episode-idxes 0 \
+    --repo-id Kronze157/astribot_making_coffee_vlva_full \
+    --data-root /data/astribot_making_coffee_vlva_full --episode-idxes 0 \
     --camera-idxes 0 4 5
 
 # Re-run only 3b with tuned params, reusing the saved key-frames + detections
@@ -119,8 +119,8 @@ python tools/general_test/pipeline/run_e2e_init_points.py \
 # episode and the detections JSON must exist (missing -> error, in the
 # episode driver: no ordinal fallback)
 python tools/astribot/run_step3_init_points.py \
-    --repo-id Kronze157/astri_making_coffee_vlva \
-    --data-root /data/astri_making_coffee_v1 --episode-idxes 0 \
+    --repo-id Kronze157/astribot_making_coffee_vlva_full \
+    --data-root /data/astribot_making_coffee_vlva_full --episode-idxes 0 \
     --skip-3a --top-k 64
 
 # A/B the RoMAv2 candidate pool (3b-only re-run): --sampling-mode mask
@@ -131,10 +131,10 @@ python tools/astribot/run_step3_init_points.py \
 # original detections; the default detections/init-points roots are
 # <data-root>/eps_data/sampling_points/{detections,init_points})
 python tools/general_test/pipeline/run_object_init_points.py \
-    --data-root /data/astri_making_coffee_v1 --episode-idxes 0 \
+    --data-root /data/astribot_making_coffee_vlva_full --episode-idxes 0 \
     --sampling-mode uniform \
-    -o /data/astri_making_coffee_v1/eps_data_uniform \
-    --detections-dir /data/astri_making_coffee_v1/eps_data/sampling_points/detections
+    -o /data/astribot_making_coffee_vlva_full/eps_data_uniform \
+    --detections-dir /data/astribot_making_coffee_vlva_full/eps_data/sampling_points/detections
 
 # Simple-baseline A/B (no RoMaV2): --sampling-mode no_roma uniformly
 # samples top-k points inside the mask of the span's first frame only
@@ -142,10 +142,10 @@ python tools/general_test/pipeline/run_object_init_points.py \
 # span) — same SAM3 masks, frame_indices and outputs, so Step 4 windows
 # and gating are unchanged; only the matching is dropped
 python tools/astribot/run_step3_init_points.py \
-    --repo-id Kronze157/astri_making_coffee_vlva \
-    --data-root /data/astri_making_coffee_v1 --episode-idxes 0 \
+    --repo-id Kronze157/astribot_making_coffee_vlva_full \
+    --data-root /data/astribot_making_coffee_vlva_full --episode-idxes 0 \
     --sampling-mode no_roma \
-    -o /data/astri_making_coffee_v1/eps_data_no_roma
+    -o /data/astribot_making_coffee_vlva_full/eps_data_no_roma
 ```
 
 ## Expected output

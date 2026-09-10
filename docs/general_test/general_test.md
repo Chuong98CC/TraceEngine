@@ -6,7 +6,7 @@ folder are general-purpose: they run on a **folder of images**.
 
 To get sample image folders, first extract frames from a LeRobotDataset with
 `tools/astribot/extract_frames.py` (sample dataset
-[`Kronze157/astri_making_coffee_vlva`](https://huggingface.co/datasets/Kronze157/astri_making_coffee_vlva)).
+[`Kronze157/astribot_making_coffee_vlva_full`](https://huggingface.co/datasets/Kronze157/astribot_making_coffee_vlva_full)).
 Model weights are expected under `weights/` (see the repo README §2 for the
 Hugging Face download + symlink). All scripts can be run from the repo root
 after `uv sync`.
@@ -31,7 +31,7 @@ entire step → run the pipeline test and use its module pointers for details.
 ```mermaid
 flowchart LR
     subgraph Step1["Step 1 · Key-Frame Extracting"]
-        DS["LeRobotDataset<br/>(Kronze157/astri_making_coffee_vlva)"] --> EF["tools/astribot/extract_frames.py<br/>--mode frames / key_frames"]
+        DS["LeRobotDataset<br/>(Kronze157/astribot_making_coffee_vlva_full)"] --> EF["tools/astribot/extract_frames.py<br/>--mode frames / key_frames"]
         EF -->|"all frames"| FR["Per-camera frame folders<br/>frame_*.jpg + raw depth .lz4"]
         EF -->|"key-frames"| KF["Key-frame folders<br/>ep…/subtask_XX/cam/frame_*.jpg"]
     end

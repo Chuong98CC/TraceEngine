@@ -1,4 +1,4 @@
-DATA_ROOT="/data/astri_making_coffee_v1/"
+DATA_ROOT="/data/astribot_making_coffee_vlva_full/"
 LEFT_DIR="${DATA_ROOT}/eps_data/subtask_frames/ep000000/subtask_00/cam_head_stereo_left"
 RIGHT_DIR="${DATA_ROOT}/eps_data/subtask_frames/ep000000/subtask_00/cam_head_stereo_right"
 # BACKEND="da3"

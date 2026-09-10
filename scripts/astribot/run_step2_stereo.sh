@@ -3,8 +3,8 @@
 # the Step-1 subtask_splits.json when --use-inferred-splits is passed.
 # Stereo: head cameras 4+5 share every 64-view chunk (32 steps x 2 cameras);
 # WAFT motion masks zero the moving pixels' confidence during chunk alignment.
-DATA_ROOT=/data/astri_making_coffee_v1
-REPO_ID=Kronze157/astri_making_coffee_vlva
+DATA_ROOT=/data/astribot_making_coffee_vlva_full
+REPO_ID=Kronze157/astribot_making_coffee_vlva_full
 # BACKEND=da3
 BACKEND=vggt_omega
 

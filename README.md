@@ -274,7 +274,7 @@ keypoint matching. Per-tool usage is documented in
 
 To get sample image folders, first extract frames from a LeRobotDataset —
 the sample dataset is
-[`Kronze157/astri_making_coffee_vlva`](https://huggingface.co/datasets/Kronze157/astri_making_coffee_vlva)
+[`Kronze157/astribot_making_coffee_vlva_full`](https://huggingface.co/datasets/Kronze157/astribot_making_coffee_vlva_full)
 on Hugging Face:
 
 ```bash
@@ -286,7 +286,7 @@ then extract frames
 
 ```bash
 python tools/astribot/extract_frames.py \
-    --repo-id Kronze157/astri_making_coffee_vlva \
+    --repo-id Kronze157/astribot_making_coffee_vlva_full \
     --data-root $DATA_DIR \
     --mode frames --camera-idxes 0 1 --interval 4 --max-frames 50
 ```
@@ -343,7 +343,7 @@ Step-3 driver defaults to `<data-root>/eps_data/sampling_points/` (its
 `--out-dir`) — one root per dataset:
 
 ```
-/data/astri_making_coffee_v1/eps_data/
+/data/astribot_making_coffee_vlva_full/eps_data/
 ├── subtask/         <- detect_subtask (shared across steps — Step 2 reads the
 │                       splits from here): subtask_splits.json + gripper plot,
 │                       written by extract_frames.sh AND by the Step-3 driver's

@@ -98,8 +98,8 @@ sub-task's prompts.
 
 ```bash
 python tools/astribot/extract_frames.py \
-    --repo-id Kronze157/astri_making_coffee_vlva \
-    --data-root /data/astri_making_coffee_v1 \
+    --repo-id Kronze157/astribot_making_coffee_vlva_full \
+    --data-root /data/astribot_making_coffee_vlva_full \
     --mode detect_subtask
 ```
 
@@ -116,8 +116,8 @@ Writes per episode:
 
 ```bash
 python tools/astribot/extract_frames.py \
-    --repo-id Kronze157/astri_making_coffee_vlva \
-    --data-root /data/astri_making_coffee_v1 \
+    --repo-id Kronze157/astribot_making_coffee_vlva_full \
+    --data-root /data/astribot_making_coffee_vlva_full \
     --mode key_frames \
     --camera-idxes 0 1          # indices into the dataset's camera_keys
 ```
@@ -132,8 +132,8 @@ resolved” above).
 
 ```bash
 python tools/astribot/extract_frames.py \
-    --repo-id Kronze157/astri_making_coffee_vlva \
-    --data-root /data/astri_making_coffee_v1 \
+    --repo-id Kronze157/astribot_making_coffee_vlva_full \
+    --data-root /data/astribot_making_coffee_vlva_full \
     --mode videos \
     --camera-idxes 0 1
 ```
@@ -149,8 +149,8 @@ as monochrome streams.
 
 ```bash
 python tools/astribot/extract_frames.py \
-    --repo-id Kronze157/astri_making_coffee_vlva \
-    --data-root /data/astri_making_coffee_v1 \
+    --repo-id Kronze157/astribot_making_coffee_vlva_full \
+    --data-root /data/astribot_making_coffee_vlva_full \
     --mode frames \
     --camera-idxes 0 --interval 4 --max-frames 50
 ```
@@ -169,7 +169,7 @@ Depth pairing prefers the raw `observation.depth.*` feature; the legacy
 `<cam_key>_depth` video is only trusted when the dataset metadata flags it as
 a real depth map (`video.is_depth_map`) — the `astri_making_coffee` recording
 is flagged false and its depth is unusable (see the re-recorded
-`astri_making_coffee_v1`).
+`astribot_making_coffee_vlva_full`).
 
 ### Typical workflow
 

@@ -25,18 +25,18 @@ Examples
 --------
     # All sub-tasks of episode 0, first RGB camera, VGGT-Omega
     python tools/astribot/run_step2_depth_stream.py
-        --repo-id Kronze157/astri_making_coffee_vlva
+        --repo-id Kronze157/astribot_making_coffee_vlva_full
         --data-root /data/astri_making_coffee --episode-idxes 0
 
     # Stereo pair, DA3 backend, with WAFT motion masks
     python tools/astribot/run_step2_depth_stream.py
-        --repo-id Kronze157/astri_making_coffee_vlva
+        --repo-id Kronze157/astribot_making_coffee_vlva_full
         --data-root /data/astri_making_coffee --episode-idxes 0
         --camera-idxes 4 5 --backend da3 --with-optical-flow
 
     # RGB-D camera, a2f backend (Any2Full densifies the sensor depth)
     python tools/astribot/run_step2_depth_stream.py
-        --repo-id Kronze157/astri_making_coffee_vlva
+        --repo-id Kronze157/astribot_making_coffee_vlva_full
         --data-root /data/astri_making_coffee --episode-idxes 0
         --backend a2f
 """

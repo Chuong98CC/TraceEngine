@@ -67,7 +67,7 @@ are).
 
 ```bash
 python tools/astribot/run_step2_depth_stream.py \
-    --repo-id Kronze157/astri_making_coffee_vlva \
+    --repo-id Kronze157/astribot_making_coffee_vlva_full \
     --data-root /data/astri_making_coffee \
     --episode-idxes 0
 ```
@@ -81,7 +81,7 @@ dataset). WAFT is **off by default**; add `--with-optical-flow` to run it
 
 ```bash
 python tools/astribot/run_step2_depth_stream.py \
-    --repo-id Kronze157/astri_making_coffee_vlva \
+    --repo-id Kronze157/astribot_making_coffee_vlva_full \
     --data-root /data/astri_making_coffee \
     --episode-idxes 0 \
     --camera-idxes 4 5 --backend vggt_omega --with-optical-flow
@@ -96,7 +96,7 @@ folders with identical frame stems.
 
 ```bash
 python tools/astribot/run_step2_depth_stream.py \
-    --repo-id Kronze157/astri_making_coffee_vlva \
+    --repo-id Kronze157/astribot_making_coffee_vlva_full \
     --data-root /data/astri_making_coffee \
     --one-per-task --backend da3
 ```
@@ -157,7 +157,7 @@ Full usage and argument reference: `astribot_visualize_step2_depth_pose.md`.
 
 ```bash
 python tools/astribot/visualize_step2_depth_pose.py \
-    --repo-id Kronze157/astri_making_coffee_vlva \
+    --repo-id Kronze157/astribot_making_coffee_vlva_full \
     --data-root /data/astri_making_coffee \
     --episode-idxes 0 \
     --camera-idxes 4 5 --fps 30        # -e/-c merely filter the on-disk outputs

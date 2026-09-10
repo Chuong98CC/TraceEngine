@@ -1,4 +1,4 @@
-DATA_ROOT="/data/astri_making_coffee_v1/"
+DATA_ROOT="/data/astribot_making_coffee_vlva_full/"
 RGB_DIR="${DATA_ROOT}/eps_data/subtask_frames/ep000000/subtask_00/cam_head"
 DEPTH_DIR="${DATA_ROOT}/eps_data/subtask_frames/ep000000/subtask_00/depth_cam_head"
 # BACKEND="da3"

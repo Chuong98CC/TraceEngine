@@ -65,7 +65,7 @@ Examples
 --------
     # Track every sub-task of episode 0 (object + manipulator roles)
     python tools/astribot/run_step4_traces.py
-        --repo-id Kronze157/astri_making_coffee_vlva
+        --repo-id Kronze157/astribot_making_coffee_vlva_full
         --data-root /data/astri_making_coffee --episode-idxes 0
 """
 

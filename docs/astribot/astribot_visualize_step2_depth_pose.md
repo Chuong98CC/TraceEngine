@@ -64,7 +64,7 @@ dimensions).
 
 ```bash
 python tools/astribot/visualize_step2_depth_pose.py \
-    --repo-id Kronze157/astri_making_coffee_vlva \
+    --repo-id Kronze157/astribot_making_coffee_vlva_full \
     --data-root /data/astri_making_coffee \
     --episode-idxes 0
 ```
@@ -77,7 +77,7 @@ dataset) — one `depth_pose.mp4` per camera.
 
 ```bash
 python tools/astribot/visualize_step2_depth_pose.py \
-    --repo-id Kronze157/astri_making_coffee_vlva \
+    --repo-id Kronze157/astribot_making_coffee_vlva_full \
     --data-root /data/astri_making_coffee \
     --episode-idxes 0 \
     --camera-idxes 4 5 --fps 30

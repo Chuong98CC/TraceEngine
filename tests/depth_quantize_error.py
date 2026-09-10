@@ -19,7 +19,7 @@ mismatch), so the raw uint16 buffer is decompressed directly here.
 Usage
 -----
     uv run python test/depth_quantize_error.py \
-        --path /data/astri_making_coffee_v1/eps_data/depth_pose_uint16/\
+        --path /data/astribot_making_coffee_vlva_full/eps_data/depth_pose_uint16/\
 ep000000/subtask_00/depth_cam_head_stereo_left/frame_000000.lz4
 """
 
@@ -32,7 +32,7 @@ import numpy as np
 from utils.depth_utils import MAX_DEPTH, MIN_DEPTH, LogDepthToUint8Transform
 
 DEFAULT_PATH = (
-    "/data/astri_making_coffee_v1/eps_data/depth_pose_uint16/"
+    "/data/astribot_making_coffee_vlva_full/eps_data/depth_pose_uint16/"
     "ep000000/subtask_00/depth_cam_head_stereo_left/frame_000000.lz4"
 )
 

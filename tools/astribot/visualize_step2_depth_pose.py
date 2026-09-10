@@ -19,12 +19,12 @@ Examples
 --------
     # Render every sub-task of episode 0 (every camera with Step-2 outputs)
     python tools/astribot/visualize_step2_depth_pose.py
-        --repo-id Kronze157/astri_making_coffee_vlva
+        --repo-id Kronze157/astribot_making_coffee_vlva_full
         --data-root /data/astri_making_coffee --episode-idxes 0
 
     # Stereo pair at 30 fps (one depth_pose.mp4 per camera)
     python tools/astribot/visualize_step2_depth_pose.py
-        --repo-id Kronze157/astri_making_coffee_vlva
+        --repo-id Kronze157/astribot_making_coffee_vlva_full
         --data-root /data/astri_making_coffee --episode-idxes 0
         --camera-idxes 4 5 --fps 30
 """

@@ -95,7 +95,7 @@ outputs):
 
 ```bash
 python tools/astribot/run_step4_traces.py \
-    --repo-id Kronze157/astri_making_coffee_vlva \
+    --repo-id Kronze157/astribot_making_coffee_vlva_full \
     --data-root /data/astri_making_coffee \
     --episode-idxes 0
 ```
@@ -131,7 +131,7 @@ step-2 `depth_pose.mp4` videos (`visualize_step2_depth_pose.py`, see
 
 ```bash
 python tools/astribot/visualize_step4_traces.py \
-    --repo-id Kronze157/astri_making_coffee_vlva \
+    --repo-id Kronze157/astribot_making_coffee_vlva_full \
     --data-root /data/astri_making_coffee \
     --episode-idxes 0
 ```

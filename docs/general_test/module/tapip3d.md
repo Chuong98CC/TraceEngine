@@ -14,9 +14,9 @@ saved as world-space 3D traces per query.
 # Grid queries (classic): 8x8 bbox grid + 32x32 support grid
 python tools/general_test/module/infer_tapip3d.py \
     --image_dir \
-        /data/astri_making_coffee_v1/eps_data/subtask_frames/ep000000/subtask_00/cam_head \
+        /data/astribot_making_coffee_vlva_full/eps_data/subtask_frames/ep000000/subtask_00/cam_head \
     --depth_dir \
-        /data/astri_making_coffee_v1/experiments/rgbd_a2f/depth_cam_head \
+        /data/astribot_making_coffee_vlva_full/experiments/rgbd_a2f/depth_cam_head \
     --bbox 1 240 100 340 \
     --grid_x 8 --grid_y 8 --support_grid_size 32 \
     --output_dir output/stream_tracks_pt2

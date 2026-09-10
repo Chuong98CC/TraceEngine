@@ -9,6 +9,6 @@
 # python tools/general_test/pipeline/run_e2e_init_points.py \
 #     --keyframes-dir "$KEYFRAMES_DIR" "$@"
 
-IMG_DIR='astri_making_coffee_v1/eps_data/sampling_points/key_frames/ep000000/subtask_00/cam_head'
+IMG_DIR='astribot_making_coffee_vlva_full/eps_data/sampling_points/key_frames/ep000000/subtask_00/cam_head'
 python tools/general_test/pipeline/run_e2e_init_points.py --keyframes-dir $IMG_DIR \
     -o cache/step3

@@ -8,10 +8,11 @@
 # and Step 3 (init_points) for the same camera (the one Step 3 recorded —
 # run run_step2_depth_stream.py without --camera-idxes to stream that
 # camera).
-REPO_ID=Kronze157/astri_making_coffee_vlva
-DATA_ROOT=/data/astri_making_coffee_v1
+REPO_ID=Kronze157/astribot_making_coffee_vlva_full
+DATA_ROOT=/data/astribot_making_coffee_vlva_full
 
 python tools/astribot/run_step4_traces.py \
     --repo-id $REPO_ID \
     --data-root $DATA_ROOT --episode-idxes 0 \
-    --camera-idxes 0 4 5
+    --filter-visible --filter-static-pixel \
+    --camera-idxes 0

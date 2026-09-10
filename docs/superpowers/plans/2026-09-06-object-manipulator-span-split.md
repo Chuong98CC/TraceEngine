@@ -18,7 +18,7 @@
 - Test suite: CPU-only; run `uv run --extra dev pytest tests/ -q`. `tests/` currently holds only `tests/test_image_io.py` — new test files follow its plain-pytest style.
 - **The working tree has unrelated dirty files — never `git add -A`:** `scripts/astribot/extract_frames.sh`, `scripts/general_test/module/infer_moge3.sh`, `tools/general_test/module/infer_moge3.py` carry the user's in-progress work. Stage only the exact paths each commit names.
 - Every commit message ends with the `Co-Authored-By: Claude <noreply@anthropic.com>` trailer line.
-- The real-data verification (Task 6) uses `/data/astri_making_coffee_v1` (`--data-root`) and repo id `Kronze157/astri_making_coffee_vlva`; key-frames live under `<data-root>/eps_data/key_frames`, Step-2 geometry under `<data-root>/eps_data/depth_pose`, detections under `<data-root>/eps_data/detections`, init points under `<data-root>/eps_data/init_points`.
+- The real-data verification (Task 6) uses `/data/astribot_making_coffee_vlva_full` (`--data-root`) and repo id `Kronze157/astribot_making_coffee_vlva_full`; key-frames live under `<data-root>/eps_data/key_frames`, Step-2 geometry under `<data-root>/eps_data/depth_pose`, detections under `<data-root>/eps_data/detections`, init points under `<data-root>/eps_data/init_points`.
 - Old-format inputs stay supported: detections JSONs without `prompt_roles` (folder mode, pre-change runs) make Step 3b treat every prompt as full-span — identical to today's output.
 
 ## File Structure
@@ -950,22 +950,22 @@ Co-Authored-By: Claude <noreply@anthropic.com>"
 - No code files.
 
 **Interfaces:**
-- Consumes Tasks 1–4. Requires, for the chosen episode: Step-1 key-frames with `subtask_labels.json`, Step-2 depth+pose for the tracked camera (cam_head = dataset camera index 0), and the dataset locally under `/data/astri_making_coffee_v1`.
+- Consumes Tasks 1–4. Requires, for the chosen episode: Step-1 key-frames with `subtask_labels.json`, Step-2 depth+pose for the tracked camera (cam_head = dataset camera index 0), and the dataset locally under `/data/astribot_making_coffee_vlva_full`.
 
 - [ ] **Step 1: Check preconditions and pick the episode**
 
 ```bash
-ls /data/astri_making_coffee_v1/eps_data/key_frames/           # ep dirs
-ls /data/astri_making_coffee_v1/eps_data/key_frames/ep000000/  # subtask_labels.json?
-ls /data/astri_making_coffee_v1/eps_data/depth_pose/ep000000/subtask_00/depth_cam_head/ | head
+ls /data/astribot_making_coffee_vlva_full/eps_data/key_frames/           # ep dirs
+ls /data/astribot_making_coffee_vlva_full/eps_data/key_frames/ep000000/  # subtask_labels.json?
+ls /data/astribot_making_coffee_vlva_full/eps_data/depth_pose/ep000000/subtask_00/depth_cam_head/ | head
 ```
 
 Choose the first episode with key-frames + a `depth_cam_head` Step-2 folder (start with `ep000000`). If no episode has Step-2 outputs for `cam_head`, run Step 2 first for episode 0 (GPU streaming, main env):
 
 ```bash
 python tools/astribot/run_step2_depth_stream.py \
-    --repo-id Kronze157/astri_making_coffee_vlva \
-    --data-root /data/astri_making_coffee_v1 \
+    --repo-id Kronze157/astribot_making_coffee_vlva_full \
+    --data-root /data/astribot_making_coffee_vlva_full \
     --episode-idxes 0 --backend vggt_omega --camera-idxes 0
 ```
 
@@ -975,10 +975,10 @@ If key-frames are missing entirely, run Step 1 first (per `scripts/astribot/extr
 
 ```bash
 .venv-rexomni/bin/python tools/general_test/pipeline/run_object_detection.py \
-    --data-root /data/astri_making_coffee_v1 --episode-idxes "$EP"
+    --data-root /data/astribot_making_coffee_vlva_full --episode-idxes "$EP"
 python - <<'PY'
 import json
-p = f"/data/astri_making_coffee_v1/eps_data/detections/ep{int('$EP'):06d}.json"
+p = f"/data/astribot_making_coffee_vlva_full/eps_data/detections/ep{int('$EP'):06d}.json"
 d = json.load(open(p))
 for k, s in sorted(d["subtasks"].items()):
     print(k, s.get("prompts"), s.get("prompt_roles"))
@@ -991,10 +991,10 @@ Expected: every subtask with prompts prints aligned `prompt_roles` of `["object"
 
 ```bash
 python tools/general_test/pipeline/run_object_init_points.py \
-    --data-root /data/astri_making_coffee_v1 --episode-idxes "$EP"
+    --data-root /data/astribot_making_coffee_vlva_full --episode-idxes "$EP"
 python - <<'PY'
 import json, numpy as np, os
-base = f"/data/astri_making_coffee_v1/eps_data/init_points/ep{int('$EP'):06d}"
+base = f"/data/astribot_making_coffee_vlva_full/eps_data/init_points/ep{int('$EP'):06d}"
 for sub in sorted(os.listdir(base)):
     for slug in sorted(os.listdir(f"{base}/{sub}")):
         npz = np.load(f"{base}/{sub}/{slug}/init_points.npz")
@@ -1011,14 +1011,14 @@ Expected: for each canonical subtask, the **object** prompt's npz lists exactly 
 
 ```bash
 python tools/astribot/run_step4_traces.py \
-    --repo-id Kronze157/astri_making_coffee_vlva \
-    --data-root /data/astri_making_coffee_v1 --episode-idxes "$EP"
+    --repo-id Kronze157/astribot_making_coffee_vlva_full \
+    --data-root /data/astribot_making_coffee_vlva_full --episode-idxes "$EP"
 python - <<'PY'
 import json, numpy as np, os, glob
 def stems_of(sub):
-    d = glob.glob(f"/data/astri_making_coffee_v1/eps_data/depth_pose/ep{int('$EP'):06d}/{sub}/depth_cam_head/*.npz")
+    d = glob.glob(f"/data/astribot_making_coffee_vlva_full/eps_data/depth_pose/ep{int('$EP'):06d}/{sub}/depth_cam_head/*.npz")
     return sorted(int(os.path.basename(p).split("_")[1].split(".")[0]) for p in d)
-base = f"/data/astri_making_coffee_v1/eps_data/traces/ep{int('$EP'):06d}"
+base = f"/data/astribot_making_coffee_vlva_full/eps_data/traces/ep{int('$EP'):06d}"
 for sub in sorted(os.listdir(base)):
     stems = stems_of(sub)
     for slug in sorted(os.listdir(f"{base}/{sub}")):

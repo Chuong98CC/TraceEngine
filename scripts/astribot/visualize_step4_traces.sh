@@ -5,8 +5,8 @@
 # dataset, no re-inference). Episodes/sub-tasks/cameras are discovered
 # from the saved Step-4 trace outputs (Step-2 geometry from the
 # depth_pose tree); -e/-c merely filter what exists on disk.
-REPO_ID=Kronze157/astri_making_coffee_vlva
-DATA_ROOT=/data/astri_making_coffee_v1
+REPO_ID=Kronze157/astribot_making_coffee_vlva_full
+DATA_ROOT=/data/astribot_making_coffee_vlva_full
 
 python tools/astribot/visualize_step4_traces.py \
     --repo-id $REPO_ID \

@@ -51,7 +51,7 @@ Examples
 --------
     # From the Step-3a detections JSON
     python tools/general_test/pipeline/run_object_init_points.py
-        --data-root /data/astri_making_coffee_v1 --episode-idxes 0
+        --data-root /data/astribot_making_coffee_vlva_full --episode-idxes 0
 
     # One sub-task's key-frame folder (the prompts are the ones a Step 3a
     # run on the same folder recorded in its JSON)

@@ -29,26 +29,26 @@ Examples
 --------
     # 1) key/split frames inferred from the gripper state — no videos
     python tools/astribot/extract_frames.py
-        --repo-id Kronze157/astri_making_coffee_vlva
-        --data-root /data/astri_making_coffee_v1 --mode detect_subtask
+        --repo-id Kronze157/astribot_making_coffee_vlva_full
+        --data-root /data/astribot_making_coffee_vlva_full --mode detect_subtask
 
     # 2) first/last/key frames as jpgs, first two cameras
     python tools/astribot/extract_frames.py
-        --repo-id Kronze157/astri_making_coffee_vlva
-        --data-root /data/astri_making_coffee_v1 --mode key_frames
+        --repo-id Kronze157/astribot_making_coffee_vlva_full
+        --data-root /data/astribot_making_coffee_vlva_full --mode key_frames
         --camera-idxes 0 1
 
     # 3) one mp4 per sub-task segment, first two cameras
     python tools/astribot/extract_frames.py
-        --repo-id Kronze157/astri_making_coffee_vlva
-        --data-root /data/astri_making_coffee_v1 --mode videos
+        --repo-id Kronze157/astribot_making_coffee_vlva_full
+        --data-root /data/astribot_making_coffee_vlva_full --mode videos
         --camera-idxes 0 1
 
     # 4) every 4th frame of each sub-task (capped at 50), with the paired
     #    uint16 depth saved as .lz4 alongside
     python tools/astribot/extract_frames.py
-        --repo-id Kronze157/astri_making_coffee_vlva
-        --data-root /data/astri_making_coffee_v1 --mode frames
+        --repo-id Kronze157/astribot_making_coffee_vlva_full
+        --data-root /data/astribot_making_coffee_vlva_full --mode frames
         --camera-idxes 0 --interval 4 --max-frames 50
 """
 

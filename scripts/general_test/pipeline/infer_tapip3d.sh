@@ -8,9 +8,9 @@
 # Left stereo: --bbox 200 265 260 300
 set -e
 
-IMG_DIR="${IMG_DIR:-/data/astri_making_coffee_v1/eps_data/subtask_frames/ep000000/subtask_00/cam_head}"
-DEPTH_DIR="${DEPTH_DIR:-/data/astri_making_coffee_v1/experiments/rgbd_a2f/depth_cam_head}"
-OUTPUT_DIR="${OUTPUT_DIR:-/data/astri_making_coffee_v1/experiments/tapip3d}"
+IMG_DIR="${IMG_DIR:-/data/astribot_making_coffee_vlva_full/eps_data/subtask_frames/ep000000/subtask_00/cam_head}"
+DEPTH_DIR="${DEPTH_DIR:-/data/astribot_making_coffee_vlva_full/experiments/rgbd_a2f/depth_cam_head}"
+OUTPUT_DIR="${OUTPUT_DIR:-/data/astribot_making_coffee_vlva_full/experiments/tapip3d}"
 
 
 echo "============================================"
