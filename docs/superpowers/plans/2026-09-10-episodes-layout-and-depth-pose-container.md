@@ -1852,9 +1852,17 @@ git commit -m "feat(step3): per-sub-task sampling_points under episodes/"
 
 ```python
 def _geometry_at(depth_dir, frame_index: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """(depth (H, W) f32 metres, extrinsics (3, 4), intrinsics (3, 3)) of one
-    absolute frame, read from the depth_pose camera folder."""
-    return load_stream_data(depth_dir, frame_index)
+    """(depth (H, W) f32 metres, extrinsics (4, 4), intrinsics (3, 3)) of one
+    absolute frame, read from the depth_pose camera folder.
+
+    The pose is padded to a homogeneous 4x4 here: the consumers feed it to
+    ``unproject_xy_queries``, which calls ``torch.linalg.inv`` and needs a
+    square matrix (the store keeps the compact (3, 4) w2c form).
+    """
+    depth, extrinsics, intrinsics = load_stream_data(depth_dir, frame_index)
+    if extrinsics.shape == (3, 4):
+        extrinsics = np.vstack([extrinsics, [0, 0, 0, 1]])
+    return depth, extrinsics, intrinsics
 ```
 - `self.seg_depth_dir = seg_depth / f"depth_{cam}"` (`:648`) →
   `ap.depth_pose_dir(self.episodes_root, self.ep_idx, k, cam)`; the
@@ -1869,8 +1877,12 @@ def _geometry_at(depth_dir, frame_index: int) -> tuple[np.ndarray, np.ndarray, n
   Everything downstream (`span_stems`, `_candidate_frames`, `_snap_stems`)
   keeps working — it already treats stems as an ordered list.
 - `load_npz_batch(str(self.seg_depth_dir), file_list, s, end)` (`:954`) →
-  `load_npz_batch(str(self.seg_depth_dir), self.seg_stems, s, end)`;
-  `compute_global_depth_roi(...)` (`:957`) likewise takes `self.seg_stems`.
+  `load_npz_batch(str(self.seg_depth_dir), steps, s, end)`, where `steps` is
+  the **pass's traced step list** (what `file_list` was built from), *not*
+  `self.seg_stems`: `s`/`end` index that list, so slicing the full segment
+  stems instead would pair each frame with another frame's geometry — a
+  silent misalignment that only shows as wrong 3D traces. The same list goes
+  to `compute_global_depth_roi(...)` (`:957`).
 
 - [ ] **Step 2: Drop the camera-level metadata roll-up**
 
