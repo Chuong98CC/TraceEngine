@@ -166,13 +166,14 @@ class SubtaskStreamVisualize:
 
     @staticmethod
     def _camera_subdir(cam_key):
-        """Subdir per camera, named after the dataset's camera key (the
-        Step-2 npz folders are named depth_<subdir>)."""
+        """Subdir per camera, named after the dataset's camera key — the
+        name the Step-2 depth_pose/<camera> folders carry."""
         return cam_key.rsplit(".", 1)[-1]
 
     def _cam_key_for_subdir(self, subdir: str) -> str:
-        """Dataset camera key whose subdir matches an on-disk depth_<cam>
-        folder — the key decoding that camera's frames online."""
+        """Dataset camera key whose subdir matches an on-disk
+        depth_pose/<camera> folder — the key decoding that camera's frames
+        online."""
         for key in self.ds_meta.camera_keys:
             if self._camera_subdir(key) == subdir:
                 return key
@@ -282,7 +283,17 @@ class SubtaskStreamVisualize:
 
     def _process_segment(self, ep_idx: int, segment: str) -> None:
         k = ap.parse_subtask(segment)
-        for cam, key in self._segment_cameras(ep_idx, k):
+        cameras = self._segment_cameras(ep_idx, k)
+        if not cameras and self.cam_keys is None:
+            # discovery is Step-1-based (ap.discover_episodes), so an episode
+            # extracted but never streamed reaches here with nothing to
+            # render; without this line the run ends on a bare "0 camera
+            # video(s)". With -c the per-camera skip below reports instead.
+            print(f"  [{segment}] no depth_pose outputs under "
+                  f"{ap.task_dir(self.episodes_root, ep_idx, k, ap.DEPTH_POSE)} "
+                  f"— run run_step2_depth_stream.py for this episode")
+            return
+        for cam, key in cameras:
             cam_dir = ap.depth_pose_dir(self.episodes_root, ep_idx, k, cam)
             if not (cam_dir / POSES_FILE).is_file():
                 # -c picked a camera the Step-2 run skipped

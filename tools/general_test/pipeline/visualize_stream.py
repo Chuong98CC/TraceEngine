@@ -43,7 +43,7 @@ from utils.visualize.visualize_depth import (  # noqa: E402
     _index_color_rgb,
 )
 
-from utils.depth_pose_io import DepthPoseReader  # noqa: E402
+from utils.depth_pose_io import POSES_FILE, DepthPoseReader  # noqa: E402
 from utils.streaming_utils import load_stream_data, load_pair  # noqa: E402
 
 
@@ -51,9 +51,24 @@ from utils.streaming_utils import load_stream_data, load_pair  # noqa: E402
 # Trajectory video rendering
 # ===========================================================================
 def load_stems(depth_dirs: list[str]) -> list[int]:
-    """Sorted absolute frame indices of the first camera's pose store."""
+    """Sorted absolute frame indices of the first camera's pose store.
+
+    Raises with the depth-dir spelled out (rather than letting the reader's
+    np.load raise a bare FileNotFoundError on a path the caller never typed)
+    when the folder is not a Step-2 output or holds no frames — the usual
+    cause being a --result-dir / --out-dir pointing at a stale tree."""
+    if not (Path(depth_dirs[0]) / POSES_FILE).is_file():
+        raise FileNotFoundError(
+            f"{depth_dirs[0]} is not a depth_pose camera folder (no "
+            f"{POSES_FILE}) — point --result-dir / --out-dir at a Step-2 "
+            f"output tree"
+        )
     with DepthPoseReader(depth_dirs[0]) as reader:
-        return sorted(int(i) for i in reader.frame_indices)
+        stems = sorted(int(i) for i in reader.frame_indices)
+    if not stems:
+        raise ValueError(f"the depth_pose store {depth_dirs[0]} holds no "
+                         f"frames — nothing to render")
+    return stems
 
 
 def load_poses(frame_index: int, depth_dirs: list[str]) -> np.ndarray:

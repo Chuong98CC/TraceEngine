@@ -57,6 +57,7 @@ import os
 import resource
 import sys
 from datetime import datetime
+from pathlib import Path
 
 import torch
 
@@ -302,7 +303,10 @@ def main(argv: list[str] | None = None) -> int:
         from tools.general_test.pipeline.visualize_stream import load_stems, render_stream_video
 
         # the per-camera depth_pose folders are named after the input folders
-        depth_dirs = [os.path.join(save_dir, os.path.basename(d))
+        # (Path(d).name, not os.path.basename: the latter yields "" for an
+        # --input-dirs entry with a trailing slash, collapsing every camera
+        # onto save_dir itself)
+        depth_dirs = [os.path.join(save_dir, Path(d).name)
                       for d in args.input_dirs]
         frame_indexes = load_stems(depth_dirs)
         w, h = (int(x) for x in args.video_size.lower().split("x"))
