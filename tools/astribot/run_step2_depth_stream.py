@@ -3,15 +3,17 @@ LeRobotDataset copy (nothing extracted to disk).
 
 Streams each sub-task segment of the selected episodes through a chunked
 streaming backend — frames are decoded from the dataset one chunk at a time
-— and saves per-frame depth/pose outputs under
-<out-dir>/depth_pose/<episode>/subtask_XX/ (visualize_step2_depth_pose.py
-renders them). The online counterpart of run_depth_stream.py:
+— and saves the per-camera depth/pose containers under
+<out-dir>/ep{ep:03d}/subtask_{k:02d}/depth_pose/<camera>/ (one depth.lz4 +
+poses.npz per camera, see utils.depth_pose_io). --out-dir defaults to
+<data-root>/episodes; visualize_step2_depth_pose.py renders the outputs.
+The online counterpart of run_depth_stream.py:
 
     episode videos (dataset, sub-task segments)
                │
                ▼  chunked inference + SIM3 alignment (backend)
     ┌──────────────────────────────┐
-    │  depth + pose per frame npz  │
+    │  depth.lz4 + poses.npz / cam │
     └──────────────────────────────┘
 
 Backends: da3 / vggt_omega for RGB-only cameras; a2f for cameras with a
@@ -59,6 +61,8 @@ from depth_models.streaming.vggt_omg_streaming import VGGT_OMG_Streaming
 from tools.astribot.extract_frames import DataExtract
 from tools.general_test.module.infer_waft import _compute_motion_mask_gray
 from tools.general_test.pipeline.run_depth_stream import _report_run_stats
+from utils import astribot_paths as ap
+from utils.depth_pose_io import DepthPoseReader
 from utils.depth_utils import depth_frame_to_uint16_mm, is_raw_depth_feature
 from utils.visualize.visualize_mask import to_pil
 
@@ -92,8 +96,9 @@ def parse_args(argv: list[str] | None = None):
     parser.add_argument("--max-episodes", "-x", type=int, default=None,
                         help="cap the number of processed episodes")
     parser.add_argument("--out-dir", "-o", default=None,
-                        help="output root (default: <data-root>/eps_data); per-sub-task "
-                             "results land under <out-dir>/depth_pose/<episode>/subtask_XX/")
+                        help="episodes root (default: <data-root>/episodes); per-sub-task "
+                             "results land under "
+                             "<out-dir>/ep{ep:03d}/subtask_{k:02d}/depth_pose/<camera>/")
     parser.add_argument("--backend", choices=("vggt_omega", "da3", "a2f"),
                         default="vggt_omega",
                         help="streaming backend: RGB-only cameras run da3 or "
@@ -350,12 +355,12 @@ class SubtaskStreamExtract(DataExtract):
         args.mode = "videos"  # DataExtract needs one of its modes; only the
                              # output-dir/camera/episode machinery is reused
         super().__init__(args)
-        # self.out_dir stays DataExtract's extraction root (<data-root>/eps_data)
-        # — inherited lookups such as the detect_subtask subtask_splits.json
-        # (under <out>/subtask/) resolve against it — while the per-sub-task
-        # streaming results go one level down, under <out>/depth_pose/
-        self.depth_pose_dir = os.path.join(self.out_dir, "depth_pose")
-        os.makedirs(self.depth_pose_dir, exist_ok=True)
+        # DataExtract already resolved the episodes root (<data-root>/episodes,
+        # or --out-dir) into self.out_dir; reuse that inherited root rather
+        # than deriving it a second time.  The per-sub-task streaming results
+        # go under <root>/ep{ep:03d}/subtask_{k:02d}/depth_pose/<camera>/
+        self.episodes_root = self.out_dir
+        os.makedirs(self.episodes_root, exist_ok=True)
         self.waft_model = None
         self.stream = None
         # per-camera raw-depth feature keys (None for RGB-only cameras),
@@ -399,22 +404,25 @@ class SubtaskStreamExtract(DataExtract):
         if self.stream is None:
             config = load_config(self.args.config)
             input_dirs = [self._camera_subdir(k) for k in self.cam_keys.values()]
-            # each backend loads its shipped default .pt2 artifacts and
-            # auto-detects the device — see the backend constructors
+            # Each backend loads its shipped default .pt2 artifacts and
+            # auto-detects the device — see the backend constructors.  The
+            # save_dir below is only the constructor's placeholder: the
+            # per-segment depth_pose dir is set by OnlineStreaming.prepare()
+            # before every run() (run() writes into self.output_dir).
             if self.args.backend == "vggt_omega":
                 self.stream = OnlineVGGTStreaming(
-                    input_dirs=input_dirs, save_dir=self.depth_pose_dir,
+                    input_dirs=input_dirs, save_dir=self.episodes_root,
                     config=config)
             elif self.args.backend == "da3":
                 self.stream = OnlineDA3Streaming(
-                    input_dirs=input_dirs, save_dir=self.depth_pose_dir,
+                    input_dirs=input_dirs, save_dir=self.episodes_root,
                     config=config)
             else:
                 # virtual depth folders: the raw depth is decoded from the
                 # dataset per chunk (OnlineStreaming._load_depth_paths), the
                 # folders only satisfy the a2f input contract
                 self.stream = OnlineA2FStreaming(
-                    input_dirs=input_dirs, save_dir=self.depth_pose_dir,
+                    input_dirs=input_dirs, save_dir=self.episodes_root,
                     config=config,
                     depth_dirs=[f"depth_{d}" for d in input_dirs],
                     depth_scale=self.args.depth_scale,
@@ -447,7 +455,7 @@ class SubtaskStreamExtract(DataExtract):
             print(f"  episode {ep}: task {tid} ({self._task_description(tid)})")
         for ep_idx in tqdm(self.ep_idxes, desc="episodes"):
             self._process_episode(ep_idx)
-        print(f"\ndone: {len(self.ep_idxes)} episode(s) -> {self.depth_pose_dir}")
+        print(f"\ndone: {len(self.ep_idxes)} episode(s) -> {self.episodes_root}")
 
     def _process_episode(self, ep_idx: int) -> None:
         self.ep_idx = ep_idx
@@ -464,10 +472,12 @@ class SubtaskStreamExtract(DataExtract):
             self._process_segment(k, lo, hi)
 
     def _process_segment(self, k: int, lo: int, hi: int) -> None:
-        seg_dir = os.path.join(self.depth_pose_dir, f"ep{self.ep_idx:06d}",
-                               f"subtask_{k:02d}")
-        if self.args.skip_done and any(p for p in Path(seg_dir).glob("depth_*")
-                                       if any(p.iterdir())):
+        seg_dir = str(ap.task_dir(self.episodes_root, self.ep_idx, k,
+                                  ap.DEPTH_POSE))
+        cameras = [self._camera_subdir(key) for key in self.cam_keys.values()]
+        if self.args.skip_done and cameras and all(
+                DepthPoseReader.is_complete(Path(seg_dir) / cam)
+                for cam in cameras):
             print(f"  [subtask {k:02d}] skip: output exists in {seg_dir}")
             return
         steps = list(range(lo, hi, self.args.stride))
@@ -488,8 +498,8 @@ class SubtaskStreamExtract(DataExtract):
             torch.cuda.reset_peak_memory_stats()
         t0 = time.perf_counter()
         stats = stream.run()
-        # same timing/memory summary + timings.json schema as run_depth_stream.py
-        _report_run_stats(self.args.backend, seg_dir, stats)
+        # same timing/memory summary as run_depth_stream.py
+        _report_run_stats(self.args.backend, stats)
         print(f"  [subtask {k:02d}] done in {time.perf_counter() - t0:.1f}s")
 
 
