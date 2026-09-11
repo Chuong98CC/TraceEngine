@@ -1799,8 +1799,12 @@ Replace the `sampling_points_root(...) / "<sub>"` compositions with
 - `run_object_init_points.py`: `--output-root` default →
   `ap.episodes_root(data_root)`; the per-sub-task dirs become
   `ap.init_points_dir(root, ep, k, cam)`.
-- `run_step3_motion_masks.py`: `--out-dir` default → `ap.episodes_root(data_root)`
-  (its own outputs move to `…/<subtask>/sampling_points/`).
+- `run_step3_motion_masks.py`: `--out-dir` default → `ap.episodes_root(data_root)`.
+  Its artefacts are not a tree of their own: it writes into the **same
+  per-(sub-task, camera) `init_points` directory** Step 3b owns
+  (`self.init_dir = Path(self.out_dir) / "init_points"` today), so that
+  becomes `ap.init_points_dir(root, ep, k, cam)` and `--detections-dir`
+  becomes `ap.detections_dir(root, ep, k)`.
 
 - [ ] **Step 3: Verify**
 
