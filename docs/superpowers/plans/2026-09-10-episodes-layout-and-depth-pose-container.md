@@ -1311,8 +1311,10 @@ def test_finalize_applies_scale_and_writes_poses(tmp_path):
         with DepthContainerWriter(Path(d) / DEPTH_FILE, H, W) as writer:
             writer.append(np.full((H, W), 0.5, np.float32))
 
-    # one step, belonging to chunk 1, two cameras; chunk 1 -> chunk 0 scale 2
-    frame_meta = [(100, 1, np.eye(3, dtype=np.float32) * 2)]
+    # one step, belonging to chunk 1, two cameras; chunk 1 -> chunk 0 scale 2.
+    # frame_meta's intrinsics are stacked per view ((len(slots), 3, 3)), which
+    # is what run() appends and what _finalize_depth_pose indexes by view.
+    frame_meta = [(100, 1, np.tile(np.eye(3, dtype=np.float32) * 2, (2, 1, 1)))]
     all_extrinsics = [np.tile(np.eye(3, 4, dtype=np.float32), (2, 1, 1))]
     sim3_cum = [(2.0, np.eye(3, dtype=np.float32), np.zeros(3, np.float32))]
 
@@ -1408,7 +1410,15 @@ In `run()`, replace the output-dir setup (`:501-507`) with:
         writers: dict[int, DepthContainerWriter] = {}
         for v in slots:
             os.makedirs(out_dirs[v], exist_ok=True)
+            # poses.npz is the completion marker: a leftover one from an
+            # earlier run would make a segment that dies in this pass look
+            # finished (its container is truncated by the writer below).
+            stale = os.path.join(out_dirs[v], POSES_FILE)
+            if os.path.exists(stale):
+                os.remove(stale)
 ```
+
+(import `POSES_FILE` alongside the other names from `utils.depth_pose_io`.)
 
 Replace the per-step save block (`:541-554`) with:
 
