@@ -101,7 +101,8 @@ from flow_models.tapip3d.utils._grid_utils import get_grid_queries
 from tools.astribot.extract_frames import DataExtract
 from utils.depth_utils import load_depth_lz4
 from utils.file_io.image_io import to_image_tensor
-from utils.keyframe_utils import load_subtask_meta, sampling_points_root, span_stems
+from utils import astribot_paths as ap
+from utils.keyframe_utils import load_subtask_meta, span_stems
 from utils.streaming_utils import (
     compute_global_depth_roi,
     load_npz_batch,
@@ -450,11 +451,11 @@ class SubtaskTraceExtract(DataExtract):
             # sub-task are the ones with Step-3 init-points subtrees
             args.camera_idxes = list(range(len(keys)))
         super().__init__(args)
-        # Step-3 inputs live under the Step-3 sampling_points root (see
-        # sampling_points_root) — fixed, not relocated by --out-dir, which
-        # only locates the Step-2 depth_pose read and the traces write.
-        self.det_root = str(sampling_points_root(args.data_root) / "detections")
-        self.init_root = str(sampling_points_root(args.data_root) / "init_points")
+        # Step-3 inputs live under the Step-3 sampling root of the episodes
+        # tree (utils.astribot_paths) — fixed, not relocated by --out-dir,
+        # which only locates the Step-2 depth_pose read and the traces write.
+        self.det_root = str(ap.episodes_root(args.data_root) / "detections")
+        self.init_root = str(ap.episodes_root(args.data_root) / "init_points")
         self.depth_pose_root = os.path.join(self.out_dir, "depth_pose")
         self.trace_root = os.path.join(self.out_dir, "traces")
         #: {subtask_index: annotation row}; role resolution degrades to

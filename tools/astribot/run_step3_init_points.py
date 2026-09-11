@@ -34,23 +34,30 @@ The pipeline of one episode:
 
 Steps 3a/3b run **per camera**: every --camera-idxes entry whose key-frames
 are on disk gets its own detection pass and its own init-points subtree,
-saved camera-keyed like Step 2's depth_pose — detections/ep{ep}/<camera>.json
-and init_points/ep{ep}/subtask_XX/<camera>/<prompt_slug>/ (the camera subdir
-name, e.g. cam_head) — so multi-camera runs never overwrite each other. The
-driver's output root defaults to <data-root>/eps_data/sampling_points (the
-sampling workspace: key_frames/ from Step 1b, detections/ from 3a,
-init_points/ from 3b; --out-dir to change). Step 1a (detect_subtask) and
-the Case-2 Step-1 extract_frames.sh script always write their splits +
-gripper plot to <data-root>/eps_data/subtask — that location is shared
-across steps (Step 2 reads the splits from there) — and Step 2's
-depth_pose/ stays under <data-root>/eps_data.
+saved camera-keyed like Step 2's depth_pose — one detections JSON per
+sub-task and camera, and one init_points/<camera>/<prompt_slug>/ subtree
+per sub-task and camera (the camera subdir name, e.g. cam_head):
+
+    <out-dir>/ep{ep:03d}/subtask_{k:02d}/sampling_points/
+        key_frames/<camera>/      (Step 1b)
+        detections/<camera>.json  (Step 3a)
+        init_points/<camera>/<prompt_slug>/  (Step 3b)
+
+so multi-camera runs never overwrite each other. The driver's output root
+defaults to the episodes root <data-root>/episodes (--out-dir to change);
+Step 1a (detect_subtask) writes the splits + gripper plot of an episode
+into that same root (ep{ep:03d}/subtask.json + split_graph.png), and Step
+2's depth_pose/ and Step 4's traces/ live in it too.
 
 Object prompts are per sub-task: [object, manipulator] of the sub-task's row
 in the dataset's meta/subtasks.csv — there is no prompt flag. Step 1
-(key_frames) labels every saved segment with its canonical ground-truth
-sub-task (subtask_labels.json, matched by execution order), Step 3a reads
-the labels to fetch the row of the segment's own sub-task and records the
-prompts in its JSON, Step 3b re-reads them from there. With --with-optical-flow-mask the driver additionally runs **Step 3a'**
+(detect_subtask) resolves the canonical ground-truth label of every segment
+of the episode's subtask.json by execution order, Step 3a indexes that
+labels list by segment ordinal to fetch the row of the segment's own
+sub-task and records the prompts in its JSON, Step 3b re-reads them from
+there.
+
+With --with-optical-flow-mask the driver additionally runs **Step 3a'**
 (run_step3_motion_masks.py — WAFTv2 motion masks of the sub-task starts,
 computed online over the dataset frames between Step 3a and Step 3b) and
 forwards the flag to Step 3b, which unions each sub-task's motion mask
@@ -58,8 +65,8 @@ into the **manipulator** prompt's row-0 SAM3 mask (SAM ∪ optical flow,
 see run_step3_motion_masks.py) — the rescue for an arm the RexOmni
 detection missed. Step 3a' saves a mask only when a flow pair in the
 window is significant, as motion_rle.json (COCO RLE) in the
-(sub-task, camera) folder of the init-points tree — next to the prompt
-subfolders of the init points it shaped; with --visualize-motion it also
+(sub-task, camera) init_points folder of the episodes tree — next to the
+prompt subfolders of the init points it shaped; with --visualize-motion it also
 writes that pair's flow.png beside it, and Step 3b renders the resulting
 SAM ∪ motion union as union_mask.png inside the manipulator prompt's
 folder.
@@ -92,8 +99,8 @@ Examples
     # Re-run only 3b (tuned params), reusing what is on disk: --skip-3a
     # implies --skip-extract (the reused detections were made from the
     # key-frames on disk, so extraction is skipped too). The reused
-    # key-frames must carry their Step-1 subtask_labels.json and the
-    # detections JSON must exist (missing -> error)
+    # episodes must carry their Step-1 subtask.json and the detections
+    # JSONs must exist (missing -> error)
     python tools/astribot/run_step3_init_points.py
         --repo-id Kronze157/astri_making_coffee_vlva
         --data-root /data/astri_making_coffee_v1 --episode-idxes 0
@@ -107,12 +114,11 @@ import subprocess
 import sys
 from pathlib import Path
 
+from utils import astribot_paths as ap
 from utils.keyframe_utils import (
     camera_subdirs,
     discover_episodes,
-    sampling_points_root,
     select_episodes,
-    subtask_labels_path,
 )
 
 DEFAULT_MAX_KEYFRAMES = 8
@@ -151,29 +157,30 @@ def parse_args(argv: list[str] | None = None):
                              "also recorded in the Step-3a detections JSON)")
     parser.add_argument("--data-root", "-d", required=True,
                         help="root of the local dataset copy; the default "
-                             "key-frames root and output root derive from it")
+                             "episodes root derives from it")
     parser.add_argument("--camera-idxes", "-c", nargs="+", type=int,
                         default=[0],
                         help="dataset cameras of the whole pipeline: Step 1 "
                              "extracts their key-frames, and Steps 3a/3b run "
                              "on each of them whose key-frames are on disk — "
-                             "per-camera outputs under "
-                             "detections/ep{ep}/<camera>.json and "
-                             "init_points/ep{ep}/subtask_XX/<camera>/ "
-                             "(default: %(default)s — the head camera)")
+                             "per-camera outputs under the sub-task's own "
+                             "sampling_points/ folder "
+                             "(…/subtask_{k:02d}/sampling_points/"
+                             "detections/<camera>.json and "
+                             "init_points/<camera>/; default: %(default)s — "
+                             "the head camera)")
     parser.add_argument("--episode-idxes", "-e", nargs="*", type=int, default=None,
                         help="only process these episode indices (default: all "
                              "episodes with key-frames on disk)")
     parser.add_argument("--max-episodes", "-x", type=int, default=None,
                         help="cap the number of processed episodes")
     parser.add_argument("--out-dir", "-o", default=None,
-                        help="output root (default: <data-root>/eps_data/"
-                             "sampling_points); Step 1's key-frames land "
-                             "under <out-dir>/key_frames/ (its detect_subtask "
-                             "splits always stay at "
-                             "<data-root>/eps_data/subtask), Step 3a under "
-                             "<out-dir>/detections/, Step 3b under "
-                             "<out-dir>/init_points/")
+                        help="episodes root (default: <data-root>/episodes); "
+                             "Step 1's key-frames land under "
+                             "<out-dir>/ep{ep:03d}/subtask_{k:02d}/"
+                             "sampling_points/key_frames/<camera>/, Step 3a "
+                             "the detections beside them, Step 3b the init "
+                             "points under the same sampling_points/")
     parser.add_argument("--max-keyframes", type=int, default=DEFAULT_MAX_KEYFRAMES,
                         help="cap the key-frames per sub-task (evenly spaced); "
                              "None disables the cap (default: %(default)s)")
@@ -252,20 +259,23 @@ def parse_args(argv: list[str] | None = None):
                              "(default: off)")
     parser.add_argument("--skip-extract", action="store_true",
                         help="do not run Step 1: reuse the key-frames already "
-                             "on disk under the output root's key_frames/ "
-                             "(default: <data-root>/eps_data/sampling_points/"
-                             "key_frames); every selected episode must carry "
-                             "its Step-1 subtask_labels.json (missing -> "
-                             "error; implied by --skip-3a)")
+                             "on disk under the output root "
+                             "(<out-dir>/ep{ep:03d}/subtask_{k:02d}/"
+                             "sampling_points/key_frames/<camera>/); every "
+                             "selected episode must carry its Step-1 "
+                             "subtask.json (missing -> error; implied by "
+                             "--skip-3a)")
     parser.add_argument("--skip-done", action="store_true",
-                        help="skip episodes whose Step-3a JSON exists, and "
-                             "sub-tasks whose Step-3b output already exists")
+                        help="skip (episode, sub-task, camera) triples whose "
+                             "Step-3a JSON exists, and sub-tasks whose "
+                             "Step-3b output already exists")
     parser.add_argument("--no-viz", action="store_true",
                         help="skip the Step-3b viz.png rendering")
     parser.add_argument("--skip-3a", action="store_true",
                         help="do not run Step 3a: reuse the detections JSON "
                              "of a previous run — the JSON must exist for "
-                             "every selected episode (missing -> error); "
+                             "every selected (episode, camera) with "
+                             "key-frames on disk (missing -> error); "
                              "implies --skip-extract (the detections were "
                              "made from the key-frames on disk)")
     parser.add_argument("--refine-detections", action="store_true",
@@ -284,65 +294,50 @@ def parse_args(argv: list[str] | None = None):
 
 
 def _out_root(args) -> Path:
-    """The output root the whole pipeline writes: --out-dir, else the
-    default Step-3 output root (<data-root>/eps_data/sampling_points)."""
-    if args.out_dir:
-        return Path(args.out_dir)
-    return sampling_points_root(args.data_root)
-
-
-def _keyframes_root(args) -> Path:
-    """The key-frames root the sub-steps read and Step 1b writes: the
-    key_frames/ folder of the output root (default: <data-root>/eps_data/
-    sampling_points/key_frames)."""
-    return _out_root(args) / "key_frames"
-
-
-def _detections_root(args) -> Path:
-    """Step-3a detections root the sub-steps read/write: the detections/
-    folder of the output root (default: <data-root>/eps_data/sampling_points/
-    detections)."""
-    return _out_root(args) / "detections"
+    """The episodes root the whole pipeline reads and writes: --out-dir,
+    else the default <data-root>/episodes (see utils.astribot_paths)."""
+    return ap.episodes_root(args.data_root, args.out_dir)
 
 
 def _episodes_missing_labels(args) -> list[int]:
-    """Selected episodes whose saved key-frames lack the Step-1
-    subtask_labels.json. Under --skip-extract nothing re-extracts, and Step
-    3a prompts every segment by its ground-truth label from that file, so
-    every selected episode must carry it. [] when all do."""
-    root = _keyframes_root(args)
+    """Selected episodes whose Step-1 subtask.json is missing. Under
+    --skip-extract nothing re-extracts, and Step 3a prompts every segment by
+    its ground-truth label from that file, so every selected episode must
+    carry it. [] when all do."""
+    root = _out_root(args)
     try:
         eps = select_episodes(root, args.episode_idxes, args.max_episodes)
     except FileNotFoundError as e:
         sys.exit(f"--skip-extract: {e} — drop --skip-extract to extract "
                  f"the key-frames of the requested episodes")
-    return [e for e in eps
-            if not subtask_labels_path(root, e).is_file()]
+    return [e for e in eps if not ap.subtask_json(root, e).is_file()]
 
 
 def _missing_detections(args) -> dict[int, list[str]]:
     """{episode: [camera, ...]} of the selected (episode, camera) pairs
-    without their Step-3a detections JSON (ep{ep:06d}/<camera>.json under
-    _detections_root). With --skip-3a the sub-steps can only reuse existing
-    detections, so every selected camera with key-frames on disk must have
-    run Step 3a before — the same (episode, camera) grid Step 3a would
-    detect (--camera-idxes resolved to key-frame subdir names; the cameras
-    on disk when the dataset metadata cannot be opened). {} when every
-    expected JSON exists, or when there are no key-frames to judge (3b then
-    reports the missing key-frames itself)."""
-    root = _keyframes_root(args)
+    without a single Step-3a detections JSON
+    (…/subtask_{k:02d}/sampling_points/detections/<camera>.json). With
+    --skip-3a the sub-steps can only reuse existing detections, so every
+    selected camera with key-frames on disk must have run Step 3a before —
+    the same (episode, camera) grid Step 3a would detect (--camera-idxes
+    resolved to key-frame subdir names; the cameras on disk when the dataset
+    metadata cannot be opened). {} when every expected JSON exists, or when
+    there are no key-frames to judge (3b then reports the missing key-frames
+    itself)."""
+    root = _out_root(args)
     if not root.is_dir():
         return {}
     eps = select_episodes(root, args.episode_idxes, args.max_episodes)
-    det = _detections_root(args)
     want = _dataset_camera_subdirs(args)  # None -> metadata unavailable
     missing: dict[int, list[str]] = {}
     for e in eps:
         subdirs = camera_subdirs(root, e)
         cams = [c for c in (want if want is not None else subdirs)
                 if c in subdirs and "depth" not in c]
+        detections = [ap.detections_dir(root, e, k)
+                      for k in ap.discover_subtasks(root, e)]
         got = {c for c in cams
-               if (det / f"ep{e:06d}" / f"{c}.json").is_file()}
+               if any((d / f"{c}.json").is_file() for d in detections)}
         if miss := [c for c in cams if c not in got]:
             missing[e] = miss
     return missing
@@ -393,17 +388,19 @@ def _build_extract_cmd(args, repo_root: Path, mode: str) -> list[str]:
         cmd += ["--max-episodes", str(args.max_episodes)]
     if mode == "key_frames":
         cmd += ["--camera-idxes", *(str(c) for c in args.camera_idxes)]
-        if args.use_inferred_splits:
-            cmd += ["--use-inferred-splits"]
-    # detect_subtask runs with the default <data-root>/eps_data out-dir: the
-    # shared splits must stay at <data-root>/eps_data/subtask (Step 2 reads
-    # them from there), never under the Step-3 output root. The key_frames
-    # mode writes under the output root and loads the splits back from the
-    # canonical location (extract_frames falls back to
-    # <data-root>/eps_data/subtask when its out-dir has no detect_subtask
-    # outputs of its own).
-    if mode != "detect_subtask":
-        cmd += ["--out-dir", str(_out_root(args))]
+    # --use-inferred-splits must reach BOTH runs. detect_subtask resolves
+    # the per-segment labels over one segmentation — the ground-truth splits
+    # unless the flag asks for the inferred ones — and key_frames lays the
+    # subtask_XX directories out over the reading modes' segmentation; if
+    # only one run gets the flag, the two disagree and every label lands on
+    # another sub-task's directory (Step 3a would prompt segment k with the
+    # wrong object/manipulator). One invocation, one segmentation.
+    if args.use_inferred_splits:
+        cmd += ["--use-inferred-splits"]
+    # every mode works in the one episodes root the whole pipeline shares:
+    # detect_subtask writes the episode's subtask.json there (Step 3a reads
+    # the labels from it), the reading modes take the splits from it
+    cmd += ["--out-dir", str(_out_root(args))]
     return cmd
 
 
@@ -411,8 +408,7 @@ def _build_3a_cmd(args, repo_root: Path) -> list[str]:
     """Step 3a command: RexOmni detections under .venv-rexomni."""
     cmd = [_rexomni_python(args, repo_root),
            str(repo_root / _STEP_3A),
-           "--data-root", args.data_root,
-           "--keyframes-root", str(_keyframes_root(args))]
+           "--data-root", args.data_root]
     if args.repo_id:
         cmd += ["--repo-id", args.repo_id]
     cam_keys = _dataset_camera_subdirs(args)
@@ -435,9 +431,9 @@ def _build_motion_masks_cmd(args, repo_root: Path) -> list[str]:
     """Step 3a' command: WAFT motion masks of the sub-task starts (main
     env, frames decoded online from the dataset). Runs after Step 3a
     against the same (episode, camera) grid — every camera of the
-    --camera-idxes whose detections JSON exists — and writes each
-    significant mask into the (sub-task, camera) folder of the
-    init-points tree Step 3b reads under --with-optical-flow-mask."""
+    --camera-idxes with a Step-3a detections JSON — and writes each
+    significant mask into the (sub-task, camera) init_points folder Step 3b
+    reads under --with-optical-flow-mask."""
     cmd = [sys.executable,
            str(repo_root / _STEP_3AP),
            "--repo-id", args.repo_id,
@@ -462,8 +458,7 @@ def _build_3b_cmd(args, repo_root: Path) -> list[str]:
     """Step 3b command: SAM3 masks + RoMAv2 keypoints in the main env."""
     cmd = [sys.executable,
            str(repo_root / _STEP_3B),
-           "--data-root", args.data_root,
-           "--keyframes-root", str(_keyframes_root(args))]
+           "--data-root", args.data_root]
     cam_keys = _dataset_camera_subdirs(args)
     if cam_keys:
         cmd += ["--camera-keys", *cam_keys]
@@ -521,27 +516,26 @@ def main() -> None:
              "Step 1a — sub-task split detection (no videos)")
         _run(_build_extract_cmd(args, repo_root, "key_frames"),
              "Step 1b — key-frames saved to disk")
-        root = _keyframes_root(args)
+        root = _out_root(args)
         print(f"key-frames on disk: {len(discover_episodes(root))} episode(s) "
               f"under {root}", flush=True)
-    elif not (root := _keyframes_root(args)).is_dir():
-        sys.exit(f"--skip-extract: no key-frames under {root} — drop "
+    elif not (root := _out_root(args)).is_dir():
+        sys.exit(f"--skip-extract: no episodes under {root} — drop "
                  f"--skip-extract (or --skip-3a, which implies it) to run "
                  f"Step 1 (detect_subtask + key_frames)")
     elif missing := _episodes_missing_labels(args):
-        sys.exit(f"--skip-extract: subtask_labels.json missing for "
-                 f"episode(s) {missing} under {_keyframes_root(args)} (an "
-                 f"extraction predating the labels) — drop --skip-extract "
-                 f"(or --skip-3a, which implies it) to re-extract the "
-                 f"key-frames")
+        sys.exit(f"--skip-extract: subtask.json missing for episode(s) "
+                 f"{missing} under {_out_root(args)} — drop --skip-extract "
+                 f"(or --skip-3a, which implies it) to run Step 1 "
+                 f"(detect_subtask writes it)")
     if not args.skip_3a:
         _run(_build_3a_cmd(args, repo_root),
              "Step 3a — RexOmni detections (saved key-frames)")
     elif missing := _missing_detections(args):
-        shown = ", ".join(f"ep{e:06d}: {sorted(cams)}"
+        shown = ", ".join(f"ep{e}: {sorted(cams)}"
                           for e, cams in sorted(missing.items()))
         sys.exit(f"--skip-3a: Step-3a detections missing for {shown} under "
-                 f"{_detections_root(args)} — run Step 3a first (or drop "
+                 f"{_out_root(args)} — run Step 3a first (or drop "
                  f"--skip-3a to run it now)")
     if args.visualize_motion and not args.with_optical_flow_mask:
         sys.exit("--visualize-motion requires --with-optical-flow-mask "

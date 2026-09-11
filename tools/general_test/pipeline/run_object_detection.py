@@ -2,20 +2,27 @@
 
 Detection stage of pipeline Step 3: for every camera of every selected
 episode, runs the open-vocabulary detector on the key-frames that Step 1
-saved to disk, and writes the hard-filtered predictions to **one JSON per
-episode and camera** — the input of Step 3b (run_object_init_points.py):
+saved to disk, and writes the predictions to **one JSON per episode,
+sub-task and camera** — the input of Step 3b (run_object_init_points.py):
 
     key-frames on disk (sub-task x camera)
                │
                ▼  RexOmni (open-vocabulary detection)
     ┌──────────────────────────────┐
-    │  detections JSON per ep+cam  │
+    │  detections JSON per sub-task│
     └──────────────────────────────┘
 
-The JSONs land under <out-dir>/detections/ep{ep:06d}/<camera>.json — every
---camera-keys entry with key-frames on disk is detected (default: every RGB
-camera saved), so a multi-camera run never overwrites itself and a later
-run for one more camera only writes that camera's JSON.
+Every JSON lands in the episodes tree (utils.astribot_paths), beside the
+key-frames of its own sub-task:
+
+    <out-dir>/ep{ep:03d}/subtask_{k:02d}/sampling_points/detections/<camera>.json
+
+Every --camera-keys entry with key-frames on disk is detected (default:
+every RGB camera saved), so a multi-camera run never overwrites itself and a
+later run for one more camera only writes that camera's JSONs. Folder mode
+(--keyframes-dir, one sub-task of one camera) writes the same payload as one
+flat ep{episode_idx:06d}.json next to the folder it was given (there the
+folder is the sub-task's camera).
 
 The JSON holds the raw predictions as RexOmni returns them; the optional
 ``--refine-detections`` flag turns on per-category hard filters (see
@@ -32,15 +39,14 @@ detections. Each prompt is recorded with its role — the column it was read
 from — under ``prompt_roles`` (aligned with ``prompts``): Step 3b uses it
 to sample object keypoints only between the sub-task's gripper close/open
 key-frames. In episode mode the segment's row is found through its canonical
-label in subtask_labels.json — Step 1 (key_frames) matches the segments to
-the ground-truth sub-tasks by execution order, and the canonical labels need
-not equal the segment ordinals, so every key-frame extraction must carry the
-labels file (missing -> error). Folder mode (--keyframes-dir, one sub-task
-of one camera) takes --text-prompts instead and records no roles. RexOmni
-needs its own environment (Python
-3.10 / torch 2.7; checkpoint IDEA-Research/Rex-Omni), so run this script
-with .venv-rexomni's python — the sys.path bootstrap below exposes the repo
-to it.
+label in the episode's Step-1 subtask.json — Step 1's detect_subtask mode
+matches the segments to the ground-truth sub-tasks by execution order, and
+the canonical labels need not equal the segment ordinals, so every episode
+must carry that file (missing -> error). Folder mode (--keyframes-dir, one
+sub-task of one camera) takes --text-prompts instead and records no roles.
+RexOmni needs its own environment (Python 3.10 / torch 2.7; checkpoint
+IDEA-Research/Rex-Omni), so run this script with .venv-rexomni's python —
+the sys.path bootstrap below exposes the repo to it.
 
 Examples
 --------
@@ -75,6 +81,7 @@ for _p in (_REPO_ROOT, _REPO_ROOT / "src"):
 from PIL import Image
 from tqdm import tqdm
 
+from utils import astribot_paths as ap
 from utils.keyframe_utils import (
     camera_subdirs,
     cap_keyframes,
@@ -82,12 +89,9 @@ from utils.keyframe_utils import (
     discover_folder_frames,
     discover_subtask_frames,
     keyframe_path,
-    keyframes_root,
     load_subtask_labels,
     load_subtask_meta,
-    sampling_points_root,
     select_episodes,
-    subtask_labels_path,
     subtask_prompt_roles,
 )
 
@@ -221,23 +225,19 @@ def parse_args(argv: list[str] | None = None):
                              "(informational)")
     parser.add_argument("--data-root", "-d", default=None,
                         help="root of the local dataset copy; the default "
-                             "key-frames root and output root derive from it "
-                             "(not used with --keyframes-dir)")
+                             "episodes root derives from it (not used with "
+                             "--keyframes-dir)")
     parser.add_argument("--keyframes-dir", default=None,
                         help="run on a single folder of key-frame images "
                              "(one sub-task of one camera) instead of the "
                              "episode layout; exclusive with --data-root / "
-                             "--keyframes-root")
+                             "--out-dir")
     parser.add_argument("--episode-idx", type=int, default=0,
                         help="episode index labelling the outputs (folder "
                              "mode only; default: %(default)s)")
     parser.add_argument("--camera-key", default=None,
                         help="camera key recorded in the JSON (folder mode "
                              "only; default: the folder name)")
-    parser.add_argument("--keyframes-root", default=None,
-                        help="root of the key-frames saved by the Step-3 "
-                             "driver (default: <data-root>/eps_data/"
-                             "sampling_points/key_frames)")
     parser.add_argument("--camera-keys", nargs="+", default=None,
                         help="camera subdir names (e.g. cam_head) to detect, "
                              "in order; entries without key-frames on disk "
@@ -249,9 +249,13 @@ def parse_args(argv: list[str] | None = None):
     parser.add_argument("--max-episodes", "-x", type=int, default=None,
                         help="cap the number of processed episodes")
     parser.add_argument("--out-dir", "-o", default=None,
-                        help="output root (default: <data-root>/eps_data/"
-                             "sampling_points); detections land under "
-                             "<out-dir>/detections/ep{ep}/<camera>.json")
+                        help="episodes root (default: <data-root>/episodes); "
+                             "detections land per sub-task under "
+                             "<out-dir>/ep{ep:03d}/subtask_{k:02d}/"
+                             "sampling_points/detections/<camera>.json "
+                             "(folder mode: the output root next to the "
+                             "key-frame folder it was given; default: "
+                             "<keyframes-dir>/../step3_output)")
     parser.add_argument("--text-prompts", nargs="+", default=DEFAULT_PROMPTS,
                         help="object prompts to detect (folder mode only — "
                              "the single sub-task has no dataset "
@@ -269,7 +273,8 @@ def parse_args(argv: list[str] | None = None):
                              "prompt keeps only the box on its side (off by "
                              "default — the JSON then holds every raw box)")
     parser.add_argument("--skip-done", action="store_true",
-                        help="skip episodes whose detections JSON already exists")
+                        help="skip (episode, sub-task, camera) triples whose "
+                             "detections JSON already exists")
     return parser.parse_args(argv)
 
 
@@ -302,11 +307,14 @@ class SubtaskDetectExtract:
             if not args.data_root:
                 sys.exit("--data-root is required (or --keyframes-dir to "
                          "run on a single folder of key-frame images)")
-            self.root = Path(args.keyframes_root) if args.keyframes_root \
-                else keyframes_root(args.data_root)
+            # episode mode reads the key-frames and writes the detections in
+            # the very same tree: every episode's sub-tasks own their
+            # sampling_points/detections folder (see utils.astribot_paths)
+            self.root = Path(args.out_dir) if args.out_dir \
+                else ap.episodes_root(args.data_root)
             if not self.root.is_dir():
                 raise FileNotFoundError(
-                    f"key-frames root {self.root} missing: run Step 1 first "
+                    f"episodes root {self.root} missing: run Step 1 first "
                     f"(python tools/astribot/extract_frames.py --mode detect_subtask "
                     f"then --mode key_frames --camera-idxes <camera>)")
             try:
@@ -317,13 +325,12 @@ class SubtaskDetectExtract:
                   f"{args.data_root}/meta/subtasks.csv")
             self.ep_idxes = select_episodes(self.root, args.episode_idxes,
                                             args.max_episodes)
-            self.out_dir = str(args.out_dir) if args.out_dir \
-                else str(sampling_points_root(args.data_root))
-            print(f"key-frames: {self.root}")
+            print(f"episodes root: {self.root}")
             print(f"episodes on disk: {len(discover_episodes(self.root))} -> "
                   f"{len(self.ep_idxes)} selected")
-        self.detections_dir = os.path.join(self.out_dir, "detections")
-        os.makedirs(self.detections_dir, exist_ok=True)
+        if self.folder_mode:
+            self.detections_dir = os.path.join(self.out_dir, "detections")
+            os.makedirs(self.detections_dir, exist_ok=True)
         self.model = None
 
     # --- model ------------------------------------------------------------------
@@ -374,24 +381,25 @@ class SubtaskDetectExtract:
         for ep in self.ep_idxes:
             print(f"  episode {ep}")
         missing = [e for e in self.ep_idxes
-                   if not subtask_labels_path(self.root, e).is_file()]
+                   if not ap.subtask_json(self.root, e).is_file()]
         if missing:
-            sys.exit(f"episode(s) {missing}: their key-frames carry no "
-                     f"subtask_labels.json under {self.root} (an extraction "
-                     f"predating the labels) — re-run extract_frames.py "
-                     f"--mode key_frames so every segment is prompted by "
+            sys.exit(f"episode(s) {missing}: no Step-1 subtask.json under "
+                     f"{self.root} (the merged splits + segment labels) — "
+                     f"re-run extract_frames.py --mode detect_subtask (then "
+                     f"--mode key_frames) so every segment is prompted by "
                      f"its ground-truth label")
         for ep_idx in tqdm(self.ep_idxes, desc="episodes"):
             self._process_episode(ep_idx)
-        print(f"\ndone: {len(self.ep_idxes)} episode(s) -> {self.detections_dir}")
+        print(f"\ndone: {len(self.ep_idxes)} episode(s) -> {self.root}")
 
     def _process_folder(self) -> None:
         """The folder of key-frame images = one sub-task (subtask 00) of a
-        synthetic episode labelled --episode-idx; same JSON schema as the
-        episode mode, plus the input folder for provenance."""
+        synthetic episode labelled --episode-idx; same per-sub-task payload
+        as the episode mode, written as one flat ep{ep}.json next to the
+        folder, plus the input folder for provenance."""
         ep_idx = self.args.episode_idx
         cam = self.args.camera_key or self.folder.name
-        out_path = self._detections_path(ep_idx, cam)
+        out_path = self._detections_path(ep_idx, 0, cam)
         if self.args.skip_done and out_path.is_file():
             print(f"episode {ep_idx}: skip, detections exist in {out_path}")
             return
@@ -403,35 +411,33 @@ class SubtaskDetectExtract:
         prompts = list(self.args.text_prompts)
         print(f"\nepisode {ep_idx} (folder {self.folder.name}, camera {cam}): "
               f"1 sub-task, {len(keys)} key-frames {keys}, prompts {prompts}")
-        subtasks = {
-            "0": {
-                "segment": [min(keys), max(keys) + 1],
-                "keyframes": keys,
-                # folder mode has no meta/subtasks.csv row: prompts carry
-                # no role, Step 3b samples them over all key-frames
-                "prompts": prompts,
-                "detections": self._detect_segment(cam, 0, keys, prompts),
-            }
-        }
         data = {
             "episode": int(ep_idx),
             "repo_id": self.args.repo_id,
             "camera_key": cam,
             "keyframes_dir": str(self.folder),
-            "subtasks": subtasks,
+            "subtask": 0,
+            "segment": [min(keys), max(keys) + 1],
+            "keyframes": keys,
+            # folder mode has no meta/subtasks.csv row: prompts carry
+            # no role, Step 3b samples them over all key-frames
+            "prompts": prompts,
+            "detections": self._detect_segment(cam, 0, keys, prompts),
         }
         out_path.parent.mkdir(parents=True, exist_ok=True)
         with open(out_path, "w") as f:
             json.dump(data, f, indent=2)
         print(f"  saved {out_path}")
 
-    def _detections_path(self, ep_idx: int, cam: str) -> Path:
-        """Step-3a detections JSON of one (episode, camera): folder mode
-        writes the flat ep{ep}.json (the folder is the camera); episode
-        mode nests per camera under detections/ep{ep:06d}/<camera>.json."""
+    def _detections_path(self, ep_idx: int, k: int, cam: str) -> Path:
+        """Step-3a detections JSON of one (episode, sub-task, camera):
+        episode mode writes it inside the sub-task's own sampling_points
+        folder (.../subtask_{k:02d}/sampling_points/detections/<camera>.json);
+        folder mode writes the flat ep{ep}.json next to the folder it was
+        given (the folder is the camera, and its sub-task is 0)."""
         if self.folder_mode:
             return Path(self.detections_dir) / f"ep{ep_idx:06d}.json"
-        return Path(self.detections_dir) / f"ep{ep_idx:06d}" / f"{cam}.json"
+        return ap.detections_dir(self.root, ep_idx, k) / f"{cam}.json"
 
     def _process_episode(self, ep_idx: int) -> None:
         self.ep_idx = ep_idx
@@ -440,7 +446,7 @@ class SubtaskDetectExtract:
                 if c in subdirs and "depth" not in c]
         if not cams:
             print(f"episode {ep_idx}: skip, no key-frames of a non-depth "
-                  f"camera under {self.root / f'ep{ep_idx:06d}'}")
+                  f"camera under {ap.episode_dir(self.root, ep_idx)}")
             return
         if self.args.camera_keys:
             skipped = [c for c in self.args.camera_keys if c not in subdirs]
@@ -451,16 +457,11 @@ class SubtaskDetectExtract:
         for cam in cams:
             self._process_camera(cam, labels)
 
-    def _process_camera(self, cam: str,
-                        labels: dict[int, int | None]) -> None:
-        """RexOmni detection of one (episode, camera): one JSON per camera,
-        so multi-camera runs write side by side instead of overwriting."""
+    def _process_camera(self, cam: str, labels: list[int | None]) -> None:
+        """RexOmni detection of one (episode, camera): one JSON per sub-task
+        of that camera, so multi-camera runs write side by side instead of
+        overwriting and a re-run can fill in a single sub-task."""
         ep_idx = self.ep_idx
-        out_path = self._detections_path(ep_idx, cam)
-        if self.args.skip_done and out_path.is_file():
-            print(f"episode {ep_idx} (camera {cam}): skip, detections "
-                  f"exist in {out_path}")
-            return
         frames_by_sub = discover_subtask_frames(self.root, ep_idx, cam)
         if not frames_by_sub:
             print(f"episode {ep_idx} (camera {cam}): skip, no key-frames "
@@ -468,19 +469,22 @@ class SubtaskDetectExtract:
                   f"for this camera)")
             return
         print(f"\nepisode {ep_idx} (camera {cam}): {len(frames_by_sub)} "
-              f"sub-task segment(s), labels "
-              f"{dict(sorted(labels.items()))}")
-        subtasks = {}
+              f"sub-task segment(s), labels {labels}")
         for k in sorted(frames_by_sub):
+            out_path = self._detections_path(ep_idx, k, cam)
+            if self.args.skip_done and out_path.is_file():
+                print(f"  [subtask {k:02d}] skip: {out_path} exists")
+                continue
             keys = cap_keyframes(frames_by_sub[k], self.args.max_keyframes)
             if not keys:
                 print(f"  [subtask {k:02d}] skip: no key-frames")
                 continue
-            label = labels.get(k)
+            # the labels list is indexed by segment ordinal (Step 1 resolved
+            # it over the segmentation the subtask_XX dirs are laid out with)
+            label = labels[k] if k < len(labels) else None
             if label is None:
                 print(f"  [subtask {k:02d}] skip: no ground-truth label in "
-                      f"subtask_labels.json (segment beyond the sub-task "
-                      f"order?)")
+                      f"subtask.json (segment beyond the sub-task order?)")
                 continue
             row = self.meta.get(label)
             prompts, prompt_roles = subtask_prompt_roles(row)
@@ -491,24 +495,22 @@ class SubtaskDetectExtract:
             print(f"  [subtask {k:02d}] label {label}: {len(keys)} "
                   f"key-frames {keys}, prompts "
                   f"{dict(zip(prompts, prompt_roles))}")
-            subtasks[str(k)] = {
-                "subtask_index": label,
+            data = {
+                "episode": int(ep_idx),
+                "repo_id": self.args.repo_id,
+                "camera_key": cam,
+                "subtask": int(k),
+                "subtask_index": int(label),
                 "segment": [min(keys), max(keys) + 1],
                 "keyframes": keys,
                 "prompts": prompts,
                 "prompt_roles": prompt_roles,
                 "detections": self._detect_segment(cam, k, keys, prompts),
             }
-        data = {
-            "episode": int(ep_idx),
-            "repo_id": self.args.repo_id,
-            "camera_key": cam,
-            "subtasks": subtasks,
-        }
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(out_path, "w") as f:
-            json.dump(data, f, indent=2)
-        print(f"  saved {out_path}")
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(out_path, "w") as f:
+                json.dump(data, f, indent=2)
+            print(f"  saved {out_path}")
 
     def _detect_segment(self, cam: str, k: int, keys: list[int],
                         prompts: list[str]) -> dict:

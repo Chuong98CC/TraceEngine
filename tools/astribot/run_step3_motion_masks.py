@@ -19,8 +19,8 @@ _compute_motion_mask_gray (infer_waft) at --motion-threshold.
                │
                ▼  WAFT pairs (kf0, kf0 + k*stride), first significant wins
     ┌──────────────────────────────┐
-    │  motion mask per sub-task    │   init_points/ep{ep}/subtask_XX/<cam>/
-    │  (significant pairs only)    │   motion_rle.json (COCO RLE)
+    │  motion mask per sub-task    │   …/subtask_{k}/sampling_points/
+    │  (significant pairs only)    │   init_points/<cam>/motion_rle.json
     └──────────────────────────────┘
 
 **Window.** The first frame is fixed at the sub-task's 1st key-frame
@@ -41,10 +41,10 @@ the onset.
 **Saving.** Only a *significant* mask is saved — as
 `motion_rle.json` (COCO RLE, `utils.file_io.mask_rle.encode_rle`,
 carrying the provenance of the pair that produced it) in the (sub-task,
-camera) folder of Step-3b's init-points tree
-(`<out-dir>/init_points/ep{ep}/subtask_XX/<camera>/`, beside the
-`<prompt_slug>/` subtrees Step 3b writes) — the rescue then sits next to
-the init points it shaped. When no pair in the window reaches
+camera) init_points folder Step 3b writes its init points into
+(`<out-dir>/ep{ep:03d}/subtask_{k:02d}/sampling_points/init_points/
+<camera>/`, beside the `<prompt_slug>/` subtrees) — the rescue then sits
+next to the init points it shaped. When no pair in the window reaches
 significance nothing is written: the rescue only unions real motion, so
 Step 3b then keeps that sub-task's SAM mask alone. `--visualize`
 additionally writes the significant pair's `flow.png` (flow_to_image on a
@@ -66,7 +66,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import re
 from pathlib import Path
 
 import cv2
@@ -75,8 +74,9 @@ from lerobot.datasets import LeRobotDataset, LeRobotDatasetMetadata
 from tqdm import tqdm
 
 from tools.general_test.module.infer_waft import _compute_motion_mask_gray
+from utils import astribot_paths as ap
 from utils.file_io.mask_rle import encode_rle
-from utils.keyframe_utils import cap_keyframes, sampling_points_root
+from utils.keyframe_utils import cap_keyframes
 from utils.visualize.visualize_flow import flow_to_image
 from utils.visualize.visualize_mask import to_pil
 
@@ -91,8 +91,6 @@ DEFAULT_MOTION_THRESHOLD = 2.0
 #: default moving-pixel fraction of the frame that makes a mask
 #: "significant" (the scan then early-stops).
 DEFAULT_MOTION_RATIO = 0.03
-
-_EP_RE = re.compile(r"^ep(\d{6})$")
 
 
 def parse_args(argv: list[str] | None = None):
@@ -115,15 +113,14 @@ def parse_args(argv: list[str] | None = None):
     parser.add_argument("--max-episodes", "-x", type=int, default=None,
                         help="cap the number of processed episodes")
     parser.add_argument("--out-dir", "-o", default=None,
-                        help="output root (default: <data-root>/eps_data/"
-                             "sampling_points); the motion masks land inside "
-                             "Step 3b's init-points tree — "
-                             "<out-dir>/init_points/ep{ep}/subtask_XX/"
-                             "<camera>/, next to the prompt subtrees of that "
-                             "same (sub-task, camera)")
-    parser.add_argument("--detections-dir", default=None,
-                        help="Step-3a detections root (default: "
-                             "<out-dir>/detections)")
+                        help="episodes root (default: <data-root>/episodes); "
+                             "the motion masks land in the (sub-task, "
+                             "camera) init_points folder of Step 3b — "
+                             "<out-dir>/ep{ep:03d}/subtask_{k:02d}/"
+                             "sampling_points/init_points/<camera>/, next to "
+                             "the prompt subtrees of that same (sub-task, "
+                             "camera), and the key-frames come from the "
+                             "detections in the same tree")
     parser.add_argument("--max-keyframes", type=int, default=8,
                         help="cap the key-frames per sub-task, applied to the "
                              "Step-3a list exactly like Step 3b does — the "
@@ -158,29 +155,27 @@ def parse_args(argv: list[str] | None = None):
 class MotionMaskExtract:
     """Per-(sub-task, camera) WAFT motion masks of the sub-task starts.
 
-    The key-frames of each sub-task come from the Step-3a detections JSON
-    (detections/ep{ep}/<camera>.json), whose per-sub-task key-frame list
-    Step 3b caps identically — the JSON is the single source both steps
-    agree on. The frames themselves are decoded online from the dataset;
-    nothing is written to disk except the significant masks:
-    init_points/ep{ep}/subtask_XX/<camera>/motion_rle.json (plus the
-    --visualize flow.png of the chosen pair) — the same folder Step 3b
-    writes its <prompt_slug>/ init points into.
+    The key-frames of each sub-task come from its Step-3a detections JSON
+    (…/subtask_{k:02d}/sampling_points/detections/<camera>.json), whose
+    key-frame list Step 3b caps identically — the JSON is the single source
+    both steps agree on. The frames themselves are decoded online from the
+    dataset; nothing is written to disk except the significant masks into
+    the (sub-task, camera) init_points folder of the episodes tree
+    (…/subtask_{k:02d}/sampling_points/init_points/<camera>/motion_rle.json,
+    plus the --visualize flow.png of the chosen pair) — the same folder
+    Step 3b writes its <prompt_slug>/ init points into.
     """
 
     def __init__(self, args):
         self.args = args
         self.meta = LeRobotDatasetMetadata(repo_id=args.repo_id,
                                            root=args.data_root)
-        self.out_dir = args.out_dir or str(sampling_points_root(args.data_root))
-        if args.detections_dir is None:
-            args.detections_dir = str(Path(self.out_dir) / "detections")
-        self.det_root = Path(args.detections_dir)
-        if not self.det_root.is_dir():
+        self.root = ap.episodes_root(args.data_root, args.out_dir)
+        if not self.root.is_dir():
             raise FileNotFoundError(
-                f"{self.det_root} missing: run Step 3a first "
-                "(.venv-rexomni/bin/python tools/general_test/"
-                "run_object_detection.py ...)")
+                f"{self.root} missing: run Step 1 (extract_frames.py) and "
+                "Step 3a (.venv-rexomni/bin/python tools/general_test/"
+                "run_object_detection.py ...) first")
         idxes = args.camera_idxes
         if idxes is None:
             idxes = [i for i, key in enumerate(self.meta.camera_keys)
@@ -191,24 +186,18 @@ class MotionMaskExtract:
                      if i in idxes}
         if not self.cams:
             raise ValueError("no camera selected (--camera-idxes)")
-        discovered = sorted(int(m.group(1)) for p in self.det_root.iterdir()
-                            if p.is_dir() and (m := _EP_RE.match(p.name)))
+        discovered = self._detected_episodes()
         eps = discovered
         if args.episode_idxes is not None:
             missing = sorted(set(args.episode_idxes) - set(discovered))
             if missing:
                 raise FileNotFoundError(
                     f"episode(s) {missing} have no Step-3a detections JSON "
-                    f"under {self.det_root}")
+                    f"under {self.root}")
             eps = [e for e in discovered if e in args.episode_idxes]
         if args.max_episodes is not None:
             eps = eps[: args.max_episodes]
         self.ep_idxes = eps
-        # Step 3b's init-points tree: the motion-mask artefacts of a
-        # (sub-task, camera) land in that sub-task's folder itself (the
-        # parent of its <prompt_slug>/ subtrees), so they sit next to the
-        # init points they shaped.
-        self.init_dir = Path(self.out_dir) / "init_points"
         self.waft_model = None
         self.dataset = None  # LeRobotDataset handle, opened lazily
         self.ep_idx = 0
@@ -264,6 +253,25 @@ class MotionMaskExtract:
         vis[np.linalg.norm(flow, axis=-1) <= thr] = 0
         cv2.imwrite(str(seg_dir / "flow.png"), vis)
 
+    # --- Step-3a detections --------------------------------------------------
+
+    def _detections_path(self, ep_idx: int, k: int, cam: str) -> Path:
+        """Step-3a detections JSON of one (episode, sub-task, camera) — the
+        key-frames of that sub-task and camera come from it."""
+        return ap.detections_dir(self.root, ep_idx, k) / f"{cam}.json"
+
+    def _detection_subtasks(self, ep_idx: int, cam: str) -> list[int]:
+        """Sub-tasks of one (episode, camera) that carry a Step-3a
+        detections JSON on disk, sorted."""
+        return [k for k in ap.discover_subtasks(self.root, ep_idx)
+                if self._detections_path(ep_idx, k, cam).is_file()]
+
+    def _detected_episodes(self) -> list[int]:
+        """Episodes with a Step-3a detections JSON for at least one of the
+        selected cameras, sorted."""
+        return [e for e in ap.discover_episodes(self.root)
+                if any(self._detection_subtasks(e, c) for c in self.cams)]
+
     # --- orchestration -------------------------------------------------------
 
     def run(self) -> None:
@@ -273,21 +281,19 @@ class MotionMaskExtract:
         print(f"\n{len(self.ep_idxes)} episode(s) selected: {self.ep_idxes}")
         for ep_idx in tqdm(self.ep_idxes, desc="episodes"):
             self._process_episode(ep_idx)
-        print(f"\ndone: {len(self.ep_idxes)} episode(s) -> {self.init_dir}")
+        print(f"\ndone: {len(self.ep_idxes)} episode(s) -> {self.root}")
 
     def _process_episode(self, ep_idx: int) -> None:
         self.ep_idx = ep_idx
-        det_ep = self.det_root / f"ep{ep_idx:06d}"
-        have = sorted(p.stem for p in det_ep.glob("*.json")) \
-            if det_ep.is_dir() else []
-        cams = [c for c in self.cams if c in have]
+        cams = [c for c in self.cams if self._detection_subtasks(ep_idx, c)]
         if not cams:
             print(f"episode {ep_idx}: no Step-3a detections JSON under "
-                  f"{det_ep} for the requested cameras "
-                  f"{sorted(self.cams)} — skipped")
+                  f"{ap.episode_dir(self.root, ep_idx)} for the requested "
+                  f"cameras {sorted(self.cams)} — skipped")
             return
-        print(f"\nepisode {ep_idx}: detections loaded from {det_ep} "
-              f"({len(cams)} camera(s): {cams})")
+        print(f"\nepisode {ep_idx}: detections under "
+              f"{ap.episode_dir(self.root, ep_idx)}/*/sampling_points/"
+              f"detections ({len(cams)} camera(s): {cams})")
         for cam in cams:
             self._process_camera(cam)
 
@@ -295,22 +301,21 @@ class MotionMaskExtract:
         """Motion masks of one (episode, camera): every sub-task with >= 2
         key-frames gets the opening-window scan (see the module docstring)."""
         self.cam_key = self.cams[cam]
-        path = self.det_root / f"ep{self.ep_idx:06d}" / f"{cam}.json"
-        with open(path) as f:
-            detections = json.load(f)
         self._frames = {}  # per-camera decode cache
         try:
-            for k, sub in sorted(detections.get("subtasks", {}).items(),
-                                 key=lambda kv: int(kv[0])):
+            for k in self._detection_subtasks(self.ep_idx, cam):
+                path = self._detections_path(self.ep_idx, k, cam)
+                with open(path) as f:
+                    sub = json.load(f)
                 keys = cap_keyframes(
                     sorted(int(t) for t in sub.get("keyframes", [])),
                     self.args.max_keyframes)
                 if len(keys) < 2:
-                    print(f"  [subtask {int(k):02d}] ({cam}) skip: "
+                    print(f"  [subtask {k:02d}] ({cam}) skip: "
                           f"{len(keys)} key-frame(s) in the Step-3a JSON "
                           f"(need >= 2)")
                     continue
-                self._process_segment(int(k), keys, cam)
+                self._process_segment(k, keys, cam)
         finally:
             self._frames = {}
 
@@ -318,14 +323,15 @@ class MotionMaskExtract:
         """Opening-window scan of one sub-task: fixed first frame keys[0],
         walking second frame keys[0] + m*stride up to keys[1]; the first
         significant mask wins the scan. Only that mask is saved — as
-        motion_rle.json (COCO RLE) under init_points/ep{ep}/
-        subtask_{k}/<cam>/ (Step 3b's folder for that sub-task, beside its
-        <prompt_slug>/ subtrees); a sub-task with no significant pair
-        writes nothing (Step 3b then keeps its SAM mask alone).
+        motion_rle.json (COCO RLE) in the (sub-task, camera) init_points
+        folder of the episodes tree
+        (…/subtask_{k:02d}/sampling_points/init_points/<cam>/, Step 3b's
+        folder for that sub-task, beside its <prompt_slug>/ subtrees); a
+        sub-task with no significant pair writes nothing (Step 3b then
+        keeps its SAM mask alone).
         --visualize writes the same pair's flow.png too.
         """
-        seg_dir = self.init_dir / f"ep{self.ep_idx:06d}" \
-            / f"subtask_{k:02d}" / cam
+        seg_dir = ap.init_points_dir(self.root, self.ep_idx, k, cam)
         rle_path = seg_dir / "motion_rle.json"
         if self.args.skip_done and rle_path.is_file():
             print(f"  [subtask {k:02d}] ({cam}) skip: {rle_path} exists")
