@@ -52,10 +52,10 @@ into that same root (ep{ep:03d}/subtask.json + split_graph.png), and Step
 Object prompts are per sub-task: [object, manipulator] of the sub-task's row
 in the dataset's meta/subtasks.csv — there is no prompt flag. Step 1
 (detect_subtask) resolves the canonical ground-truth label of every segment
-of the episode's subtask.json by execution order, Step 3a indexes that
-labels list by segment ordinal to fetch the row of the segment's own
-sub-task and records the prompts in its JSON, Step 3b re-reads them from
-there.
+into the episode's subtask.json ``subtask_labels`` list by execution order,
+Step 3a indexes that list by segment ordinal to fetch the row of the
+segment's own sub-task and records the prompts in its JSON, Step 3b
+re-reads them from there.
 
 With --with-optical-flow-mask the driver additionally runs **Step 3a'**
 (run_step3_motion_masks.py — WAFTv2 motion masks of the sub-task starts,
@@ -186,7 +186,7 @@ def parse_args(argv: list[str] | None = None):
                              "None disables the cap (default: %(default)s)")
     parser.add_argument("--use-inferred-splits", action="store_true",
                         help="prefer the sub-task split frames inferred by "
-                             "detect_subtask (subtask_splits.json) over the "
+                             "detect_subtask (subtask.json) over the "
                              "dataset's ground-truth subtask_index column "
                              "(Step 1 key-frames extraction; default: ground "
                              "truth when present)")
@@ -302,8 +302,8 @@ def _out_root(args) -> Path:
 def _episodes_missing_labels(args) -> list[int]:
     """Selected episodes whose Step-1 subtask.json is missing. Under
     --skip-extract nothing re-extracts, and Step 3a prompts every segment by
-    its ground-truth label from that file, so every selected episode must
-    carry it. [] when all do."""
+    its ground-truth label from that file's ``subtask_labels`` list, so
+    every selected episode must carry it. [] when all do."""
     root = _out_root(args)
     try:
         eps = select_episodes(root, args.episode_idxes, args.max_episodes)

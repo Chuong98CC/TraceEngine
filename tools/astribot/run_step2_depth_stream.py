@@ -127,10 +127,14 @@ def parse_args(argv: list[str] | None = None):
                         default="src/depth_models/streaming/configs/base_config.yaml",
                         help="alignment library/method, loop-closure settings")
     parser.add_argument("--skip-done", action="store_true",
-                        help="skip sub-tasks whose pipeline output already exists")
+                        help="skip a sub-task when every selected camera's "
+                             "depth_pose/<camera>/ store is already complete "
+                             "(poses.npz + depth.lz4, see "
+                             "utils.depth_pose_io.is_complete) — a sub-task "
+                             "missing any camera is re-run whole")
     parser.add_argument("--use-inferred-splits", action="store_true",
                         help="prefer the sub-task split frames inferred by "
-                             "detect_subtask (subtask_splits.json) over the "
+                             "detect_subtask (subtask.json) over the "
                              "dataset's ground-truth subtask_index column "
                              "when both exist")
     return parser.parse_args(argv)
