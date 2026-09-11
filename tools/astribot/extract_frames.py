@@ -1014,10 +1014,24 @@ class DataExtract:
             if self.gripper_idxes:
                 self._plot_gripper_state(frames, vals, subtasks, smooth,
                                          key_idxes, split_idxes)
-            # the segment labels come from the dataset annotations, not from
-            # the key-frames: resolve them here, once, next to the splits
+            # The segment labels come from the dataset annotations, not from
+            # the key-frames: resolve them here, once, next to the splits.
+            # They must describe the SAME segmentation the reading modes lay
+            # the subtask_XX dirs out with — the ground-truth-first split
+            # source of _load_splits — not necessarily the inferred splits
+            # computed above. When the two disagree, the labels list would be
+            # paired with the wrong dirs (Step 3a would prompt segment k with
+            # another sub-task's object/manipulator); --use-inferred-splits
+            # and a dataset without a subtask_index column both make the
+            # reading modes consume the inferred splits instead.
+            label_splits = (None if self.args.use_inferred_splits
+                            else self._split_frames_from_ground_truth())
+            if label_splits is None:
+                label_splits = split_idxes
             labels, source = self._resolve_segment_labels(
-                self._segment_bounds(split_idxes), df)
+                self._segment_bounds(label_splits), df)
+            # the JSON keeps the inferred split frames: --use-inferred-splits
+            # exists precisely to prefer them over the ground truth
             self._save_subtask_json(key_idxes, split_idxes, labels)
         elif self.args.mode == "key_frames":
             # the start and end frame of every sub-task segment (the
