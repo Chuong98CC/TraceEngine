@@ -9,9 +9,9 @@ utils/astribot_paths) rooted at <out-dir> (<data-root>/episodes by default):
 
 - ``detect_subtask``: key/split frames inferred from the tabular gripper
   state alone — no videos needed → <out-dir>/ep{ep:03d}/subtask.json (the
-  key frames, the split frames and the canonical label of every segment,
-  resolved from the dataset annotations by ground-truth execution order) +
-  split_graph.png next to it.
+  key frames, the split frames and ``subtask_labels``, the canonical label
+  of every segment, resolved from the dataset annotations by ground-truth
+  execution order) + split_graph.png next to it.
 - ``key_frames``: jpgs of the episode's first/last frame, its gripper key
   frames and each sub-task segment's boundary frames →
   <out-dir>/ep{ep:03d}/subtask_XX/sampling_points/key_frames/<camera>/
@@ -612,7 +612,7 @@ class DataExtract:
             "to_idx": self.to_idx,
             "key_frames": [int(k) for k in key_idxes],
             "split_frames": [int(s) for s in split_idxes],
-            "labels": [None if lb is None else int(lb) for lb in labels],
+            "subtask_labels": [None if lb is None else int(lb) for lb in labels],
         }
         path = ap.subtask_json(self._root, self.ep_idx)
         path.parent.mkdir(parents=True, exist_ok=True)

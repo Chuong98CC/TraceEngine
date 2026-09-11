@@ -16,7 +16,7 @@ detections JSON, which Step 3b reads.
 
 The canonical dataset subtask label of every segment lives in the episode's
 merged Step-1 file (see ``load_subtask``): Step 1's detect_subtask mode
-resolves ``labels`` by ground-truth execution order — the canonical ids need
+resolves ``subtask_labels`` by ground-truth execution order — the canonical ids need
 not equal the segment ordinals (the frame-table subtask_index of an episode
 can run e.g. [0, 2, 1, 3, 5, 4]). Step 3a reads them to fetch the
 [object, manipulator] prompts of the right sub-task of every segment.
@@ -90,7 +90,8 @@ def keyframe_path(root: str | Path, ep_idx: int, cam_subdir: str,
 
 
 def load_subtask(root: str | Path, ep_idx: int) -> dict:
-    """The episode's merged Step-1 file (splits + labels)."""
+    """The episode's merged Step-1 file (splits + sub-task labels,
+    ``subtask_labels``)."""
     path = ap.subtask_json(root, ep_idx)
     if not path.is_file():
         raise FileNotFoundError(
@@ -104,7 +105,7 @@ def load_subtask(root: str | Path, ep_idx: int) -> dict:
 def load_subtask_labels(root: str | Path, ep_idx: int) -> list[int | None]:
     """{segment ordinal: canonical subtask label} as a list (None = beyond the
     ground-truth order)."""
-    labels = load_subtask(root, ep_idx).get("labels") or []
+    labels = load_subtask(root, ep_idx).get("subtask_labels") or []
     return [int(v) if v is not None else None for v in labels]
 
 

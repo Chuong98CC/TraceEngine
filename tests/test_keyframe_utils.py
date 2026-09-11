@@ -1,5 +1,6 @@
 """Step-1 metadata access over the merged subtask.json — the readers Step 3
-uses (utils.keyframe_utils), plus the pairing of that file's ``labels`` with
+uses (utils.keyframe_utils), plus the pairing of that file's
+``subtask_labels`` with
 the segmentation the reading modes lay the ``subtask_XX`` dirs out with
 (tools/astribot/extract_frames.py)."""
 import argparse
@@ -22,7 +23,7 @@ def test_load_subtask_roundtrip(tmp_path):
         "episode": 3, "task_id": 0, "task": "Make coffee",
         "from_idx": 0, "to_idx": 100,
         "key_frames": [0, 50, 99], "split_frames": [50],
-        "labels": [0, 2, None],
+        "subtask_labels": [0, 2, None],
     })
     data = load_subtask(tmp_path, 3)
     assert data["split_frames"] == [50]
@@ -90,7 +91,7 @@ def test_labels_follow_the_ground_truth_segmentation(tmp_path):
     data = _detect(tmp_path, GROUND_TRUTH_RUNS, inferred_splits=[50],
                    use_inferred_splits=False)
     assert data["split_frames"] == [50]  # the inferred splits still land in the file
-    assert data["labels"] == [0, 2, 1, 3, 5]
+    assert data["subtask_labels"] == [0, 2, 1, 3, 5]
 
 
 def test_labels_follow_the_inferred_segmentation_when_preferred(tmp_path):
@@ -99,7 +100,7 @@ def test_labels_follow_the_inferred_segmentation_when_preferred(tmp_path):
     data = _detect(tmp_path, GROUND_TRUTH_RUNS, inferred_splits=[50],
                    use_inferred_splits=True)
     assert data["split_frames"] == [50]
-    assert data["labels"] == [0, 2]
+    assert data["subtask_labels"] == [0, 2]
 
 
 def test_labels_fall_back_to_the_inferred_splits_without_annotations(tmp_path):
@@ -108,4 +109,4 @@ def test_labels_fall_back_to_the_inferred_splits_without_annotations(tmp_path):
     data = _detect(tmp_path, None, inferred_splits=[50],
                    use_inferred_splits=False)
     assert data["split_frames"] == [50]
-    assert data["labels"] == [0, 1]
+    assert data["subtask_labels"] == [0, 1]
