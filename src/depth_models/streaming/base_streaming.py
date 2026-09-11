@@ -48,7 +48,12 @@ from depth_models.streaming.loop_utils.sim3utils import (
     accumulate_sim3_transforms,
     weighted_align_point_maps,
 )
-from utils.depth_utils import load_depth_lz4, save_depth_lz4, save_depth_m_lz4
+from utils.depth_pose_io import (
+    DEPTH_FILE,
+    DepthContainerReader,
+    DepthContainerWriter,
+    write_poses,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -90,6 +95,50 @@ def _warp_extrinsics(
     warped = w2c_4x4 @ S_inv
     return warped[:, :3, :]
 
+
+def _frame_index(stem: str) -> int:
+    """Absolute dataset frame index of a Step-2 stem (``frame_000556``)."""
+    return int(str(stem).rsplit("_", 1)[-1])
+
+
+def _finalize_depth_pose(out_dirs, frame_meta, all_extrinsics, sim3_cum,
+                         depth_shape, slots) -> None:
+    """Second pass: apply the cumulative SIM3 scale and write the poses.
+
+    Pass 1 left each camera's container holding raw model depth; the scale of
+    chunk k is only known once chunk k+1 has been aligned, so it is applied
+    here by streaming each container into a replacement file.  Stored depth is
+    metres, as it was when the per-frame .lz4 files were rewritten.
+    """
+    scales = [1.0] * (len(frame_meta) + 1)
+    for ci in range(1, len(scales)):
+        scales[ci] = sim3_cum[ci - 1][0] if ci <= len(sim3_cum) else 1.0
+
+    warped = []  # per step: (extrinsics_warped (len(slots), 3, 4), intrinsics)
+    for (frame_idx, ci, intr), ext in zip(frame_meta, all_extrinsics):
+        if ci == 0 or ci > len(sim3_cum):
+            s, R, t = 1.0, np.eye(3, dtype=np.float32), np.zeros(3, dtype=np.float32)
+        else:
+            s, R, t = sim3_cum[ci - 1]
+        warped.append((_warp_extrinsics(ext, s, R, t), intr))
+
+    for v in slots:
+        src = os.path.join(out_dirs[v], DEPTH_FILE)
+        tmp = src + ".tmp"
+        with DepthContainerReader(src) as reader, \
+                DepthContainerWriter(tmp, *depth_shape) as writer:
+            for step, (frame_idx, ci, _intr) in enumerate(frame_meta):
+                writer.append(reader.read(step) * scales[ci])
+        os.replace(tmp, src)
+
+    for v in slots:
+        write_poses(
+            out_dirs[v],
+            np.asarray([m[0] for m in frame_meta], dtype=np.int64),
+            np.asarray([w[0][v] for w in warped], dtype=np.float32),
+            np.asarray([w[1][v] for w in warped], dtype=np.float32),
+            depth_shape,
+        )
 
 
 # ===========================================================================
@@ -492,17 +541,18 @@ class BaseStreaming:
         self._load_mask_paths()
         self._load_depth_paths()
 
-        # Per-time-step metadata: (stem, chunk_idx, intr_Kx3x3)
-        frame_meta: list[tuple[str, int, np.ndarray]] = []
+        # Per-time-step metadata: (frame_index, chunk_idx, intr_Kx3x3)
+        frame_meta: list[tuple[int, int, np.ndarray]] = []
         all_extrinsics: list[np.ndarray] = []
         sim3_chain: list[tuple[float, np.ndarray, np.ndarray]] = []
         prev_overlap: dict | None = None
 
         out_dirs = [
-            os.path.join(self.output_dir, f"depth_{Path(d).name}") for d in self.input_dirs
+            os.path.join(self.output_dir, Path(d).name) for d in self.input_dirs
         ]
         depth_shape = None  # (H, W) of the depth maps, captured at first save
         slots = self._out_view_slots()
+        writers: dict[int, DepthContainerWriter] = {}
         for v in slots:
             os.makedirs(out_dirs[v], exist_ok=True)
 
@@ -528,13 +578,14 @@ class BaseStreaming:
                     self.mask_paths[ch_start:ch_end], conf_h, conf_w
                 )
 
-            # Save depth per view using the source image stem; leading padding
-            # images are discarded here (but were used for alignment below).
-            # Depth is stored as log-encoded uint8 metres .lz4 (see
-            # save_depth_m_lz4); the aligned pass below rewrites it with the
-            # SIM3 scale and adds the warped pose as a separate .npz per
-            # frame.  pad_imgs counts images; each time step has
-            # self.num_cams images and len(slots) outputs, so the loop
+            # Append this chunk's depth to each camera's container, keyed by
+            # the source image's absolute frame index; leading padding images
+            # are discarded here (but were used for alignment below).  The
+            # containers keep raw model depth for now — a chunk's SIM3 scale
+            # is only known once the next chunk has been aligned, so
+            # _finalize_depth_pose streams them into the final scaled files
+            # and writes the poses.  pad_imgs counts images; each time step
+            # has self.num_cams images and len(slots) outputs, so the loop
             # iterates steps and maps step -> img_list position and step ->
             # data offset separately (for the default slots == num_cams these
             # coincide).
@@ -544,13 +595,15 @@ class BaseStreaming:
                 stem = Path(self.img_list[ch_start + local_step * self.num_cams]).stem
                 if depth_shape is None:
                     depth_shape = tuple(data["depth"].shape[1:])
+                    for v in slots:
+                        writers[v] = DepthContainerWriter(
+                            os.path.join(out_dirs[v], DEPTH_FILE), *depth_shape)
                 for v in slots:
-                    depth_path = os.path.join(out_dirs[v], f"{stem}.lz4")
-                    save_depth_m_lz4(data["depth"][base + v], depth_path)
+                    writers[v].append(data["depth"][base + v])
 
                 all_extrinsics.append(data["extrinsics"][base : base + len(slots)].copy())
                 frame_meta.append(
-                    (stem, ci, data["intrinsics"][base : base + len(slots)].copy())
+                    (_frame_index(stem), ci, data["intrinsics"][base : base + len(slots)].copy())
                 )
 
             # Align with previous chunk (full chunk vs full chunk)
@@ -567,27 +620,13 @@ class BaseStreaming:
         else:
             sim3_cum = []
 
+        for writer in writers.values():
+            writer.close()
+
         # Apply alignment and save final outputs
         print("\nApplying alignment and saving final outputs ...")
-        for (stem, ci, intr), ext in zip(frame_meta, all_extrinsics):
-            if ci == 0 or ci > len(sim3_cum):
-                s, R, t = 1.0, np.eye(3, dtype=np.float32), np.zeros(3, dtype=np.float32)
-            else:
-                s, R, t = sim3_cum[ci - 1]
-
-            ext_warped = _warp_extrinsics(ext, s, R, t)
-
-            for v in slots:
-                depth_path = os.path.join(out_dirs[v], f"{stem}.lz4")
-                depth_m = load_depth_lz4(Path(depth_path), depth_shape)
-                # SIM3 scale applied in metres (re-encoding clips to MAX_DEPTH)
-                save_depth_lz4(depth_m * s, depth_path)
-                np.savez_compressed(
-                    os.path.join(out_dirs[v], f"{stem}.npz"),
-                    extrinsics=ext_warped[v],
-                    intrinsics=intr[v],
-                    shape=np.array(depth_shape),
-                )
+        _finalize_depth_pose(out_dirs, frame_meta, all_extrinsics, sim3_cum,
+                             depth_shape, slots)
 
         total_s = time.perf_counter() - t_run0
         print(f"Done. {len(frame_meta)} time steps saved to {self.output_dir}/")

@@ -47,7 +47,6 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import resource
 import sys
@@ -70,8 +69,8 @@ _BACKENDS = {
 }
 
 
-def _report_run_stats(backend: str, save_dir: str, stats: dict) -> None:
-    """Print a timing/memory summary and write timings.json into save_dir."""
+def _report_run_stats(backend: str, stats: dict) -> None:
+    """Print a timing/memory summary for the finished run."""
     total_s = stats["total_s"]
     chunk_times = stats["chunk_times"]
     num_chunks = len(chunk_times)
@@ -120,11 +119,6 @@ def _report_run_stats(backend: str, save_dir: str, stats: dict) -> None:
         "(process lifetime, incl. model load)"
     )
     print("----------------------------------------")
-
-    json_path = os.path.join(save_dir, "timings.json")
-    with open(json_path, "w") as f:
-        json.dump(report, f, indent=2)
-    print(f"Stats saved: {json_path}")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -315,7 +309,7 @@ def main(argv: list[str] | None = None) -> int:
             max_points_per_frame=args.video_max_points,
         )
 
-    _report_run_stats(args.backend, save_dir, stats)
+    _report_run_stats(args.backend, stats)
     return 0
 
 
