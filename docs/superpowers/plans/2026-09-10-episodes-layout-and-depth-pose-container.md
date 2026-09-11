@@ -1587,8 +1587,11 @@ def load_subtask_labels(root, ep_idx: int) -> list[int | None]:
   `utils.*`).
 - `_episode_dir` → `self._root = ap.episodes_root(self.args.data_root, self.args.out_dir)`;
   the reading modes resolve `ap.subtask_json(self._root, self.ep_idx)` and fall
-  back to `ap.subtask_json(self.args.data_root, self.ep_idx)` when missing
-  (today's `splits_root` fallback).
+  back to `ap.subtask_json(ap.episodes_root(self.args.data_root), self.ep_idx)`
+  when missing (today's `splits_root` fallback). The fallback takes the
+  *episodes* root — passing `data_root` itself would miss the `episodes/`
+  component — and deliberately ignores `--out-dir`, since it exists to reach
+  the canonical tree when the chosen root lacks the file.
 - `_split_file_path`/`_save_splits`/`_load_splits_json` collapse into
   `_save_subtask_json(key_idxes, split_idxes, labels)` writing
   `ap.subtask_json(...)` with the merged schema, and `_load_subtask()` reading
