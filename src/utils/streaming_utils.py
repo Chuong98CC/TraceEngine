@@ -10,7 +10,7 @@ import numpy as np
 import torch
 from torchvision.transforms import v2 as _v2
 
-from utils.depth_utils import load_depth_lz4
+from utils.depth_pose_io import DepthPoseReader
 from utils.file_io.image_io import to_image_tensor
 
 F_resize = _v2.functional.resize
@@ -62,33 +62,27 @@ def scan_image_folder(image_dir, start_frame=0, fps=1, max_frames=None):
     return sampled, frame_H, frame_W
 
 
-def load_stream_data(img_dir: str, result_dir: str, stem: str):
-    """Load ``(depth, extrinsics, intrinsics)`` from one view's results.
+def load_stream_data(depth_dir, frame_index: int):
+    """Load ``(depth, extrinsics, intrinsics)`` of one camera at one frame.
 
-    Depth is log-encoded uint8 in ``<stem>.lz4`` (see load_depth_lz4),
-    returned as float32 metres; pose lives in ``<stem>.npz``
-    (``extrinsics``, ``intrinsics``, ``shape`` — the depth shape the lz4
-    buffer must be reshaped to).
+    ``depth_dir`` is a ``depth_pose/<camera>`` folder (``depth.lz4`` +
+    ``poses.npz``); ``frame_index`` is the absolute dataset frame index.
+    Depth is (H, W) float32 metres.
     """
-    pose_path = Path(result_dir) / f"depth_{Path(img_dir).name}/{stem}.npz"
-    if not pose_path.exists():
-        raise FileNotFoundError(f"Result file not found: {pose_path}")
-    with np.load(pose_path) as data:
-        depth = load_depth_lz4(pose_path.with_suffix(".lz4"),
-                               tuple(int(v) for v in data["shape"]))
-        return (
-            depth,  # (H, W) float32 metres
-            data["extrinsics"].astype(np.float32),  # (3, 4)
-            data["intrinsics"].astype(np.float32),  # (3, 3)
-        )
+    with DepthPoseReader(depth_dir) as reader:
+        i = reader.index_of(frame_index)
+        return reader.depth(i), reader.extrinsics[i], reader.intrinsics[i]
 
 
 def load_pair(
-    stem: str,
-    input_dirs: list[str],
-    result_dir: str,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """Load depth, extrinsics, intrinsics, and images for one time step.
+    frame_index: int,
+    image_dirs: list[str],
+    depth_dirs: list[str],
+):
+    """Load depth, extrinsics, intrinsics and images for one time step.
+
+    ``image_dirs`` / ``depth_dirs`` are parallel per-camera lists (the
+    ``frames/<camera>`` and ``depth_pose/<camera>`` folders).
 
     Returns:
         depth:       (N, H, W) float32
@@ -96,21 +90,18 @@ def load_pair(
         intrinsics:  (N, 3, 3) float32
         images_u8:   (N, H, W, 3) uint8 RGB  (resized to match depth)
     """
-    depths = []
-    extrinsics_list = []
-    intrinsics_list = []
-    images_u8_list = []
+    depths, extrinsics_list, intrinsics_list, images_u8_list = [], [], [], []
 
-    for img_dir in input_dirs:
-        depth, ext, intr = load_stream_data(img_dir, result_dir, stem)
+    for img_dir, depth_dir in zip(image_dirs, depth_dirs):
+        depth, ext, intr = load_stream_data(depth_dir, frame_index)
         depths.append(depth)
         extrinsics_list.append(ext)
         intrinsics_list.append(intr)
 
-        # Load source image (any supported extension)
+        stem = f"frame_{int(frame_index):06d}"
         img_path = None
-        for ext in (".jpg", ".jpeg", ".png"):
-            candidate = Path(img_dir) / f"{stem}{ext}"
+        for suffix in (".jpg", ".jpeg", ".png"):
+            candidate = Path(img_dir) / f"{stem}{suffix}"
             if candidate.exists():
                 img_path = candidate
                 break
@@ -142,32 +133,26 @@ def load_batch_frames(file_list, start, end):
     )
 
 
-def load_npz_batch(npz_dir, file_list, start, end):
-    """Load geometry for a slice of frames by original frame index.
+def load_npz_batch(depth_dir, frame_indexes: list[int], start: int, end: int):
+    """Load geometry for a slice of a depth_pose camera folder.
 
-    Depth is log-encoded uint8 in ``frame_{idx:06d}.lz4`` (returned as
-    float32 metres); pose lives in ``frame_{idx:06d}.npz`` (``extrinsic``,
-    ``intrinsic``, ``shape`` — the depth shape the lz4 buffer must be
-    reshaped to).
+    ``frame_indexes`` are absolute dataset frame indices (the order is the
+    caller's, normally ascending); frames [start, end) are loaded.
     Returns dict with keys: depth (T,H,W), extrs (T,4,4), intrs (T,3,3).
     """
     depths, extrs, intrs = [], [], []
-    for idx, _ in file_list[start:end]:
-        lz4_path = os.path.join(npz_dir, f"frame_{idx:06d}.lz4")
-        pose_path = os.path.join(npz_dir, f"frame_{idx:06d}.npz")
-        if not os.path.exists(lz4_path) or not os.path.exists(pose_path):
-            raise FileNotFoundError(f"Missing depth/pose: {lz4_path} / {pose_path}")
-        with np.load(pose_path) as data:
-            depth = load_depth_lz4(lz4_path, tuple(int(v) for v in data["shape"]))
-            depths.append(depth)
-            # repo pose-npz keys are plural (extrinsics 3x4 w2c / intrinsics);
-            # accept the legacy singular 4x4 form too and pad 3x4 to 4x4
-            extr = data["extrinsics"] if "extrinsics" in data else data["extrinsic"]
+    reader = DepthPoseReader(depth_dir)
+    try:
+        for frame_index in frame_indexes[start:end]:
+            i = reader.index_of(frame_index)
+            depths.append(reader.depth(i))
+            extr = reader.extrinsics[i]
             if extr.shape == (3, 4):
                 extr = np.vstack([extr, [0, 0, 0, 1]])
             extrs.append(extr)
-            intrs.append(data["intrinsics"] if "intrinsics" in data else data["intrinsic"])
-
+            intrs.append(reader.intrinsics[i])
+    finally:
+        reader.close()
     return {
         "depth": np.stack(depths, axis=0).astype(np.float32),
         "extrs": np.stack(extrs, axis=0).astype(np.float32),
@@ -314,8 +299,11 @@ def resize_batch_to_inference(video_u8: torch.Tensor, geo: dict,
     return video_t, depths_t, intrs_t, extrs_t
 
 
-def load_resized_batch(file_list, npz_dir, start, end, inference_h, inference_w):
+def load_resized_batch(file_list, depth_dir, start, end, inference_h, inference_w):
     """Load frames [start, end), resize to the inference resolution, scale intrinsics.
+
+    ``file_list`` is the ``scan_image_folder`` output (``[(idx, path), ...]``,
+    the RGB images); geometry comes from the ``depth_pose`` camera folder.
 
     Returns CPU tensors:
       video: (T, 3, H, W) float32 in [0, 1]
@@ -323,30 +311,29 @@ def load_resized_batch(file_list, npz_dir, start, end, inference_h, inference_w)
       intrs: (T, 3, 3) float32, fx/fy/cx/cy scaled to the inference resolution
       extrs: (T, 4, 4) float32
     """
+    frame_indexes = [int(idx) for idx, _ in file_list]
     video = load_batch_frames(file_list, start, end)          # (T,3,H0,W0) uint8
-    geo = load_npz_batch(npz_dir, file_list, start, end)
+    geo = load_npz_batch(depth_dir, frame_indexes, start, end)
     return resize_batch_to_inference(video, geo, inference_h, inference_w)
 
 
-def compute_global_depth_roi(npz_dir, file_list, inference_h, inference_w):
+def compute_global_depth_roi(depth_dir, frame_indexes, inference_h, inference_w):
     """Pre-scan all frames' resized depths; return the global IQR depth ROI.
 
-    Depths are log-encoded uint8 ``frame_{idx:06d}.lz4`` files with the
-    depth shape recorded in the companion ``frame_{idx:06d}.npz`` (see
-    load_npz_batch), decoded to float32 metres by load_depth_lz4.
+    ``frame_indexes`` are absolute dataset frame indices of the ``depth_pose``
+    camera folder (see load_npz_batch).
     Matches utils.inference_utils.inference(): roi = [1e-7, q75 + 1.5*iqr]
     computed over the resized depth maps of every frame.
     """
     all_d = []
-    for idx, _ in file_list:
-        lz4_path = os.path.join(npz_dir, f"frame_{idx:06d}.lz4")
-        pose_path = os.path.join(npz_dir, f"frame_{idx:06d}.npz")
-        if not os.path.exists(lz4_path):
-            raise FileNotFoundError(f"Missing depth lz4: {lz4_path}")
-        with np.load(pose_path) as data:
-            depth = load_depth_lz4(lz4_path, tuple(int(v) for v in data["shape"]))
-        d = resize_depth_bilinear(depth, (inference_w, inference_h))
-        all_d.append(d[d > 0])
+    reader = DepthPoseReader(depth_dir)
+    try:
+        for frame_index in frame_indexes:
+            depth = reader.depth_at(frame_index)
+            d = resize_depth_bilinear(depth, (inference_w, inference_h))
+            all_d.append(d[d > 0])
+    finally:
+        reader.close()
     d = torch.from_numpy(np.concatenate(all_d)).float()
     if len(d) < 4:
         return torch.tensor([1e-7, 1e7], dtype=torch.float32)
