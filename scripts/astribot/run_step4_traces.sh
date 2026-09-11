@@ -10,9 +10,15 @@
 # camera).
 REPO_ID=Kronze157/astribot_making_coffee_vlva_full
 DATA_ROOT=/data/astribot_making_coffee_vlva_full
+EPS=${1:-0}  # episode index
+
+python tools/astribot/clear_task.py \
+    --data-root $DATA_ROOT --task traces \
+    --episode-idxes $EPS
 
 python tools/astribot/run_step4_traces.py \
     --repo-id $REPO_ID \
-    --data-root $DATA_ROOT --episode-idxes 0 \
-    --filter-visible --filter-static-pixel \
-    --camera-idxes 0
+    --data-root $DATA_ROOT --episode-idxes $EPS \
+    --camera-idxes 0 \
+    --filter-static-pixel
+    # --filter-visible \

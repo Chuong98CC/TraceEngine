@@ -142,7 +142,7 @@ DEFAULT_OBJECT_TOP_K = 64
 #: static filters remove the stationary keypoints, so the moving
 #: manipulator needs more seeds to keep enough survivors (its pass tracks
 #: up to 128 role keypoints, the shipped iteration graph trimming the
-#: support grid to 1088 - 128 = 960 to keep its fixed 1088 queries).
+#: support points to 1088 - 128 = 960 to keep its fixed 1088 queries).
 DEFAULT_MANIPULATOR_TOP_K = 128
 DEFAULT_BBOX_SCALE = 1.25
 DEFAULT_NUM_CORRESP = 2000

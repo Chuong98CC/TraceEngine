@@ -45,22 +45,28 @@ keypoint lying inside that key-frame's SAM3 mask (masks[j].any() missing
 dataset annotations meta/subtasks.csv ([object, manipulator] of the
 sub-task's row): Step 3a recorded the segment's canonical sub-task label
 (subtask_index) in the detections JSON, and that label resolves the row —
-a segment without a recorded label is tracked unlabelled, never
+a segment without a recorded label has its prompts skipped, never
 role-matched by the segment ordinal.
 
-The shipped TAPIP3D iteration graph has a fixed query count (1088), so
-each pass tracks up to 64 object / 128 manipulator role keypoints (the
-manipulator is seeded denser so enough points survive the static
-filters) + a full-frame support grid trimmed/padded deterministically to
-reach exactly 1088 (a full 128-query manipulator pass runs 960 support
-points: the 32x32 grid minus the cells nearest the role keypoints'
-anchor-frame pixels — see _support_queries — so the surviving support
-spreads away from the tracked points; random padding points are sampled
-among the anchor frame's valid-depth pixels,
-np.random.default_rng(seed + role_index)). The filters only remove
-points, so the output keeps at most MAX_KEPT_KEYPOINTS (64) keypoints
-per prompt — a 128-seed manipulator prompt that outlives the filters
-with more survivors is truncated to its first 64 in seed order.
+The shipped TAPIP3D iteration graph has a fixed query count
+(EXPECTED_NUM_QUERIES = 1088), so each pass tracks up to 1000 role
+keypoints (its ROLE_MAX_KEYPOINTS entry, the pass's seeding cap) +
+1088 - n_obj support points: the anchor frame's valid-depth pixels that
+no role prompt's mask covers are drawn at random with a Gaussian weight
+that peaks at the image centre (--support-sigma scales the sigmas with
+the image dimensions — see _support_queries). The draw is without
+replacement whenever the eligible pool is at least the support budget
+(distinct pixels), and falls back to drawing WITH replacement — warned,
+still exactly 1088 queries — when a pathological anchor leaves fewer
+eligible pixels than that. The exclusion is the union of the role
+prompts' masks at the anchor frame (object + manipulator, on both
+passes); a prompt whose anchor-frame mask column is empty (masks[j].any()
+false — the same column _row_pixels treats as unconstrained) contributes
+no exclusion, so its own keypoint pixels are not necessarily excluded by
+the masks. The draw is seeded np.random.default_rng(seed + role_index).
+The filters only remove points, so a filtered prompt keeps every one of
+its survivors, in seed order — at most its share of the pass's
+role-keypoint cap.
 
 Every camera of a sub-task is tracked separately over its own Step-2
 depth_pose/<camera> store — the cameras come from the per-camera
@@ -101,10 +107,7 @@ from tqdm import tqdm
 from flow_models.tapip3d.utils import (
     Tapip3D_PT2,
     Tapip3DStreamPT2,
-    _DEFAULT_ENCODER,
-    _DEFAULT_ITERATION,
 )
-from flow_models.tapip3d.utils._grid_utils import get_grid_queries
 from tools.astribot.extract_frames import DataExtract
 from utils import astribot_paths as ap
 from utils.depth_pose_io import DepthPoseReader
@@ -122,33 +125,23 @@ from utils.visualize.visualize_mask import to_pil
 #: role output order of the sub-task annotations (meta/subtasks.csv columns).
 ROLE_ORDER = ("object", "manipulator")
 
-#: keep the 64-keypoint density.
-ROLE_MAX_KEYPOINTS = {"object": 64, "manipulator": 128}
-SUPPORT_GRID_SIZE = 32
-MAX_KEPT_KEYPOINTS = ROLE_MAX_KEYPOINTS["object"]
+#: per-pass seeding caps of the role keypoints, one entry per role of
+#: ROLE_ORDER; the rest of the pass's fixed 1088 queries are the support
+#: draw.
+ROLE_MAX_KEYPOINTS = {"object": 1000, "manipulator": 1000}
+#: the shipped iteration graph's fixed query count (support + role
+#: keypoints) — see _ensure_pt2.
+EXPECTED_NUM_QUERIES = 1088
+#: default of --support-sigma: the support draw's Gaussian sigma as a
+#: fraction of each image dimension (sigma_x = sigma*W, sigma_y = sigma*H).
+DEFAULT_SUPPORT_SIGMA = 0.25
 MIN_PIXEL_MOVING=5
+MAX_REAPPEAR_RATIO=8
 
-def _role_keypoint_cap(role: str | None) -> int:
-    """Max role keypoints of one pass: 128 for the manipulator, 64 for
-    object and role-less (unlabelled) prompts."""
-    return ROLE_MAX_KEYPOINTS.get(role, ROLE_MAX_KEYPOINTS["object"])
-
-
-def _cap_keypoint_survivors(sel: np.ndarray, cap: int
-                            ) -> tuple[np.ndarray, np.ndarray]:
-    """Per-prompt output cap on the filtered survivors.
-
-    A prompt's survivor mask (True = survived the filters, in seed order)
-    is truncated to its first ``cap`` survivors. Returns (sel_capped,
-    over) where over holds the original positions capped away (empty when
-    nothing was). The input mask is not mutated.
-    """
-    keep_idx = np.nonzero(sel)[0]
-    if len(keep_idx) <= cap:
-        return sel, np.empty(0, dtype=np.int64)
-    out = sel.copy()
-    out[keep_idx[cap:]] = False
-    return out, keep_idx[cap:]
+def _role_keypoint_cap(role: str) -> int:
+    """Max role keypoints of one pass: the role's ROLE_MAX_KEYPOINTS
+    entry."""
+    return ROLE_MAX_KEYPOINTS[role]
 
 def _slugify(text: str) -> str:
     """Prompt folder slug — mirrors run_object_init_points.py."""
@@ -220,7 +213,7 @@ def parse_args(argv: list[str] | None = None):
                         help="an invisible run of this many consecutive "
                              "trace stems or more drops the column (the "
                              "threshold is strict; default: %(default)s)")
-    parser.add_argument("--max-reappear-ratio", type=float, default=3.0,
+    parser.add_argument("--max-reappear-ratio", type=float, default=MAX_REAPPEAR_RATIO,
                         help="the reappearance allowance of a bounded "
                              "invisible run is this many times the "
                              "column's fastest per-stem pixel step while "
@@ -237,11 +230,28 @@ def parse_args(argv: list[str] | None = None):
                              "(the criterion is strict; default: "
                              "%(default)s px)")
     parser.add_argument("--seed", type=int, default=0,
-                        help="RNG seed for the support-grid padding "
-                             "(per role: seed + 0/1) (default: %(default)s)")
+                        help="RNG seed for the support draw (per role: "
+                             "seed + 0 object, +1 manipulator) "
+                             "(default: %(default)s)")
+    parser.add_argument("--support-sigma", type=float, default=DEFAULT_SUPPORT_SIGMA,
+                        help="Gaussian sigma of the support-point draw as a "
+                             "fraction of each image dimension: the support "
+                             "pixels are drawn at random with a weight that "
+                             "peaks at the image centre (sigma_x = "
+                             "sigma*width, sigma_y = sigma*height), among the "
+                             "anchor frame's valid-depth pixels that no role "
+                             "mask covers (default: %(default)s)")
     parser.add_argument("--skip-done", action="store_true",
                         help="skip prompts whose coords.npy already exists")
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if args.support_sigma <= 0:
+        # 0 divides by zero in the Gaussian and zeroes every weight (the
+        # draw then reports "no eligible support pixels", blaming the
+        # data for a bad flag); a negative sigma silently behaves like a
+        # positive one — both are rejected up front
+        parser.error(f"--support-sigma must be > 0 (a fraction of the "
+                     f"image dimension); got {args.support_sigma}")
+    return args
 
 
 # ---------------------------------------------------------------------------
@@ -275,7 +285,8 @@ def _read_prompt_dir(pdir: Path) -> dict:
 def _prompt_role(subtask_row: dict | None, prompt_text: str) -> str | None:
     """Role of a Step-3 prompt: the sub-task annotation column ('object' or
     'manipulator') whose value the prompt matches (exact text, then slug);
-    None when the annotations have no such row/entry."""
+    None when the annotations have no such row/entry — the caller skips
+    that prompt (the tool tracks role passes only)."""
     row = subtask_row or {}
     for role in ROLE_ORDER:
         value = row.get(role)
@@ -338,97 +349,136 @@ def _row_pixels(keypoints: np.ndarray, masks: np.ndarray, j: int,
     return rows, kp[rows], px[rows]
 
 
-def _grid_pixels(world: torch.Tensor, intrs: torch.Tensor,
-                 extr: torch.Tensor) -> torch.Tensor:
-    """(G, 2) continuous anchor-frame pixels of the unprojected grid
-    points: world -> camera with extr, then /z * (fx, fy) + (cx, cy) —
-    the exact inverse of the cells' unprojection (get_grid_queries), so
-    the recovered pixels stay aligned with the returned rows."""
-    h = torch.cat([world, torch.ones_like(world[:, :1])], dim=-1)  # (G, 4)
-    cam = (extr @ h.t()).t()[:, :3]                                # (G, 3)
-    fx, fy = intrs[0, 0], intrs[1, 1]
-    cx, cy = intrs[0, 2], intrs[1, 2]
-    z = cam[:, 2]
-    return torch.stack([cam[:, 0] / z * fx + cx,
-                        cam[:, 1] / z * fy + cy], dim=-1)
-
-
-def _drop_cells_near_px(grid_px: np.ndarray, query_px: np.ndarray,
-                        drop_budget: int) -> np.ndarray:
-    """Grid cells to drop so the surviving support spreads away from the
-    tracked points.
-
-    Cyclically, each query removes its closest not-yet-dropped grid cell
-    (anchor-frame pixel distance, squared Euclidean) until drop_budget
-    cells are gone — the even per-query split of the budget (a query
-    whose neighbours were already claimed falls back to its next
-    closest). Deterministic: cells are claimed in query rank order;
-    among equal distances the lowest-index cell wins.
-
-    Args:
-        grid_px: (G, 2) continuous grid-cell pixels, in grid row order.
-        query_px: (Q, 2) keypoint pixels in the same frame.
-        drop_budget: number of cells to drop (<= G).
-
-    Returns:
-        (G,) bool mask, True = drop the cell.
-    """
-    drop = np.zeros(grid_px.shape[0], dtype=bool)
-    if drop_budget <= 0:
-        return drop
-    q = query_px.shape[0]
-    d2 = ((grid_px[:, None, :] - query_px[None, :, :]) ** 2).sum(-1)  # (G, Q)
-    for i in range(drop_budget):
-        dist = d2[:, i % q].copy()
-        dist[drop] = np.inf
-        drop[int(np.argmin(dist))] = True
-    return drop
-
-
 def _support_queries(depth: np.ndarray, intrs: np.ndarray, extr: np.ndarray,
-                     n_points: int, rng: np.random.Generator,
-                     query_px: np.ndarray | None = None) -> torch.Tensor:
-    """n_points support queries at the anchor frame: the full-frame
-    SUPPORT_GRID_SIZE^2 grid (valid-depth pixels only), trimmed to
-    n_points; a shortfall is padded with uniformly sampled valid-depth
-    pixels. Returns (n_points, 4) with home frame 0.
+                     n_points: int, rng: np.random.Generator, sigma: float,
+                     exclude: np.ndarray | None = None) -> torch.Tensor:
+    """n_points support queries at the anchor frame, drawn at random from
+    the anchor's eligible pixels and unprojected to world coordinates.
+    Returns (n_points, 4) with home frame 0.
 
-    With query_px ((Q, 2), the role keypoints' anchor-frame pixels at the
-    depth resolution — the same space the grid cells are sampled in) the
-    trim is query-aware: the grid cells nearest the keypoints are dropped
-    (see _drop_cells_near_px), so the surviving support spreads away from
-    the tracked points instead of sampling the same surfaces. Without
-    query_px the grid is trimmed by an even linspace spread.
+    The draw is centre-weighted: every (H, W) depth-grid pixel carries a
+    separable Gaussian weight centred at ((W-1)/2, (H-1)/2) with
+    sigma_x = sigma*W, sigma_y = sigma*H, so the support concentrates
+    towards the image centre instead of spreading uniformly over the
+    frame. Eligible pixels are the ones with valid depth (> 0) that
+    ``exclude`` does not cover (the role prompts' mask union — a prompt
+    whose anchor-frame mask column is empty contributes nothing, see
+    _role_mask_union); every other pixel is weighted out and can never be
+    drawn.
+
+    The pixels are drawn without replacement (distinct support queries),
+    with the weights normalized over the eligible pool. A pool smaller
+    than n_points cannot fill the graph's fixed slot budget with distinct
+    pixels: it is drawn with replacement instead (a warning) — the graph
+    must still receive exactly n_points queries, so this never raises.
     """
     dh, dw = depth.shape
-    depth_t = torch.from_numpy(depth).float()
-    intrs_t = torch.from_numpy(intrs).float()
-    extr_t = torch.from_numpy(extr).float()
-    grid = get_grid_queries(SUPPORT_GRID_SIZE, depth_t[None], intrs_t[None],
-                            extr_t[None]).squeeze(0)          # (G, 4)
-    n = grid.shape[0]
-    if n > n_points and query_px is not None:
-        # a pass with more role keypoints than the graph's 64 object-query
-        # slots must shed support cells 1-for-1; drop those nearest the
-        # keypoints and keep the rest in grid order
-        drop = _drop_cells_near_px(
-            _grid_pixels(grid[:, 1:], intrs_t, extr_t).numpy(),
-            np.asarray(query_px, dtype=np.float32), int(n - n_points))
-        return grid[~drop].contiguous()
-    if n >= n_points:
-        # even spread fallback (no query pixels)
-        pick = np.linspace(0, n - 1, n_points).round().astype(int)
-        return grid[pick].contiguous()
-    parts = [grid]
-    ys, xs = np.nonzero(depth > 0)
-    if xs.size == 0:
-        raise ValueError("anchor depth has no valid pixels (> 0)")
-    idx = rng.choice(xs.size, size=n_points - n, replace=False)
-    xy = np.stack([xs[idx], ys[idx]], axis=-1).astype(np.float32)
-    pad = unproject_xy_queries(xy, depth, intrs, extr)
-    if pad is None or pad.shape[0] < n_points - n:
-        raise ValueError("could not sample enough valid-depth support pixels")
-    return torch.cat(parts + [pad])
+    cx, cy = (dw - 1) / 2.0, (dh - 1) / 2.0
+    sigma_x, sigma_y = sigma * dw, sigma * dh
+    gx = np.exp(-0.5 * ((np.arange(dw) - cx) / sigma_x) ** 2)
+    gy = np.exp(-0.5 * ((np.arange(dh) - cy) / sigma_y) ** 2)
+    weights = np.outer(gy, gx)                              # (H, W)
+    eligible = depth > 0
+    if exclude is not None:
+        eligible &= ~exclude
+    weights[~eligible] = 0.0
+    if eligible.any():
+        # Floor the *eligible* weights: a sigma small enough to underflow
+        # the frame's far corners to exactly 0 would drop those pixels
+        # from the pool the draw uses, while the caller's pool_px (the
+        # eligible count) still counts them — the pool would be smaller
+        # than the metadata reports, and the "no eligible support pixels"
+        # error could fire with valid pixels left. The weights are
+        # normalized over the pool anyway, so the floor only lifts the
+        # underflowed ones back into reach.
+        weights[eligible] = np.maximum(weights[eligible],
+                                       np.finfo(weights.dtype).tiny)
+
+    flat = weights.ravel()
+    pool = np.flatnonzero(flat)
+    if pool.size == 0:
+        valid = depth > 0
+        excluded = int(np.count_nonzero(valid & exclude)) \
+            if exclude is not None else 0
+        raise ValueError(
+            f"anchor depth has no eligible support pixels to draw from: "
+            f"{int(valid.sum())} valid-depth pixel(s), {excluded} of them "
+            f"covered by the role masks")
+    pool_w = flat[pool]
+    replace = pool.size < n_points
+    if replace:
+        print(f"    warning: only {pool.size} eligible support pixels for "
+              f"{n_points} support queries; drawing with replacement")
+    idx = rng.choice(pool, size=n_points, replace=replace,
+                     p=pool_w / pool_w.sum())
+    # flat pool index -> (x, y) pixel on the depth grid
+    xy = np.stack([idx % dw, idx // dw], axis=-1).astype(np.float32)
+    queries = unproject_xy_queries(xy, depth, intrs, extr)
+    if queries is None or queries.shape[0] < n_points:
+        raise ValueError(
+            f"could not unproject {n_points} eligible support pixels")
+    return queries
+
+
+def _role_mask_union(prompts: list[dict], anchor_abs: int,
+                     shape: tuple[int, int]) -> np.ndarray | None:
+    """Union of every role prompt's mask at the anchor frame, resized to
+    the anchor's depth ``shape`` (H, W) — the pixels support queries must
+    avoid.
+
+    Every role-resolved prompt of the camera contributes: the object's
+    and the manipulator's, on both passes, so no support point of a pass
+    lands on a surface any pass tracks — a prompt's tracked keypoints do
+    lie inside its own mask, except where its anchor column carries no
+    mask at all (masks[j].any() false, the same column _row_pixels
+    treats as unconstrained): such a prompt contributes no exclusion and
+    its keypoint pixels are not necessarily covered. A prompt's mask
+    column is picked with the same rule the keypoints use (_usable_at):
+    the anchor's own key-frame column when the anchor is one of its
+    key-frames, else the first — the window's leading stem, at-or-before
+    the first key-frame. A mask stored at the RGB key-frame resolution
+    (which can differ from
+    the depth grid) is mapped to the grid through *both* the nearest
+    resize and the keypoint mapping — they disagree on ~half the pixels
+    at 1280->640, see below. Columns that hold no mask (masks[j].any()
+    false) are skipped, and None is returned when no prompt contributed
+    one.
+    """
+    union = np.zeros(shape, dtype=bool)
+    got = False
+    for p in prompts:
+        kfs = list(p["frame_indices"])
+        j = kfs.index(anchor_abs) if anchor_abs in kfs else 0
+        mask_j = p["masks"][j]
+        if not mask_j.any():
+            continue
+        if mask_j.shape == tuple(shape):
+            union |= mask_j          # same grid: the mask is exact
+        else:
+            # Two mappings, ORed. The nearest resize — depth pixel q takes
+            # key-frame pixel floor(q*w/dw) — keeps the mask's *coverage*:
+            # no holes when the depth grid is finer than the key-frame
+            # (one key-frame pixel covers several depth pixels). But it is
+            # not the mapping the tracked keypoints use (_row_pixels:
+            # round(p*(d-1)/(n-1))); the two disagree for ~half the
+            # key-frame pixels at 1280->640, so a tracked keypoint sitting
+            # on a mask edge can land on a depth pixel the resize misses
+            # and a support query could be drawn on top of it. Scattering
+            # the mask's own set pixels through the keypoints' mapping
+            # adds exactly those pixels; the scatter alone would leave the
+            # holes the resize fills, so both are ORed.
+            resized = torch.nn.functional.interpolate(
+                torch.from_numpy(mask_j)[None, None].float(), size=shape,
+                mode="nearest")[0, 0] > 0.5
+            union |= resized.numpy()
+            ys, xs = np.nonzero(mask_j)
+            dy = np.round(ys * (shape[0] - 1) / max(mask_j.shape[0] - 1, 1))
+            dx = np.round(xs * (shape[1] - 1) / max(mask_j.shape[1] - 1, 1))
+            dy = np.clip(dy, 0, shape[0] - 1).astype(np.int64)
+            dx = np.clip(dx, 0, shape[1] - 1).astype(np.int64)
+            union[dy, dx] = True
+        got = True
+    return union if got else None
 
 
 class SubtaskTraceExtract(DataExtract):
@@ -460,12 +510,13 @@ class SubtaskTraceExtract(DataExtract):
         # inputs (…/subtask_{k:02d}/sampling_points/{detections,init_points}/),
         # the Step-2 depth_pose store and the Step-4 traces all live under it.
         self.episodes_root = self.out_dir
-        #: {subtask_index: annotation row}; role resolution degrades to
-        #: unlabelled prompts (anchored like the object) when missing.
+        #: {subtask_index: annotation row}; every prompt's role comes from
+        #: this file, so a missing one is fatal, not a degrade — the
+        #: exception's own message says to export meta/subtasks.csv.
         try:
             self.subtask_meta = load_subtask_meta(args.data_root)
-        except FileNotFoundError:
-            self.subtask_meta = {}
+        except FileNotFoundError as e:
+            raise SystemExit(f"{e}")
         self._pt2 = None
         # per-camera state, set by _process_camera()
         self.ep_idx = self.k = self.cam_key = None
@@ -483,18 +534,17 @@ class SubtaskTraceExtract(DataExtract):
             # 480x640, 1088-query iteration graph, 6 window iterations) —
             # see _DEFAULT_ENCODER / _DEFAULT_ITERATION in tapip3d.py
             self._pt2 = Tapip3D_PT2()
-            # the graph total is fixed at the export-time split (32x32
-            # support grid + 64 object-query slots); a pass splits the
-            # total between its role keypoints and the support block, so
-            # the role caps (64/128) never change the total
-            expected = SUPPORT_GRID_SIZE ** 2 + ROLE_MAX_KEYPOINTS["object"]
+            # the graph total is fixed at the export-time split; a pass
+            # splits the total between its role keypoints and the support
+            # block, so the role caps never change the total
+            expected = EXPECTED_NUM_QUERIES
             if self._pt2.num_queries != expected:
                 raise SystemExit(
                     f"iteration graph has {self._pt2.num_queries} fixed "
-                    f"queries, expected {expected} "
-                    f"({SUPPORT_GRID_SIZE}x{SUPPORT_GRID_SIZE} support grid "
-                    f"+ {ROLE_MAX_KEYPOINTS['object']} object slots) — "
-                    f"re-export the iteration program for this query count")
+                    f"queries, expected {expected} — the shipped graph is "
+                    f"exported for a fixed {expected}-query split (support "
+                    f"+ role keypoints); re-export the iteration program "
+                    f"if it differs")
         return self._pt2
 
     # --- dataset access -----------------------------------------------------
@@ -516,7 +566,7 @@ class SubtaskTraceExtract(DataExtract):
         payload carries just that sub-task) — the label resolves the
         sub-task annotation row of the segment's role split. None when the
         JSON is missing or carries no label (folder-mode payloads): the
-        prompts then degrade to unlabelled tracking, never to
+        camera is then skipped, never resolved through the
         segment-ordinal rows."""
         path = ap.detections_dir(self.episodes_root, ep_idx, k) / f"{cam}.json"
         if not path.is_file():
@@ -554,7 +604,7 @@ class SubtaskTraceExtract(DataExtract):
         stem is one of its key-frames, else the first column's keypoints
         tested against kf_abs's depth — valid for the window's leading stem
         (at-or-before the first key-frame), where the object is still
-        static. Rows are capped at max_rows (the role's per-prompt cap).
+        static. Rows are capped at max_rows (the role's per-pass cap).
         Empty rows when nothing is usable there."""
         kfs = list(prompt["frame_indices"])
         j = kfs.index(kf_abs) if kf_abs in kfs else 0
@@ -669,28 +719,33 @@ class SubtaskTraceExtract(DataExtract):
             return
 
         if label is None:
-            print(f"  [subtask {k:02d}] {cam}: no ground-truth label "
-                  f"recorded for it in the Step-3a detections JSON — "
-                  f"tracking its prompts unlabelled (re-run Step 3 to "
-                  f"regenerate the JSON with labels)")
-        row = self.subtask_meta.get(label) if label is not None else None
-        roles: dict[str | None, list[dict]] = {}
+            print(f"  [subtask {k:02d}] {cam}: skip, no ground-truth label "
+                  f"recorded for it in the Step-3a detections JSON — every "
+                  f"prompt's role resolves through that label (re-run "
+                  f"Step 3 to regenerate the labels)")
+            return
+        row = self.subtask_meta.get(label) or {}
+        roles: dict[str, list[dict]] = {}
         for p in prompts:
             role = _prompt_role(row, p["prompt"])
             if role is None:
                 print(f"    [{p['slug']}] warning: prompt {p['prompt']!r} "
-                      f"matches no object/manipulator entry of sub-task {k}; "
-                      f"tracking it in the unlabelled pass")
+                      f"matches no object/manipulator entry of sub-task {k} "
+                      f"(row: object={row.get('object')!r}, manipulator="
+                      f"{row.get('manipulator')!r}) — skipping it")
+                continue
             roles.setdefault(role, []).append(p)
-        # object and manipulator first, then any unlabelled prompts. The
-        # outcomes are only counted for the report below: Step 4 writes no
-        # camera-level metadata roll-up, the per-prompt metadata.json beside
-        # every coords.npy is the record of what happened (and what
+        # object then manipulator; every role-resolved prompt of the camera
+        # feeds the support exclusion below, whichever pass it belongs to.
+        # The outcomes are only counted for the report below: Step 4 writes
+        # no camera-level metadata roll-up, the per-prompt metadata.json
+        # beside every coords.npy is the record of what happened (and what
         # visualize_step4_traces.py reads).
         written = {"prompts": 0, "passes": 0}
-        order = [r for r in list(ROLE_ORDER) + [None] if r in roles]
+        order = [r for r in ROLE_ORDER if r in roles]
+        mask_prompts = [p for group in roles.values() for p in group]
         for role in order:
-            self._process_role(role, roles[role], written)
+            self._process_role(role, roles[role], written, mask_prompts)
         if not written["prompts"] and not written["passes"]:
             if self.args.skip_done:
                 print(f"  [subtask {k:02d}] {cam}: all prompts already "
@@ -698,14 +753,19 @@ class SubtaskTraceExtract(DataExtract):
             else:
                 print(f"  [subtask {k:02d}] {cam}: skip, nothing to track")
 
-    def _process_role(self, role: str | None, prompts: list[dict],
-                      written: dict) -> None:
+    def _process_role(self, role: str, prompts: list[dict], written: dict,
+                      mask_prompts: list[dict]) -> None:
         """One TAPIP3D pass for a role: pick the anchor key-frame, assemble
         the exact-N queries and track the role's keypoints over the trace
         window's stems from the anchor on. Counts the per-prompt outcomes
-        into ``written``."""
+        into ``written``.
+
+        ``mask_prompts`` holds every role-resolved prompt of the camera
+        (object + manipulator, whatever pass they run in): their masks at
+        the anchor frame become the support draw's exclusion mask, so
+        support points never land on a surface any pass tracks."""
         k = self.k
-        label = role or "unlabelled"
+        label = role
         cam_dir = ap.traces_dir(self.episodes_root, self.ep_idx, k,
                                 self.cam_subdir)
         pdirs = [str(cam_dir / p["slug"]) for p in prompts]
@@ -775,17 +835,36 @@ class SubtaskTraceExtract(DataExtract):
         xy = np.concatenate(xy_blocks)     # keypoint px on the anchor depth
         init = unproject_xy_queries(xy, depth, intrs, extr)
         assert init is not None, "anchor rows already depth-filtered"
+        excl = _role_mask_union(mask_prompts, anchor_abs, depth.shape)
         need = self._ensure_pt2().num_queries - init.shape[0]
-        pass_seed = self.args.seed + (ROLE_ORDER.index(role)
-                                      if role in ROLE_ORDER else 2)
+        pass_seed = self.args.seed + ROLE_ORDER.index(role)
         rng = np.random.default_rng(pass_seed)
-        support = _support_queries(depth, intrs, extr, need, rng,
-                                   query_px=xy)
+        try:
+            support = _support_queries(depth, intrs, extr, need, rng,
+                                       self.args.support_sigma, exclude=excl)
+        except ValueError as e:
+            # A degenerate anchor whose masks/valid depth leave no eligible
+            # support pixel is one unusable pass, not a fatal error: record
+            # it like the other empty paths (anchor_abs is None, n_obj == 0)
+            # and let the remaining episodes/sub-tasks run. Only the draw is
+            # guarded — a bug in the assembly around it must still surface.
+            reason = (f"no eligible support pixels at anchor {anchor_abs}: "
+                      f"{e}")
+            print(f"  [subtask {k:02d}] {label} pass: empty ({reason})")
+            for p, d in zip(prompts, pdirs):
+                self._save_empty(p, role, d, reason, written)
+            return
         queries = torch.cat([init, support])
         if queries.shape[0] != self._pt2.num_queries:
             raise SystemExit(
                 f"assembled {queries.shape[0]} queries, expected the "
                 f"iteration graph's {self._pt2.num_queries}")
+        # the draw's pool, for the metadata: valid-depth pixels outside /
+        # inside the role masks at the anchor frame
+        valid_px = depth > 0
+        excluded_px = int(np.count_nonzero(valid_px & excl)) \
+            if excl is not None else 0
+        pool_px = int(np.count_nonzero(valid_px)) - excluded_px
         print(f"  [subtask {k:02d}] {label} pass: {n_obj} role keypoints "
               f"+ {need} support queries, anchor {anchor_abs} "
               f"(seed {pass_seed})")
@@ -816,11 +895,10 @@ class SubtaskTraceExtract(DataExtract):
 
         # --- save: one folder per prompt (its own query columns only) --------
         # Prompt blocks are contiguous in column order both in the full
-        # layout and — survivors only — in the filtered arrays, so the
-        # prompt cursor (col) walks keep_t while a kept-column cursor
-        # (kept_col) walks the filtered coords/visibs. Filtered runs cap
-        # each prompt's output at MAX_KEPT_KEYPOINTS survivors (a 128-seed
-        # manipulator prompt can outlive the filters with more).
+        # layout and — survivors only — in the filtered arrays (each
+        # prompt's survivors, in seed order), so the prompt cursor (col)
+        # walks keep_t while a kept-column cursor (kept_col) walks the
+        # filtered coords/visibs.
         col = 0
         kept_col = 0
         written["passes"] += 1
@@ -840,11 +918,6 @@ class SubtaskTraceExtract(DataExtract):
                 # the column mask and coords slice on cpu directly
                 sel_t = keep_t[start:col]                # (n,) bool
                 sel = sel_t.numpy()                      # (n,) survivors
-                sel, over = _cap_keypoint_survivors(sel, MAX_KEPT_KEYPOINTS)
-                for i in over:
-                    drop_reasons[start + int(i)] = (
-                        f"beyond the {MAX_KEPT_KEYPOINTS}-keypoint output "
-                        f"cap after filtering")
                 n = int(sel.sum())
                 coords_save = coords[:, kept_col:kept_col + n].numpy()
                 visibs_save = visibs[:, kept_col:kept_col + n]
@@ -865,7 +938,6 @@ class SubtaskTraceExtract(DataExtract):
             entry = {
                 "episode": int(self.ep_idx), "subtask": int(k),
                 "role": role, "prompt": p["prompt"],
-                "prompt_slug": p["slug"],
                 "camera_key": self.cam_subdir,
                 "status": "ok",
                 "anchor_frame": int(anchor_abs),
@@ -876,15 +948,12 @@ class SubtaskTraceExtract(DataExtract):
                 "query_keypoint_rows":
                     [int(i) for i in rows_keep],
                 "pixels": [[float(x), float(y)] for x, y in px_keep],
-                "model": {"encoder": str(Path(_DEFAULT_ENCODER).absolute()),
-                          "iteration":
-                              str(Path(_DEFAULT_ITERATION).absolute()),
-                          "num_iters": self._pt2.num_iters},
                 "image_size": list(self._pt2.image_size),
                 "vis_threshold": self.args.vis_threshold,
                 "seed": self.args.seed,
-                "inputs": {"init_points_dir": str(p["dir"]),
-                           "depth_dir": str(self.seg_depth_dir)},
+                "support": {"sigma": float(self.args.support_sigma),
+                            "pool_px": int(pool_px),
+                            "excluded_px": int(excluded_px)},
             }
             if keep_t is not None:
                 dropped = np.nonzero(~sel)[0]
@@ -910,18 +979,15 @@ class SubtaskTraceExtract(DataExtract):
             print(f"    [{p['slug']}] {n} keypoints -> {d}")
             written["prompts"] += 1
 
-    def _save_empty(self, prompt: dict, role: str | None, out_dir: str,
+    def _save_empty(self, prompt: dict, role: str, out_dir: str,
                     reason: str, written: dict) -> None:
         """Prompt metadata only (status empty) — mirrors the Step-3b
         init_points.json convention."""
         entry = {
             "episode": int(self.ep_idx), "subtask": int(self.k),
             "role": role, "prompt": prompt["prompt"],
-            "prompt_slug": prompt["slug"],
             "camera_key": self.cam_subdir,
             "status": "empty", "empty_reason": reason,
-            "inputs": {"init_points_dir": str(prompt["dir"]),
-                       "depth_dir": str(self.seg_depth_dir)},
         }
         Path(out_dir).mkdir(parents=True, exist_ok=True)
         with open(Path(out_dir) / "metadata.json", "w") as f:

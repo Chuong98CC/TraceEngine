@@ -44,18 +44,32 @@ keypoint lying inside that key-frame's SAM3 mask (no mask on the frame ->
 unconstrained) with **valid depth** at its pixel. When no key-frame of the
 sub-task yields any usable point for a role, the role is skipped with the
 reason recorded (prompt `metadata.json`, `status: "empty"`). Prompts whose
-text matches neither annotation column are tracked too (warned), in a
-separate unlabelled pass over their own key-frames.
+text matches neither annotation column are **skipped** with a warning
+naming the prompt and the row's `object`/`manipulator` values; a camera
+whose Step-3a detections JSON carries no sub-task label is skipped
+entirely (re-run Step 3 to regenerate the labels with them).
 
 **Query budget (exact-N).** The shipped iteration program
 (`weights/tapip3d/tapip3d_iteration_1088_bf16.pt2`) has a **fixed query
-count (1088)**: per pass, up to **64 role keypoints** (Step-3 rank order;
-rows trimmed when more) + the full-frame **32x32 support grid** at the
-anchor frame. Since the grid's valid-depth points rarely fill the exact
-remainder, the support slots are trimmed/padded deterministically to reach
-1088: padding points are sampled uniformly at random among the anchor
-frame's valid-depth pixels (`np.random.default_rng(seed + role_index)`,
-role_index 0 = object, 1 = manipulator). All queries carry **home frame 0**
+count (1088)**: per pass, up to **1000 role keypoints** (the per-role
+seeding caps of `ROLE_MAX_KEYPOINTS` — Step-3 rank order; rows trimmed
+when more) + the `1088 - role keypoints` **support points** (88 for a
+full pass). The support is drawn at random from the anchor frame's
+**valid-depth** pixels with a Gaussian weight that peaks at the image
+centre (`--support-sigma`: sigma_x = sigma*width, sigma_y =
+sigma*height), so it concentrates towards the centre instead of spreading
+uniformly over the frame. The draw is without replacement whenever the
+eligible pool is at least the support budget (distinct pixels — duplicate
+support queries are impossible there); a pathological anchor whose
+eligible pool is smaller is drawn WITH replacement instead (warned, but
+still exactly 1088 queries). Every pixel covered by **any** role prompt's
+mask at the anchor frame is excluded (object + manipulator, on both
+passes): no support point lands on a surface a pass tracks. A prompt
+whose anchor-frame mask column is empty (`masks[j].any()` false — the
+same column `_row_pixels` treats as unconstrained) contributes no
+exclusion, so its own keypoint pixels are not necessarily excluded by the
+masks. The draw is seeded `np.random.default_rng(seed + role_index)`,
+role_index 0 = object, 1 = manipulator. All queries carry **home frame 0**
 — the leading stems before the anchor are dropped, not encoded, so the
 anchor is always the sequence's first frame (the static iteration graph
 cannot mask late-frame queries).
@@ -176,8 +190,11 @@ python tools/astribot/visualize_step4_traces.py \
 
 `T` = the number of tracked stems (the trace window's Step-2 stems from
 the anchor on, absolute indices listed in the prompt `metadata.json`
-under `steps`), `Q` = the prompt's tracked keypoints (<= 64). The pass arrays
-(including the support queries) are sliced to each prompt's own queries;
+under `steps`), `Q` = the prompt's own share of the pass's role
+keypoints as written by the pass (at most the pass's role cap); the
+filters only drop columns — nothing is capped afterwards. The pass arrays
+are sliced to each prompt's own queries (its role keypoints — the pass's
+support queries belong to no prompt and are never written out);
 prompts skipped by a role carry a `metadata.json` with
 `status: "empty"` + `empty_reason` only (the Step-3b convention).
 `coords` row 0 equals the anchor-world points of `queries.npy`
@@ -194,13 +211,14 @@ prompts skipped by a role carry a `metadata.json` with
 | `--max-episodes`, `-x` | — | cap the number of processed episodes |
 | `--out-dir`, `-o` | `<data-root>/eps_data` | output root; Step-2 results read under `<out-dir>/depth_pose`, traces saved under `<out-dir>/traces`. The Step-3 inputs are always read from the sampling_points root (`<data-root>/eps_data/sampling_points/{detections,init_points}`) |
 | `--vis-threshold` | 0.5 | sigmoid visibility threshold for `visibs` |
-| `--seed` | 0 | RNG seed for the support padding (per role: seed + 0 object, +1 manipulator, +2 unlabelled) |
+| `--seed` | 0 | RNG seed for the support draw (per role: seed + 0 object, +1 manipulator) |
+| `--support-sigma` | 0.25 | Gaussian sigma of the support-point draw as a fraction of each image dimension: the support pixels are drawn at random with a weight that peaks at the image centre (sigma_x = sigma*width, sigma_y = sigma*height), among the anchor frame's valid-depth pixels that no role mask covers |
 | `--skip-done` | off | skip prompts whose `coords.npy` already exists |
 
 The TAPIP3D artifacts and graph config are the shipped defaults (encoder
 `weights/tapip3d/tapip3d_encoder_480x640_bf16.pt2`, fused corr+updater
-`weights/tapip3d/tapip3d_iteration_1088_bf16.pt2` — 1088 = 32x32 support
-grid + 64 object slots, 6 iterations inside each window).
+`weights/tapip3d/tapip3d_iteration_1088_bf16.pt2` — 1088 = support points
++ role keypoints (up to 1000 per pass), 6 iterations inside each window).
 
 ## Notes
 
@@ -213,8 +231,9 @@ grid + 64 object slots, 6 iterations inside each window).
   segment
   ordinals are not the canonical ids — an episode executes its sub-tasks
   e.g. in order `[0, 2, 1, 3, 5, 4]`); a segment whose JSON carries no
-  label is tracked unlabelled (anchored like the object) with a warning —
-  never role-matched by the segment ordinal.
+  label has its whole camera skipped with a warning, and a prompt whose
+  text matches neither column is skipped with a warning — never
+  role-matched by the segment ordinal.
 - **Anchors sit on the stem grid; boundary key-frames usually don't.**
   Step-2 streams at `--stride` 4, so a prompt's key-frames are generally
   *not* stems — the sub-task's first frame (a boundary key-frame) is a
@@ -237,7 +256,8 @@ grid + 64 object slots, 6 iterations inside each window).
 - **Verified on `astri_making_coffee` (ep000000, all 6 sub-tasks, camera
   cam_head, Step-2 at stride 4, VGGT-Omega):** 12 passes (object +
   manipulator per sub-task) each tracked 64 role keypoints + 1024 support
-  queries (exact 1088) anchored at the sub-task's first stem (0, 330, 467,
+  queries (exact 1088; the support block was the then-current 32x32 grid)
+  anchored at the sub-task's first stem (0, 330, 467,
   884, 1227, 1372 — every sub-task start was a usable key-frame, so no
   object pass had to advance). Per-prompt `coords (T, 64, 3)` with T =
   35–105 stems; row 0 matches the anchor world points (~1e-3 m, the window
