@@ -4,23 +4,30 @@ LeRobotDataset copy (four independent --mode runs).
 Each mode splits the selected episodes into sub-task segments — from the
 dataset's ground-truth subtask_index column when it exists, else from the
 gripper-inferred splits of detect_subtask (--use-inferred-splits always
-prefers the inferred ones) — and writes under <out-dir>:
+prefers the inferred ones) — and writes into the episodes tree (see
+utils/astribot_paths) rooted at <out-dir> (<data-root>/episodes by default):
 
 - ``detect_subtask``: key/split frames inferred from the tabular gripper
-  state alone — no videos needed → <out-dir>/subtask/<episode>/
-  subtask_splits.json + gripper plot.
+  state alone — no videos needed → <out-dir>/ep{ep:03d}/subtask.json (the
+  key frames, the split frames and the canonical label of every segment,
+  resolved from the dataset annotations by ground-truth execution order) +
+  split_graph.png next to it.
 - ``key_frames``: jpgs of the episode's first/last frame, its gripper key
-  frames and each sub-task segment's boundary frames → <out-dir>/
-  key_frames/<episode>/subtask_XX/<camera>/frame_*.jpg (feeds Step 3), plus
-  subtask_labels.json mapping every segment to its canonical sub-task label
-  (by ground-truth execution order — Step 3a reads it for the prompts).
+  frames and each sub-task segment's boundary frames →
+  <out-dir>/ep{ep:03d}/subtask_XX/sampling_points/key_frames/<camera>/
+  frame_*.jpg (feeds Step 3).
 - ``videos``: one mp4 per sub-task segment per camera, cut from the episode
-  videos (ffmpeg re-encode at the exact split frames) → <out-dir>/
-  subtask_videos/<episode>/<camera>/.
+  videos (ffmpeg re-encode at the exact split frames) →
+  <out-dir>/ep{ep:03d}/subtask_XX/videos/<camera>/video.mp4.
 - ``frames``: every --interval-th frame of each sub-task segment (capped by
-  --max-frames) → <out-dir>/subtask_frames/<episode>/subtask_XX/<camera>/;
-  cameras with a paired uint16-mm depth feature also get
+  --max-frames) → <out-dir>/ep{ep:03d}/subtask_XX/frames/<camera>/; cameras
+  with a paired uint16-mm depth feature also get
   depth_<camera>/frame_*.lz4 (load_depth_lz4).
+
+The three reading modes take the split frames from the episode's
+subtask.json, falling back to the canonical <data-root>/episodes one when
+the chosen --out-dir holds none (the detect_subtask run of another --out-dir
+supplies them).
 
 The dataset videos must be local for every mode except detect_subtask
 (LeRobotDataset opens with download_videos=False).
@@ -64,10 +71,10 @@ from lerobot.datasets import LeRobotDataset, LeRobotDatasetMetadata
 from lerobot.datasets.streaming_dataset import StreamingLeRobotDataset
 from tqdm import tqdm
 
+from utils import astribot_paths as ap
 from utils.depth_utils import (depth_frame_to_uint16_mm, is_raw_depth_feature,
                                save_depth_lz4)
-from utils.keyframe_utils import SUBTASK_LABELS_FILE, SUBTASK_ORDER_FILE
-from utils.keyframe_utils import load_subtask_meta
+from utils.keyframe_utils import SUBTASK_ORDER_FILE, load_subtask_meta
 from utils.visualize.visualize_mask import to_pil
 
 # gripper values above this threshold count as 1 (closed), otherwise 0
@@ -80,14 +87,6 @@ KEY_FRAME_SMOOTH_WIN = 5
 # gripper that blips closed and re-opens) and are zeroed out before the
 # key-frame change detection; default for --min-close-seconds
 KEY_FRAME_MIN_CLOSE_S = 1.5
-# output roots per mode, under <out_dir>: detect_subtask writes the
-# subtask_splits.json + gripper plot, key_frames the first/last/key-frame
-# jpgs, videos the per-subtask mp4s, frames the sampled per-subtask frames
-# (+ a uint16 depth .lz4 per frame for cameras with a paired depth feature)
-MODE_ROOTS = {"detect_subtask": "subtask",
-              "key_frames": "key_frames",
-              "videos": "subtask_videos",
-              "frames": "subtask_frames"}
 
 
 def parse_args():
@@ -106,13 +105,14 @@ def parse_args():
                         choices=("detect_subtask", "key_frames", "videos", "frames"),
                         help="detect_subtask: detect the gripper key frames and infer the "
                              "sub-task split frames from observation.state only (no video "
-                             "access), saving the gripper plot and subtask_splits.json; "
+                             "access), saving the gripper plot and the episode's "
+                             "subtask.json (splits + per-segment labels); "
                              "key_frames: save one jpg per camera of the episode's first, "
                              "last and key frames plus the start/end frame of every "
                              "sub-task segment, each under the sub-task segment it "
-                             "belongs to (from subtask_splits.json); "
+                             "belongs to (from subtask.json); "
                              "videos: one mp4 per sub-task segment per camera, "
-                             "always frame-accurate (from subtask_splits.json); "
+                             "always frame-accurate (from subtask.json); "
                              "frames: one jpg per --interval-th frame of each sub-task "
                              "(capped at --max-frames), plus a uint16 depth .lz4 per "
                              "frame for cameras with a paired uint16 depth feature")
@@ -130,14 +130,12 @@ def parse_args():
     parser.add_argument("--max-episodes", "-x", type=int, default=None,
                         help="cap the number of processed episodes")
     parser.add_argument("--out-dir", "-o", default=None,
-                        help="output root (default: <data-root>/eps_data, with "
-                             "subtask/, key_frames/ and subtask_videos/ "
-                             "sub-folders)")
+                        help="episodes root (default: <data-root>/episodes)")
     parser.add_argument("--dedup-tasks", action="store_true",
                         help="skip episodes whose task already produced output")
     parser.add_argument("--use-inferred-splits", action="store_true",
                         help="prefer the sub-task split frames inferred by "
-                             "detect_subtask (subtask_splits.json) over the "
+                             "detect_subtask (subtask.json) over the "
                              "dataset's ground-truth subtask_index column "
                              "when both exist")
     parser.add_argument("--min-close-seconds", type=float,
@@ -159,22 +157,12 @@ class DataExtract:
         self.dataset = None  # LeRobotDataset handle, created lazily by the modes that decode videos
         self.tasks = getattr(self.ds_meta, "tasks", None)
         self.subtasks = self._load_subtasks()
-        self.out_dir = args.out_dir or (args.data_root + "/eps_data")
-        # root of the detect_subtask outputs (subtask_splits.json + gripper
-        # plot). Default: the output root, so a standalone detect_subtask +
-        # reading-mode pair under one --out-dir stays self-contained. The
-        # reading modes (key_frames, videos, frames) additionally fall back
-        # to the splits' canonical shared location <data-root>/eps_data/
-        # subtask when the out-dir has no detect_subtask outputs of its own —
-        # the Step-3 driver's key_frames step writes under its sampling_points
-        # --out-dir while the splits stay at <data-root>/eps_data (Step 2
-        # reads them from there).
-        self.splits_root = self.out_dir
-        if args.mode in ("key_frames", "videos", "frames"):
-            canonical = os.path.join(args.data_root, "eps_data")
-            if not os.path.isdir(os.path.join(self.out_dir, "subtask")) \
-                    and os.path.isdir(os.path.join(canonical, "subtask")):
-                self.splits_root = canonical
+        # every mode writes into the episodes tree rooted here (see
+        # utils.astribot_paths); self.out_dir keeps the name the streaming
+        # subclass inherits (run_step2_depth_stream.py), self._root is what
+        # the path helpers of every mode are fed
+        self.out_dir = ap.episodes_root(args.data_root, args.out_dir)
+        self._root = self.out_dir
         self._features = getattr(self.ds_meta.info, "features", None)
         if self._features is None:
             self._features = getattr(self.ds_meta, "features", {})
@@ -340,8 +328,8 @@ class DataExtract:
 
     def _camera_dirs(self):
         """Per-camera subdir names, named after the dataset camera keys; the
-        per-mode output layout lives under out_dir/<mode_root>/ep{ep}/ (see
-        MODE_ROOTS and _episode_dir)."""
+        output layout lives under the episodes root (see
+        utils.astribot_paths)."""
         cam_dirs = {idx: self._camera_subdir(cam_key)
                     for idx, cam_key in self.cam_keys.items()}
         os.makedirs(self.out_dir, exist_ok=True)
@@ -600,24 +588,22 @@ class DataExtract:
 
     # --- outputs ---------------------------------------------------------------
 
-    def _episode_dir(self):
-        """Per-episode output root of the current mode:
-        out_dir/<mode_root>/ep{ep_idx:06d} (see MODE_ROOTS)."""
-        return os.path.join(self.out_dir, MODE_ROOTS[self.args.mode],
-                            f"ep{self.ep_idx:06d}")
+    def _subtask_file_path(self):
+        """subtask.json of the current episode (written by detect_subtask,
+        read by key_frames, videos and frames). The reading modes fall back
+        to the canonical <data-root>/episodes file when the chosen output
+        root has none — the detect_subtask run of another --out-dir supplies
+        the splits."""
+        path = ap.subtask_json(self._root, self.ep_idx)
+        if self.args.mode != "detect_subtask" and not path.is_file():
+            path = ap.subtask_json(ap.episodes_root(self.args.data_root),
+                                   self.ep_idx)
+        return path
 
-    def _split_file_path(self):
-        """subtask_splits.json of the current episode (written by
-        detect_subtask, read by key_frames, videos and frames). Always lives
-        under the subtask root of the splits root (self.splits_root — the
-        output root, or the canonical <data-root>/eps_data for the reading
-        modes when the output root has no detect_subtask outputs)."""
-        return os.path.join(self.splits_root, MODE_ROOTS["detect_subtask"],
-                            f"ep{self.ep_idx:06d}", "subtask_splits.json")
-
-    def _save_splits(self, key_idxes, split_idxes):
-        """Record the detected key frames and the inferred sub-task split
-        frames (absolute dataset indices) as subtask_splits.json."""
+    def _save_subtask_json(self, key_idxes, split_idxes, labels):
+        """Record the episode's Step-1 metadata as one subtask.json: the
+        detected key frames, the inferred sub-task split frames (absolute
+        dataset indices) and the canonical label of every segment."""
         data = {
             "episode": self.ep_idx,
             "task_id": self.task_id,
@@ -626,9 +612,10 @@ class DataExtract:
             "to_idx": self.to_idx,
             "key_frames": [int(k) for k in key_idxes],
             "split_frames": [int(s) for s in split_idxes],
+            "labels": [None if lb is None else int(lb) for lb in labels],
         }
-        path = self._split_file_path()
-        os.makedirs(os.path.dirname(path), exist_ok=True)
+        path = ap.subtask_json(self._root, self.ep_idx)
+        path.parent.mkdir(parents=True, exist_ok=True)
         with open(path, "w") as f:
             json.dump(data, f, indent=2)
 
@@ -648,10 +635,10 @@ class DataExtract:
         changes = np.flatnonzero(subtasks[1:] != subtasks[:-1])
         return [int(frames[t + 1]) for t in changes]
 
-    def _load_splits_json(self):
-        """The current episode's subtask_splits.json dict, raising a
-        helpful error when the detect_subtask mode has not run yet."""
-        path = self._split_file_path()
+    def _load_subtask(self):
+        """The current episode's merged subtask.json dict, raising a helpful
+        error when the detect_subtask mode has not run yet."""
+        path = self._subtask_file_path()
         if not os.path.isfile(path):
             raise FileNotFoundError(
                 f"{path} missing: run scripts/astribot/extract_frames.sh --mode detect_subtask first "
@@ -665,14 +652,14 @@ class DataExtract:
         collected at every frame where the subtask changes (see
         _split_frames_from_ground_truth). An episode must have at least two
         sub-tasks; otherwise the split frames are loaded from the
-        subtask_splits.json written by the detect_subtask mode. With
+        subtask.json written by the detect_subtask mode. With
         --use-inferred-splits the detect_subtask split frames always win —
         the ground-truth subtask_index labels are sometimes wrong."""
         if not self.args.use_inferred_splits:
             splits = self._split_frames_from_ground_truth()
             if splits is not None:
                 return {"split_frames": splits}
-        return self._load_splits_json()
+        return self._load_subtask()
 
     def _ordered_subtask_ids(self, df):
         """Canonical subtask ids of the episode in execution order: the
@@ -716,16 +703,15 @@ class DataExtract:
                 ids.append(hits[0])
         return ids
 
-    def _label_keyframe_segments(self, bounds, df):
-        """Resolve the canonical dataset label of every key-frame segment —
-        segment j is the j-th ground-truth sub-task in execution order — and
-        write them as subtask_labels.json next to the frames (the file Step
-        3a reads to prompt each segment with its own sub-task's object/
-        manipulator). The order comes from the subtask_index column runs
-        when the dataset has one, else from the lerobot_annotations.json
-        order, else the segment ordinal is assumed. Prints the per-episode
-        resolution and any order mismatches (segments beyond the order stay
-        unlabelled; unused ground-truth sub-tasks are reported)."""
+    def _resolve_segment_labels(self, bounds, df):
+        """Resolve the canonical dataset label of every sub-task segment
+        (segment j is the j-th ground-truth sub-task in execution order).
+        The order comes from the subtask_index column runs when the dataset
+        has one, else from the lerobot_annotations.json order, else the
+        segment ordinal is assumed. Returns (labels, source) and prints the
+        per-episode resolution and any order mismatches (segments beyond the
+        order stay unlabelled; unused ground-truth sub-tasks are reported) —
+        the source is a diagnostic only, the file keeps the bare list."""
         order = self._ordered_subtask_ids(df)
         source = "ground_truth"
         if not order:
@@ -747,18 +733,7 @@ class DataExtract:
             print(f"  [labels] ground-truth sub-task(s) {order[len(labels):]}"
                   f" have no segment (missed split?)")
         print(f"  [labels] segment labels ({source}): {labels}")
-        self._save_subtask_labels(labels, source)
-
-    def _save_subtask_labels(self, labels, source):
-        """Record the per-segment canonical labels as subtask_labels.json in
-        the episode's key_frames folder: {segment ordinal: label}, null for
-        a segment beyond the ground-truth order."""
-        data = {"episode": self.ep_idx, "source": source,
-                "segments": {str(k): (int(lb) if lb is not None else None)
-                             for k, lb in enumerate(labels)}}
-        path = os.path.join(self._episode_dir(), SUBTASK_LABELS_FILE)
-        with open(path, "w") as f:
-            json.dump(data, f, indent=2)
+        return labels, source
 
     def _plot_gripper_state(self, frames, vals, subtask_idxes, smooth,
                             key_idxes, split_idxes):
@@ -806,7 +781,7 @@ class DataExtract:
                 ax.text(s, ymin, f"{s:g}", rotation=90, ha="right",
                         va="bottom", fontsize=8, color="red")
         ax.set_ylabel("gripper state")
-        ax.set_title(f"episode {self.ep_idx:06d} gripper state")
+        ax.set_title(f"episode {self.ep_idx:03d} gripper state")
         if subtask_idxes is not None:
             # raw subtask index below: one step per frame (where="post"),
             # integer ticks and a tight y range so the values are shown
@@ -833,17 +808,16 @@ class DataExtract:
         with warnings.catch_warnings():
             warnings.filterwarnings("ignore", message=r".*tight_layout.*")
             plt.tight_layout()
-        edir = self._episode_dir()
-        os.makedirs(edir, exist_ok=True)
-        plt.savefig(os.path.join(edir, f"split_graph_{self.ep_idx:06d}.png"),
-                    dpi=150, bbox_inches="tight")
+        path = ap.split_graph(self._root, self.ep_idx)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        plt.savefig(path, dpi=150, bbox_inches="tight")
         plt.close()
 
     def _load_key_frames(self):
         """Key frames of the current episode, detected by the detect_subtask
         mode (ground truth has no key frames — the gripper analysis is the
         only source)."""
-        return self._load_splits_json()["key_frames"]
+        return self._load_subtask()["key_frames"]
 
     def _save_frame_jpg(self, frame, cam_key, path):
         """Save one camera frame of a dataset row as a jpg. Depth streams
@@ -857,35 +831,36 @@ class DataExtract:
     def _save_frames(self, frame_idxes, split_idxes):
         """Save one jpg per dataset index per selected camera, each under the
         sub-task segment the frame belongs to:
-        <out_dir>/key_frames/<episode>/subtask_XX/<camera>/ (an episode
-        without splits lands everything in subtask_00)."""
-        base = self._episode_dir()
-        # map each key-frame dataset index to its sub-task segment folder
+        <root>/ep{ep:03d}/subtask_XX/sampling_points/key_frames/<camera>/
+        (an episode without splits lands everything in subtask_00)."""
+        # map each key-frame dataset index to its sub-task segment
         seg_of = {}
         for k, (lo, hi) in enumerate(self._segment_bounds(split_idxes)):
             for idx in frame_idxes:
                 if lo <= idx < hi:
-                    seg_of[idx] = f"subtask_{k:02d}"
-        for seg in set(seg_of.values()):
-            for ci, sub in self.cam_dirs.items():
-                os.makedirs(os.path.join(base, seg, sub), exist_ok=True)
+                    seg_of[idx] = k
+        for k in set(seg_of.values()):
+            for sub in self.cam_dirs.values():
+                ap.key_frames_dir(self._root, self.ep_idx, k, sub).mkdir(
+                    parents=True, exist_ok=True)
         ds = self._ensure_dataset()
         for frame_idx in frame_idxes:
             frame = ds[frame_idx]
             for ci, sub in self.cam_dirs.items():
-                self._save_frame_jpg(frame, self.cam_keys[ci],
-                                     os.path.join(base, seg_of[frame_idx],
-                                                  sub,
-                                                  f"frame_{frame_idx:06d}.jpg"))
+                self._save_frame_jpg(
+                    frame, self.cam_keys[ci],
+                    ap.key_frames_dir(self._root, self.ep_idx,
+                                      seg_of[frame_idx], sub)
+                    / (ap.frame_stem(frame_idx) + ".jpg"))
 
     def _save_subtask_frames(self, split_idxes):
         """Sample every --interval-th frame of each sub-task segment (capped
         at --max-frames per sub-task) and save one jpg per selected camera
-        under <out_dir>/subtask_frames/<episode>/subtask_XX/<camera>/. When a
-        camera has a paired depth feature stored as uint16 (mm, see
+        under <root>/ep{ep:03d}/subtask_XX/frames/<camera>/. When a camera
+        has a paired depth feature stored as uint16 (mm, see
         _depth_key_for), the raw depth array is saved alongside as
         frame_<idx>.lz4 (loadable by load_depth_lz4) under
-        <out_dir>/subtask_frames/<episode>/subtask_XX/depth_<camera>/."""
+        <root>/ep{ep:03d}/subtask_XX/frames/depth_<camera>/."""
         ds = self._ensure_dataset()
         # the depth pairing depends only on the camera key + dataset
         # features; resolve it once per camera, not per segment
@@ -900,24 +875,24 @@ class DataExtract:
                 print(f"  [subtask {k:02d}] skip: {hi - lo} frames at interval "
                       f"{self.args.interval} yield no steps")
                 continue
-            seg_dir = os.path.join(self._episode_dir(), f"subtask_{k:02d}")
-            cam_dirs = {ci: os.path.join(seg_dir, sub)
+            cam_dirs = {ci: ap.frames_dir(self._root, self.ep_idx, k, sub)
                         for ci, sub in self.cam_dirs.items()}
-            depth_dirs = {ci: os.path.join(seg_dir, f"depth_{self.cam_dirs[ci]}")
+            depth_dirs = {ci: ap.frames_dir(self._root, self.ep_idx, k,
+                                            f"depth_{self.cam_dirs[ci]}")
                           for ci in depth_keys}
             for d in list(cam_dirs.values()) + list(depth_dirs.values()):
-                os.makedirs(d, exist_ok=True)
+                d.mkdir(parents=True, exist_ok=True)
             for t in steps:
                 frame = ds[t]
-                for ci, sub in self.cam_dirs.items():
-                    self._save_frame_jpg(frame, self.cam_keys[ci],
-                                         os.path.join(cam_dirs[ci],
-                                                      f"frame_{t:06d}.jpg"))
+                for ci in self.cam_dirs:
+                    self._save_frame_jpg(
+                        frame, self.cam_keys[ci],
+                        cam_dirs[ci] / (ap.frame_stem(t) + ".jpg"))
                 for ci, dkey in depth_keys.items():
                     # raw uint16 mm depth, log-encoded by save_depth_lz4
                     save_depth_lz4(
                         depth_frame_to_uint16_mm(frame[dkey]),
-                        os.path.join(depth_dirs[ci], f"frame_{t:06d}.lz4"),
+                        depth_dirs[ci] / (ap.frame_stem(t) + ".lz4"),
                     )
 
     def _feature(self, key):
@@ -957,8 +932,9 @@ class DataExtract:
     def _write_subtask_videos(self, split_idxes):
         """One mp4 per sub-task segment per selected camera, cut straight
         from the episode's source videos with ffmpeg (no per-frame Python
-        decode). Saved under <out_dir>/subtask_videos/<episode>/<camera>/;
-        the dataset videos must be on disk (see _ensure_dataset).
+        decode). Saved under
+        <root>/ep{ep:03d}/subtask_XX/videos/<camera>/video.mp4; the dataset
+        videos must be on disk (see _ensure_dataset).
 
         Always frame-accurate: each segment is cut with its own x264
         re-encode at the exact split frames — a decode+encode pass is
@@ -966,10 +942,8 @@ class DataExtract:
         keyframes). Depth cameras are written as monochrome streams (the
         same grayscale convention as the jpg outputs).
         """
-        vdir = self._episode_dir()
         eps = self.ds_meta.episodes
         for ci, sub in self.cam_dirs.items():
-            os.makedirs(os.path.join(vdir, sub), exist_ok=True)
             cam = self.cam_keys[ci]
             prefix = f"videos/{cam}/"
             ch = int(eps[prefix + "chunk_index"][self.ep_idx])
@@ -982,19 +956,21 @@ class DataExtract:
                     f"source video {src} missing "
                     "(download the dataset videos first)")
             vf = ["-vf", "format=gray"] if "depth" in cam else []
-            for seg_i, (lo, hi) in enumerate(self._segment_bounds(split_idxes)):
+            for k, (lo, hi) in enumerate(self._segment_bounds(split_idxes)):
                 # frame i of the episode sits at from_timestamp + i/fps
                 # (the source videos are CFR at the dataset fps); the input
                 # seek decodes from the keyframe before the cut and discards
                 # up to the exact frame
                 start = t0 + (lo - self.from_idx) / self.fps
                 dur = (hi - lo) / self.fps
-                out = os.path.join(vdir, sub, f"subtask_{seg_i:02d}.mp4")
+                vdir = ap.videos_dir(self._root, self.ep_idx, k, sub)
+                vdir.mkdir(parents=True, exist_ok=True)
+                out = vdir / "video.mp4"
                 r = subprocess.run(
                     ["ffmpeg", "-y", "-loglevel", "error",
                      "-ss", f"{start:.6f}", "-i", src,
                      "-t", f"{dur:.6f}", *vf, "-c:v", "libx264",
-                     "-preset", "fast", "-crf", "18", "-an", out],
+                     "-preset", "fast", "-crf", "18", "-an", str(out)],
                     capture_output=True, text=True)
                 if r.returncode != 0:
                     raise RuntimeError(
@@ -1038,21 +1014,22 @@ class DataExtract:
             if self.gripper_idxes:
                 self._plot_gripper_state(frames, vals, subtasks, smooth,
                                          key_idxes, split_idxes)
-            self._save_splits(key_idxes, split_idxes)
+            # the segment labels come from the dataset annotations, not from
+            # the key-frames: resolve them here, once, next to the splits
+            labels, source = self._resolve_segment_labels(
+                self._segment_bounds(split_idxes), df)
+            self._save_subtask_json(key_idxes, split_idxes, labels)
         elif self.args.mode == "key_frames":
             # the start and end frame of every sub-task segment (the
             # boundaries under the chosen split source, ground-truth unless
             # --use-inferred-splits) plus the key frames detected by
             # detect_subtask, each saved under the sub-task segment it
-            # belongs to (see _save_frames); the segment labels resolved by
-            # ground-truth execution order land in subtask_labels.json (see
-            # _label_keyframe_segments)
+            # belongs to (see _save_frames)
             splits = self._load_splits()["split_frames"]
             bounds = self._segment_bounds(splits)
             seg_frames = [lo for lo, _ in bounds] + [hi - 1 for _, hi in bounds]
             frame_idxes = sorted(set(seg_frames + self._load_key_frames()))
             self._save_frames(frame_idxes, splits)
-            self._label_keyframe_segments(bounds, df)
         elif self.args.mode == "videos":
             self._write_subtask_videos(self._load_splits()["split_frames"])
         elif self.args.mode == "frames":

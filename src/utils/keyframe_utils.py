@@ -4,21 +4,21 @@ Step 3 runs its inference on the key-frames that Step 1 saved to disk
 (tools/astribot/extract_frames.py --mode key_frames) instead of decoding the
 episode videos online — Step 3 only consumes a handful of frames per
 sub-task, so persisting them is cheap, unlike Step 2 which streams every
-frame. The on-disk layout is:
+frame. The on-disk layout is the episodes tree of utils/astribot_paths:
 
-    <keyframes_root>/ep{ep:06d}/subtask_{k:02d}/<camera>/frame_<idx:06d>.jpg
+    <episodes_root>/ep{ep:03d}/subtask_{k:02d}/sampling_points/key_frames/<camera>/frame_<idx:06d>.jpg
 
 with <camera> the camera-subdir name (e.g. cam_head) and <idx> the absolute
 dataset frame index. Both Step 3a (run_object_detection.py) and Step 3b
 (run_object_init_points.py) must agree on those frames, so the discovery
-helpers live here; Step 3a also records the frame indices in its per-episode
+helpers live here; Step 3a also records the frame indices in its per-sub-task
 detections JSON, which Step 3b reads.
 
-The key_frames mode additionally writes subtask_labels.json per episode (see
-SUBTASK_LABELS_FILE): the canonical dataset subtask label of every saved
-segment, matched by ground-truth execution order — the canonical ids need
+The canonical dataset subtask label of every segment lives in the episode's
+merged Step-1 file (see ``load_subtask``): Step 1's detect_subtask mode
+resolves ``labels`` by ground-truth execution order — the canonical ids need
 not equal the segment ordinals (the frame-table subtask_index of an episode
-can run e.g. [0, 2, 1, 3, 5, 4]). Step 3a reads the file to fetch the
+can run e.g. [0, 2, 1, 3, 5, 4]). Step 3a reads them to fetch the
 [object, manipulator] prompts of the right sub-task of every segment.
 """
 
@@ -29,8 +29,8 @@ import json
 import re
 from pathlib import Path
 
-_EP_RE = re.compile(r"^ep(\d{6})$")
-_SUB_RE = re.compile(r"^subtask_(\d+)$")
+from utils import astribot_paths as ap
+
 _FRAME_RE = re.compile(r"^frame_(\d+)\.(?:jpg|jpeg|png)$")
 
 #: dataset subtask annotations (<data-root>/meta/subtasks.csv) — optional
@@ -46,61 +46,22 @@ SUBTASK_PROMPT_COLUMNS = ("object", "manipulator")
 #: ground-truth sub-task order of an episode; extract_frames.py falls back
 #: to it when the frame table has no subtask_index column.
 SUBTASK_ORDER_FILE = "lerobot_annotations.json"
-#: per-episode segment-label map written by extract_frames.py --mode
-#: key_frames next to the key-frames: <episode>/subtask_labels.json holds
-#: {segment ordinal: canonical subtask label} — the ordinal-to-label match
-#: is by ground-truth execution order (the frame-table subtask_index runs
-#: need not equal the ordinals), so Step 3a can fetch the [object,
-#: manipulator] prompts of the right sub-task of every segment.
-SUBTASK_LABELS_FILE = "subtask_labels.json"
-
-
-def sampling_points_root(data_root: str) -> Path:
-    """Default Step-3 output root: <data-root>/eps_data/sampling_points (the
-    sampling-keypoints workspace: key_frames/ from the driver's Step 1b,
-    detections/ from 3a, init_points/ from 3b). Step 2's depth_pose/, Step
-    4's traces/ and the shared detect_subtask subtask/ splits (Step 2 reads
-    them) stay under <data-root>/eps_data."""
-    return Path(data_root) / "eps_data" / "sampling_points"
-
-
-def keyframes_root(data_root: str) -> Path:
-    """Default key-frames root of the Step-3 tools: the key_frames/ folder of
-    the Step-3 output root (sampling_points_root -> <data-root>/eps_data/
-    sampling_points/key_frames). extract_frames.py itself defaults to
-    <data-root>/eps_data when run standalone — the run_step3_init_points.py
-    driver (which owns the Step-1b key-frame extraction of the sampling
-    flow) always passes an explicit --out-dir."""
-    return sampling_points_root(data_root) / "key_frames"
-
-
-def episode_dir(root: str | Path, ep_idx: int) -> Path:
-    """ep{ep_idx:06d} under the key-frames root."""
-    return Path(root) / f"ep{ep_idx:06d}"
 
 
 def discover_episodes(root: str | Path) -> list[int]:
-    """Episode indices with key-frames on disk, sorted ([] for a missing
+    """Episode indices with Step-1 outputs on disk, sorted ([] for a missing
     root)."""
-    root = Path(root)
-    if not root.is_dir():
-        return []
-    return sorted(int(m.group(1)) for p in root.iterdir()
-                  if p.is_dir() and (m := _EP_RE.match(p.name)))
+    return ap.discover_episodes(root)
 
 
 def camera_subdirs(root: str | Path, ep_idx: int) -> list[str]:
     """Camera-subdir names present in the episode's key-frame layout
     (collected from its subtask folders), sorted."""
-    ep = episode_dir(root, ep_idx)
-    if not ep.is_dir():
-        return []
     names = set()
-    for sub in sorted(ep.iterdir()):
-        if _SUB_RE.match(sub.name) and sub.is_dir():
-            for cam in sub.iterdir():
-                if cam.is_dir():
-                    names.add(cam.name)
+    for k in ap.discover_subtasks(root, ep_idx):
+        cam_root = ap.key_frames_dir(root, ep_idx, k)
+        if cam_root.is_dir():
+            names.update(p.name for p in cam_root.iterdir() if p.is_dir())
     return sorted(names)
 
 
@@ -108,21 +69,15 @@ def discover_subtask_frames(root: str | Path, ep_idx: int,
                             cam_subdir: str) -> dict[int, list[int]]:
     """{subtask_k: sorted absolute frame indices} of the saved key-frames of
     one camera ({} when the episode or camera has none)."""
-    ep = episode_dir(root, ep_idx)
     out: dict[int, list[int]] = {}
-    if not ep.is_dir():
-        return out
-    for sub in sorted(ep.iterdir()):
-        m = _SUB_RE.match(sub.name)
-        if not m or not sub.is_dir():
+    for k in ap.discover_subtasks(root, ep_idx):
+        cam_dir = ap.key_frames_dir(root, ep_idx, k, cam_subdir)
+        if not cam_dir.is_dir():
             continue
-        cam = sub / cam_subdir
-        if not cam.is_dir():
-            continue
-        frames = sorted(int(fm.group(1)) for f in cam.iterdir()
-                        if f.is_file() and (fm := _FRAME_RE.match(f.name)))
+        frames = sorted(int(m.group(1)) for f in cam_dir.iterdir()
+                        if f.is_file() and (m := _FRAME_RE.match(f.name)))
         if frames:
-            out[int(m.group(1))] = frames
+            out[k] = frames
     return out
 
 
@@ -130,32 +85,27 @@ def keyframe_path(root: str | Path, ep_idx: int, cam_subdir: str,
                   subtask_k: int, frame_idx: int) -> Path:
     """Path of a saved key-frame jpg (as written by extract_frames.py
     --mode key_frames)."""
-    return (episode_dir(root, ep_idx) / f"subtask_{subtask_k:02d}"
-            / cam_subdir / f"frame_{frame_idx:06d}.jpg")
+    return (ap.key_frames_dir(root, ep_idx, subtask_k, cam_subdir)
+            / (ap.frame_stem(frame_idx) + ".jpg"))
 
 
-def subtask_labels_path(root: str | Path, ep_idx: int) -> Path:
-    """subtask_labels.json of the episode's key-frames (written by
-    extract_frames.py --mode key_frames next to the frames)."""
-    return episode_dir(root, ep_idx) / SUBTASK_LABELS_FILE
-
-
-def load_subtask_labels(root: str | Path,
-                        ep_idx: int) -> dict[int, int | None]:
-    """{segment ordinal: canonical subtask label} of the episode's saved
-    key-frames — the ordinal-to-label match of the key_frames extraction
-    (None marks a segment beyond the ground-truth order, i.e. unlabelled).
-    Raises FileNotFoundError when the key-frames carry no labels file (an
-    extraction that predates it)."""
-    path = subtask_labels_path(root, ep_idx)
+def load_subtask(root: str | Path, ep_idx: int) -> dict:
+    """The episode's merged Step-1 file (splits + labels)."""
+    path = ap.subtask_json(root, ep_idx)
     if not path.is_file():
         raise FileNotFoundError(
-            f"{path} missing: the key-frames carry no ground-truth "
-            f"sub-task labels — re-run extract_frames.py --mode key_frames "
-            f"(or run run_step3_init_points.py without --skip-extract)")
-    data = json.loads(path.read_text())
-    return {int(k): (int(v) if v is not None else None)
-            for k, v in (data.get("segments") or {}).items()}
+            f"{path} missing: run extract_frames.py --mode detect_subtask "
+            f"(or run_step3_init_points.py without --skip-extract) first"
+        )
+    with open(path) as f:
+        return json.load(f)
+
+
+def load_subtask_labels(root: str | Path, ep_idx: int) -> list[int | None]:
+    """{segment ordinal: canonical subtask label} as a list (None = beyond the
+    ground-truth order)."""
+    labels = load_subtask(root, ep_idx).get("labels") or []
+    return [int(v) if v is not None else None for v in labels]
 
 
 def cap_keyframes(keys: list[int], max_keyframes: int | None) -> list[int]:
@@ -218,7 +168,7 @@ def select_camera(root: str | Path, ep_idx: int,
     if not subdirs:
         raise FileNotFoundError(
             f"episode {ep_idx}: no key-frame folders under "
-            f"{episode_dir(root, ep_idx)}")
+            f"{ap.episode_dir(root, ep_idx)}")
     if camera_keys:
         for c in camera_keys:
             if c in subdirs:
