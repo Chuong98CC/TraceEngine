@@ -90,9 +90,14 @@ def load_pair(
         intrinsics:  (N, 3, 3) float32
         images_u8:   (N, H, W, 3) uint8 RGB  (resized to match depth)
     """
+    if len(image_dirs) != len(depth_dirs):
+        raise ValueError(
+            f"image_dirs ({len(image_dirs)} folders) and depth_dirs "
+            f"({len(depth_dirs)} folders) must be parallel per-camera lists"
+        )
     depths, extrinsics_list, intrinsics_list, images_u8_list = [], [], [], []
 
-    for img_dir, depth_dir in zip(image_dirs, depth_dirs):
+    for img_dir, depth_dir in zip(image_dirs, depth_dirs, strict=True):
         depth, ext, intr = load_stream_data(depth_dir, frame_index)
         depths.append(depth)
         extrinsics_list.append(ext)
