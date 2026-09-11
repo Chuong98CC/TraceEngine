@@ -66,10 +66,24 @@ see run_step3_motion_masks.py) — the rescue for an arm the RexOmni
 detection missed. Step 3a' saves a mask only when a flow pair in the
 window is significant, as motion_rle.json (COCO RLE) in the
 (sub-task, camera) init_points folder of the episodes tree — next to the
-prompt subfolders of the init points it shaped; with --visualize-motion it also
-writes that pair's flow.png beside it, and Step 3b renders the resulting
-SAM ∪ motion union as union_mask.png inside the manipulator prompt's
-folder.
+prompt subfolders of the init points it shaped; Step 3b renders the
+resulting SAM ∪ motion union as union_mask.png inside the manipulator
+prompt's folder. Step 3a' writes nothing else (no flow.png).
+
+--visualize renders the Step-3b visualizations: the per-prompt viz.png
+(key-frames with the masks, the boxes and the keypoints) and, with
+--with-optical-flow-mask, the manipulator's union_mask.png — the
+motion-only pixels being exactly what the flow rescue added. Nothing is
+rendered without the flag.
+
+Whichever mask the manipulator ends up with (SAM ∪ optical flow, or the
+plain SAM mask), its no_roma draw is weighted toward the manipulated
+object: Step 3b weights every row-0 mask pixel by its distance to the
+object prompt's Step-3a box center — 1/(1+(d/R)²), R the mask's median
+distance, max-normalized — drops the below-median half (the pixels beyond
+R) and samples the top-k proportionally, so the arm keypoints stay on the
+side of the mask the object is on, denser toward it
+(--no-manipulator-near-object restores the uniform draw).
 
 For a standalone
 key-frame folder (no dataset), run_e2e_init_points.py (tools/general_test/)
@@ -229,6 +243,18 @@ def parse_args(argv: list[str] | None = None):
                              "span's first frame only (manipulator: the "
                              "1st key-frame; object: the 2nd, first of its "
                              "transport span)")
+    parser.add_argument("--no-manipulator-near-object", action="store_true",
+                        help="do not bias the manipulator's no_roma draw "
+                             "toward the manipulated object (Step 3b; "
+                             "default: its row-0 mask pixels are weighted "
+                             "by 1/(1+(d/R)^2) — d the distance to the "
+                             "object prompt's Step-3a box center, R the "
+                             "mask's median distance — normalized to a max "
+                             "of 1 and cut below their median, i.e. drawn "
+                             "from the pixels within R of it, spread over "
+                             "all of them and denser near the object; the "
+                             "object prompt and the RoMAv2 modes are "
+                             "unaffected)")
     parser.add_argument("--device", default=None, choices=["cuda", "cpu"],
                         help="device (Step 3b; default: auto)")
     parser.add_argument("--with-optical-flow-mask", action="store_true",
@@ -249,14 +275,16 @@ def parse_args(argv: list[str] | None = None):
                         help="moving-pixel fraction of the frame above which "
                              "a motion mask is significant (Step 3a' "
                              "early-stops on it; default: %(default)s)")
-    parser.add_argument("--visualize-motion", action="store_true",
-                        help="Step 3a' also writes the significant pair's "
-                             "flow.png next to its motion_rle.json (the "
-                             "sub-task's init-points folder), and Step 3b "
-                             "renders the manipulator's SAM ∪ motion union as "
-                             "union_mask.png next to that prompt's init "
-                             "points — requires --with-optical-flow-mask "
-                             "(default: off)")
+    parser.add_argument("--visualize", action="store_true",
+                        help="render every Step-3b visualization: the "
+                             "per-prompt viz.png (key-frames with the masks, "
+                             "the boxes and the keypoints — incl. the "
+                             "manipulator's near-object marks), and, with "
+                             "--with-optical-flow-mask, the manipulator's "
+                             "SAM ∪ motion union_mask.png (the pixels the "
+                             "flow rescue added). Step 3a' writes only its "
+                             "motion_rle.json either way (default: off — "
+                             "nothing rendered)")
     parser.add_argument("--skip-extract", action="store_true",
                         help="do not run Step 1: reuse the key-frames already "
                              "on disk under the output root "
@@ -269,8 +297,6 @@ def parse_args(argv: list[str] | None = None):
                         help="skip (episode, sub-task, camera) triples whose "
                              "Step-3a JSON exists, and sub-tasks whose "
                              "Step-3b output already exists")
-    parser.add_argument("--no-viz", action="store_true",
-                        help="skip the Step-3b viz.png rendering")
     parser.add_argument("--skip-3a", action="store_true",
                         help="do not run Step 3a: reuse the detections JSON "
                              "of a previous run — the JSON must exist for "
@@ -447,8 +473,6 @@ def _build_motion_masks_cmd(args, repo_root: Path) -> list[str]:
             "--max-keyframes", str(args.max_keyframes),
             "--motion-threshold", str(args.motion_threshold),
             "--motion-ratio", str(args.motion_ratio)]
-    if args.visualize_motion:
-        cmd += ["--visualize"]
     if args.skip_done:
         cmd += ["--skip-done"]
     return cmd
@@ -476,14 +500,14 @@ def _build_3b_cmd(args, repo_root: Path) -> list[str]:
             "--sampling-mode", args.sampling_mode]
     if args.with_optical_flow_mask:
         cmd += ["--with-optical-flow-mask"]
-    if args.visualize_motion:
-        cmd += ["--viz-motion-union"]
+    if args.no_manipulator_near_object:
+        cmd += ["--no-manipulator-near-object"]
+    if args.visualize:
+        cmd += ["--visualize"]
     if args.device:
         cmd += ["--device", args.device]
     if args.skip_done:
         cmd += ["--skip-done"]
-    if args.no_viz:
-        cmd += ["--no-viz"]
     return cmd
 
 
@@ -537,9 +561,6 @@ def main() -> None:
         sys.exit(f"--skip-3a: Step-3a detections missing for {shown} under "
                  f"{_out_root(args)} — run Step 3a first (or drop "
                  f"--skip-3a to run it now)")
-    if args.visualize_motion and not args.with_optical_flow_mask:
-        sys.exit("--visualize-motion requires --with-optical-flow-mask "
-                 "(there is no Step-3a' pass to visualize)")
     if args.with_optical_flow_mask:
         # Step 3a' reads the detections JSON of the same grid (works under
         # --skip-3a too) and writes the motion masks Step 3b unions.

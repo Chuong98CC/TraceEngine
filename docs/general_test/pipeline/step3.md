@@ -40,11 +40,13 @@ columns of the sub-task's row in meta/subtasks.csv; folder mode: --text-prompts
                   crops instead and the in-mask top-k filter
                   decides — same crops and filter, different pool;
                   --sampling-mode no_roma skips RoMAv2 entirely:
-                  the simple baseline uniformly sampling top-k
-                  points inside the mask of the span's first frame
-                  only (manipulator: the 1st key-frame; object:
-                  the 2nd, first of its close..open span), with
-                  the same masks and outputs otherwise;
+                  the simple baseline sampling top-k points inside
+                  the mask of the span's first frame only
+                  (manipulator: the 1st key-frame; object: the 2nd,
+                  first of its close..open span), with the same
+                  masks and outputs otherwise — the manipulator's
+                  draw weighted toward the manipulated object (see
+                  below), every other prompt uniform;
                   dataset mode: object prompts span the close..open
                   key-frames)
   → top-k keypoints inside the object masks
@@ -109,9 +111,12 @@ python tools/astribot/run_step3_init_points.py \
 
 # Re-run only 3b with tuned params, reusing the saved key-frames + detections
 # (--skip-3a requires the detections JSON on disk — missing -> error, in
-# both drivers: no silent text-only fallback)
+# both drivers: no silent text-only fallback). --visualize adds the rendered
+# images (viz.png, and union_mask.png under --with-optical-flow-mask) — a run
+# without it writes no images at all
 python tools/general_test/pipeline/run_e2e_init_points.py \
-    --keyframes-dir .../subtask_00/cam_head --skip-3a --object-top-k 64
+    --keyframes-dir .../subtask_00/cam_head --skip-3a --object-top-k 64 \
+    --visualize
 
 # Dataset mode: --skip-3a implies --skip-extract — the reused detections
 # were made from the key-frames on disk, so Step 1 is skipped too. The
@@ -136,11 +141,13 @@ python tools/general_test/pipeline/run_object_init_points.py \
     -o /data/astribot_making_coffee_vlva_full/eps_data_uniform \
     --detections-dir /data/astribot_making_coffee_vlva_full/eps_data/sampling_points/detections
 
-# Simple-baseline A/B (no RoMaV2): --sampling-mode no_roma uniformly
-# samples top-k points inside the mask of the span's first frame only
-# (manipulator: 1st key-frame; object: 2nd, first of its close..open
-# span) — same SAM3 masks, frame_indices and outputs, so Step 4 windows
-# and gating are unchanged; only the matching is dropped
+# Simple-baseline A/B (no RoMaV2): --sampling-mode no_roma samples top-k
+# points inside the mask of the span's first frame only (manipulator: 1st
+# key-frame, weighted toward the manipulated object; object: 2nd, first of
+# its close..open span, uniform) — same SAM3 masks, frame_indices and
+# outputs, so Step 4 windows and gating are unchanged; only the matching is
+# dropped. --no-manipulator-near-object samples the manipulator uniformly
+# too (the pre-weighting baseline)
 python tools/astribot/run_step3_init_points.py \
     --repo-id Kronze157/astribot_making_coffee_vlva_full \
     --data-root /data/astribot_making_coffee_vlva_full --episode-idxes 0 \
@@ -178,6 +185,7 @@ Step 3b — per sub-task, per prompt, per camera:
                        num_keypoints, top_k, bbox_scale, sampling_mode,
                        empty_reason on failure)
     viz.png            key-frames with masks, boxes and the tracks
+                       (--visualize only)
 ```
 
 `<camera>` is the camera subdir name (e.g. `cam_head`) — the same nesting
@@ -186,9 +194,65 @@ several cameras writes one subtree per camera instead of overwriting.
 Folder mode (`--keyframes-dir`, one camera by construction) writes the
 flat `<prompt_slug>/` under `subtask_00/`.
 
+**Visualization is opt-in**: one `--visualize` flag per entry point turns
+all of it on and nothing is rendered without it. In Step 3b it writes the
+per-prompt `viz.png`, plus — for a manipulator whose mask the
+`--with-optical-flow-mask` rescue widened — `union_mask.png` beside that
+prompt's outputs (the row-0 key-frame tinted SAM-only / SAM ∩ motion /
+motion-only, so the motion-only pixels are exactly what the flow added).
+Step 3a' writes only its `motion_rle.json`: the union render above is the
+way to eyeball a motion mask (there is no `flow.png`); the flags it
+replaces were 3b's `--no-viz` / `--viz-motion-union` and the drivers'
+`--visualize-motion`. The drivers forward their `--visualize` to 3b
+alone — `--visualize` without `--with-optical-flow-mask` simply has no
+union to draw.
+
 `<prompt_slug>` is the text prompt slugified (e.g. `brown_coffee_cup`).
 Failures are recorded in `init_points.json` (`empty_reason`) — the schema is
 uniform, so downstream consumers always find the same files.
+
+## The manipulator's near-object draw
+
+With `--sampling-mode no_roma` the manipulator's top-k draw is **weighted
+toward the manipulated object** — the arm points that end up on the
+gripper/hand near the object matter for the Step-4 traces, the rest of the
+mask does not. Its row-0 mask pixels (SAM3, ∪ the WAFT motion mask under
+`--with-optical-flow-mask`) are weighted by `1/(1 + (d/R)²)` — `d` the
+pixel distance to the object prompt's Step-3a box center **on the sampled
+key-frame** (the largest box of that frame's detections; a frame without
+one falls back to the first key-frame that has one), `R` the mask's median
+distance to that center — then the weights are
+
+1. normalized to a max of 1 (the pixel nearest the center weighs 1),
+2. cut below their median (`w < median(w)` → 0), and
+3. drawn from **without replacement**, proportionally to the weights.
+
+`1/(1 + (d/R)²)` decreases with `d`, so step 2 keeps exactly the pixels
+within `R` of the center — the mask's nearer half, `R` being the median —
+and step 3 spreads the draw over that whole disc, at most 2× denser toward
+the object. There is no distance constant to tune: the cut radius `R`
+follows the mask itself and doubles as the falloff scale, which is what
+keeps the points spread over the near half instead of collapsing onto the
+few pixels closest to the object center (raw `1/(1+d²)`, `d` in pixels, is
+a ~100:1 gradient at arm scale). The top-k count, the `frame_indices` span
+and the masks saved to `masks_rle.json` are unchanged, so Step 4's windows
+and per-frame gating are unaffected.
+
+`--no-manipulator-near-object` restores the plain uniform draw of earlier
+runs (bit-identical for the same episode/sub-task/camera/prompt, the seed
+being unchanged). The object prompt itself and both RoMAv2 modes always
+sample as before. The reference (`near_object_center`,
+`near_object_center_frame`), the cut radius in pixels
+(`near_object_radius_px` — the mask's median distance to the center, beyond
+which nothing is ever drawn), the pool and kept pixel counts and the median
+weight land in the manipulator's `init_points.json` — `near_object_weight`
+is `false` with a `near_object_reason` when there was nothing to weight
+against (no object-role prompt, e.g. folder mode, or no object detection on
+any key-frame). The manipulator's `viz.png` (under `--visualize`) marks
+the reference: an orange
+crosshair at the box center and the cut-radius circle around it, i.e. the
+disc the keypoints were drawn from (drawn on the sampled frame's panel even
+when the box came from a later key-frame — `near_object_center_frame`).
 
 ## Verification checklist
 
@@ -202,21 +266,31 @@ uniform, so downstream consumers always find the same files.
       ([object, manipulator] — e.g. segment `subtask_01` labelled `2`
       gets row 2's prompts, not row 1's); folder mode records no roles.
 - [ ] Step 3b wrote one `init_points/` subtree per camera (under
-      `ep*/subtask_XX/<camera>/`) with all four files per prompt
-      (`init_points.npz`, `masks_rle.json`, `init_points.json`,
-      `viz.png`).
+      `ep*/subtask_XX/<camera>/`) with `init_points.npz`,
+      `masks_rle.json` and `init_points.json` per prompt — plus `viz.png`
+      when run with `--visualize` (and `union_mask.png` beside the
+      manipulator's prompt under `--with-optical-flow-mask`, the two
+      being the only images a Step-3 run writes).
+- [ ] Without `--visualize` no `viz.png` / `union_mask.png` appears
+      anywhere under the output root, and no `flow.png` does either
+      (Step 3a' writes only `motion_rle.json`).
 - [ ] `init_points.npz` keypoints are `(K, N, 2)` — K ≤ `--object-top-k` points
       visible in all N key-frames (N = number of matched key-frames
       (dataset mode: 2 for an object prompt of a canonical 4-frame
       sub-task — the close/open pair — all key-frames otherwise)).
-- [ ] `viz.png` shows the tracks: for each key-frame, the object mask, the
+- [ ] With `--visualize`, `viz.png` shows the tracks: for each key-frame,
+      the object mask, the
       bbox, and the K keypoints — keypoints lie **inside the object masks**
       (default `--sampling-mode mask` constrains the RoMAv2 pool to the
       masks; `--sampling-mode uniform` samples the whole crops and the
       in-mask top-k filter keeps the tracks — the K points stay in-mask
       either way). With `--sampling-mode no_roma` the K sampled points lie
       inside the first span frame's mask and viz draws them on that
-      frame's panel only (no cross-frame lines).
+      frame's panel only (no cross-frame lines) — the manipulator's points
+      inside the median-distance disc around the object prompt's box center
+      (`--no-manipulator-near-object` lifts that), denser toward it; the
+      center and the radius are recorded in its `init_points.json` and
+      drawn on that panel.
 - [ ] Re-run with `--skip-3a` reuses the per-camera detections JSONs (no
       new detection pass — 3a is skipped) and implies `--skip-extract`
       (no re-extraction either — 3b reuses the key-frames on disk).

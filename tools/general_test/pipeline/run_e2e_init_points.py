@@ -112,8 +112,10 @@ def parse_args(argv: list[str] | None = None):
     parser.add_argument("--skip-done", action="store_true",
                         help="skip when the Step-3a JSON exists, and when the "
                              "Step-3b prompt output already exists")
-    parser.add_argument("--no-viz", action="store_true",
-                        help="skip the Step-3b viz.png rendering")
+    parser.add_argument("--visualize", action="store_true",
+                        help="render the Step-3b per-prompt viz.png "
+                             "(key-frames with the masks, the boxes and the "
+                             "keypoints); default: off, nothing rendered")
     parser.add_argument("--skip-3a", action="store_true",
                         help="do not run Step 3a: reuse the detections JSON "
                              "of a previous run — the JSON must exist under "
@@ -186,8 +188,8 @@ def _build_3b_cmd(args, repo_root: Path) -> list[str]:
         cmd += ["--device", args.device]
     if args.skip_done:
         cmd += ["--skip-done"]
-    if args.no_viz:
-        cmd += ["--no-viz"]
+    if args.visualize:
+        cmd += ["--visualize"]
     return cmd
 
 

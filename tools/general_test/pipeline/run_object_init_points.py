@@ -16,7 +16,8 @@ object masks:
     └──────────────────────────────┘
 
 Per prompt: init_points.npz (top-k keypoints), masks_rle.json (SAM3
-masks as COCO RLE), viz.png (key-frames + masks + tracks) — in episode
+masks as COCO RLE) and — with --visualize — viz.png (key-frames + masks
++ tracks) — in episode
 mode under the sub-task's own sampling_points folder of the episodes tree
 (utils.astribot_paths), one subtree per camera, mirroring the per-sub-task
 detections JSONs of Step 3a:
@@ -47,8 +48,14 @@ By default RoMAv2
 and the in-mask top-k filter alone decides —same crops and output criterion,
 different pool.
 --sampling-mode no_roma: is the simple baseline: no RoMAv2 — top-k points
-are uniformly sampled inside the mask of the span's first frame only
+are sampled inside the mask of the span's first frame only
 (the manipulator's 1st key-frame, the object's 2nd — the first of its transport span),
+the **manipulator** weighting its mask pixels by 1/(1 + (d/R)²) — d the
+distance to the manipulated object's Step-3a box center, R the mask's
+median distance (its cut radius) — normalized to a max of 1 and cut below
+its median, i.e. the pixels within R are drawn from, spread over that
+whole disc and denser toward the object (--no-manipulator-near-object
+keeps the plain uniform draw) — and every other prompt drawing uniformly,
 
 --with-optical-flow-mask (episode mode, off by default) unions the
 sub-task's WAFT motion mask (Step 3a', run_step3_motion_masks.py, read
@@ -61,7 +68,7 @@ it. The flow mask is anchored at the manipulator's 1st key-frame (the
 same frame row 0 samples from), so it ORs in-place. Step 3a' saves the
 mask only for significant pairs, so a sub-task without one (no file)
 simply keeps its SAM mask; a stale/mismatched mask is skipped with a
-note. --viz-motion-union renders that union (union_mask.png next to the
+note. --visualize renders that union too (union_mask.png next to the
 manipulator prompt's init points: the row-0 key-frame tinted SAM-only /
 SAM ∩ motion / motion-only) — the motion-only pixels being exactly what
 the rescue added.
@@ -133,6 +140,106 @@ def _prompt_top_k(top_k: int, manipulator_top_k: int | None,
     ``top_k``. The manipulator is sampled denser so enough of its points
     survive the Step-4 static filters (--filter-static-*)."""
     return (manipulator_top_k or top_k) if role == "manipulator" else top_k
+
+
+def _object_center(seg_dets: dict | None, keyframes: list[int],
+                   object_prompt: str | None) -> tuple[float, float, int] | None:
+    """(cx, cy, frame) of the manipulated object's detection box — the
+    reference the manipulator's near-object draw weights against.
+
+    ``keyframes`` is the prompt's own key-frame list, its first entry being
+    the frame the no_roma draw samples from (the manipulator keeps the full
+    sub-task span): that frame's box is preferred, the later ones are the
+    backfill candidates in order — the object's start-of-sub-task position,
+    the same backfill the crop boxes use for frames without a detection.
+    The largest box of the prompt's per-frame list wins (stray/duplicate
+    boxes — the same pick as the crop boxes).
+
+    None when no candidate key-frame has a box for the prompt (or there is
+    no object prompt at all): the draw stays uniform.
+    """
+    if not object_prompt:
+        return None
+    for t in keyframes:
+        preds = (seg_dets or {}).get(str(t), {}).get(object_prompt) or []
+        boxes = [d["coords"] for d in preds if d.get("type") == "box"]
+        if boxes:
+            x0, y0, x1, y1 = max(
+                boxes, key=lambda b: max(0.0, b[2] - b[0])
+                * max(0.0, b[3] - b[1]))
+            return (0.5 * (x0 + x1), 0.5 * (y0 + y1), int(t))
+    return None
+
+
+def _proximity_weights(xs: np.ndarray, ys: np.ndarray,
+                       center: tuple[float, float]) -> np.ndarray:
+    """Near-object weights of one pool's pixels: 1/(1 + (d/R)²) — d the
+    pixel distance to the object's box center, R the pool's median distance
+    (its cut radius, see _near_object_probs) — divided by the pool's max so
+    the pixel nearest the center weighs exactly 1.
+
+    Measuring d in cut radii is what keeps the draw spread over the whole
+    kept half: inside it d/R ≤ 1, so the weights span [0.5, 1] (a density
+    ratio of at most 2) instead of collapsing onto the pixels closest to
+    the center, which raw pixels would do (1/(1+d²) with d in the tens-to-
+    hundreds of pixels is a ~100:1 gradient).
+
+    Strictly positive, so this alone never narrows the pool — the
+    below-median cut of _near_object_probs does the narrowing.
+    """
+    if len(xs) == 0:
+        return np.zeros(0, dtype=np.float64)
+    d = np.hypot(xs - center[0], ys - center[1])
+    r = np.median(d)
+    if r <= 0:                      # the whole pool sits on the center
+        return np.ones(len(xs), dtype=np.float64)
+    w = 1.0 / (1.0 + (d / r) ** 2)
+    return w / w.max()
+
+
+def _near_object_probs(weights: np.ndarray) -> np.ndarray:
+    """Sampling probabilities of the manipulator's near-object draw: the
+    weights with everything below their median zeroed and the rest
+    renormalized to sum 1.
+
+    The weights decrease with the distance, so the cut keeps the half of
+    the pool nearest the object's center — for _proximity_weights' 1/(1 +
+    (d/R)²) exactly the pixels within R of the center, the weights' median
+    sitting at the cut radius R (pixels sitting exactly on it survive) —
+    and the draw among them still leans toward the center. Equal weights (a
+    one-pixel pool, a symmetric mask) leave the uniform draw.
+    """
+    if weights.size == 0:
+        return weights
+    p = np.where(weights >= np.median(weights), weights, 0.0)
+    return p / p.sum()
+
+
+def _sample_in_mask(mask: np.ndarray, n: int, seed: int,
+                    p: np.ndarray | None = None) -> np.ndarray:
+    """n distinct pixels sampled inside a boolean mask.
+
+    Returns (K, 2) float32 full-frame x/y coordinates, K = min(n, mask
+    pixels) — the deterministic no_roma baseline (--sampling-mode no_roma
+    samples its points here instead of matching across the key-frames with
+    RoMAv2).
+
+    p: per-pixel draw probabilities aligned with the mask's nonzero pixels
+    in row-major (np.nonzero) order — the manipulator's near-object weights
+    (_near_object_probs). Omit (or None) for the uniform draw of every
+    other prompt.
+    """
+    ys, xs = np.nonzero(mask)
+    k = min(n, len(xs))
+    if k == 0:
+        return np.zeros((0, 2), dtype=np.float32)
+    probs = None
+    if p is not None:
+        p = np.asarray(p, dtype=np.float64)
+        probs = p / p.sum()
+    rng = np.random.default_rng(seed)
+    idx = rng.choice(len(xs), size=k, replace=False, p=probs)
+    return np.stack([xs[idx], ys[idx]], axis=1).astype(np.float32)
 
 
 def parse_args(argv: list[str] | None = None):
@@ -209,6 +316,19 @@ def parse_args(argv: list[str] | None = None):
                              "key-frame; object: the 2nd, first of its "
                              "transport span), same masks and outputs "
                              "otherwise")
+    parser.add_argument("--no-manipulator-near-object", action="store_true",
+                        help="do not bias the manipulator's no_roma draw "
+                             "toward the manipulated object (default: weight "
+                             "its row-0 mask pixels by 1/(1+(d/R)^2) — d the "
+                             "distance to the object prompt's Step-3a box "
+                             "center on the sampled key-frame, R the mask's "
+                             "median distance — normalized to a max of 1, "
+                             "cut below its median and drawn proportionally, "
+                             "i.e. from the pixels within R of that center, "
+                             "spread over all of them and denser near the "
+                             "object; the object prompt and the RoMAv2 modes "
+                             "are unaffected). The flag keeps the plain "
+                             "uniform draw")
     parser.add_argument("--strategy", choices=("reference", "cycle"),
                         default="reference",
                         help="RoMAv2 matching strategy (default: %(default)s)")
@@ -235,19 +355,19 @@ def parse_args(argv: list[str] | None = None):
                              "the per-prompt outputs land (default: "
                              "<out-dir>/init_points); episode mode writes the "
                              "fixed episodes layout under --out-dir")
-    parser.add_argument("--viz-motion-union", action="store_true",
-                        help="render the manipulator's SAM ∪ motion union "
-                             "(union_mask.png next to that prompt's init "
-                             "points): the row-0 key-frame tinted SAM-only / "
-                             "SAM ∩ motion / motion-only, i.e. the pixels the "
-                             "flow rescue added — requires "
-                             "--with-optical-flow-mask (default: off)")
     parser.add_argument("--device", default=None, choices=["cuda", "cpu"],
                         help="device (default: auto)")
     parser.add_argument("--skip-done", action="store_true",
                         help="skip sub-tasks whose prompt output already exists")
-    parser.add_argument("--no-viz", action="store_true",
-                        help="skip the viz.png rendering")
+    parser.add_argument("--visualize", action="store_true",
+                        help="render every visualization: the per-prompt "
+                             "viz.png (key-frames with the masks, the boxes "
+                             "and the tracks), and — for a manipulator whose "
+                             "mask the flow rescue widened — union_mask.png "
+                             "(the row-0 key-frame tinted SAM-only / SAM ∩ "
+                             "motion / motion-only, i.e. the pixels the "
+                             "--with-optical-flow-mask union added); default: "
+                             "off, nothing rendered")
     return parser.parse_args(argv)
 
 
@@ -511,22 +631,50 @@ class InitPointsExtract:
                 keep.append(i)
         return full[keep][:top_k], need
 
-    def _sample_in_mask(self, mask: np.ndarray, n: int, seed: int
-                        ) -> np.ndarray:
-        """n distinct pixels uniformly sampled inside a boolean mask.
+    def _near_object_draw(self, mask: np.ndarray, seg_dets: dict | None,
+                          keyframes: list[int], object_prompt: str | None,
+                          role: str | None) -> tuple[np.ndarray | None, dict]:
+        """Draw probabilities of the manipulator's near-object weighting,
+        with the provenance recorded in init_points.json — (None, {}) for
+        the unchanged uniform draw.
 
-        Returns (K, 2) float32 full-frame x/y coordinates, K = min(n, mask
-        pixels) — the deterministic no_roma baseline (--sampling-mode
-        no_roma samples its points here instead of matching across the
-        key-frames with RoMAv2).
+        Only the manipulator's no_roma draw is weighted (the object prompt
+        and the RoMAv2 modes sample as before; --no-manipulator-near-object
+        drops the weighting): its mask pixels are weighted by 1/(1 + (d/R)²)
+        — d the distance to the manipulated object's Step-3a box center, R
+        the mask's median distance, i.e. its cut radius — and the
+        below-median half is dropped, so the arm's nearer half (within R of
+        the center) is drawn from, spread over all of it and denser toward
+        the object. Nothing to weight against (no object-role prompt —
+        folder mode, older Step-3a JSONs — or no detection for it on any
+        key-frame) leaves the uniform draw.
         """
+        if self.args.no_manipulator_near_object or role != "manipulator":
+            return None, {}
+        ref = _object_center(seg_dets, keyframes, object_prompt)
+        if ref is None:
+            why = ("no object-role prompt in the sub-task" if not object_prompt
+                   else "no object-prompt detection on the key-frames")
+            print(f"    near-object weighting off ({why}) — uniform draw")
+            return None, {"near_object_weight": False,
+                          "near_object_reason": why}
+        cx, cy, ref_frame = ref
         ys, xs = np.nonzero(mask)
-        k = min(n, len(xs))
-        if k == 0:
-            return np.zeros((0, 2), dtype=np.float32)
-        rng = np.random.default_rng(seed)
-        idx = rng.choice(len(xs), size=k, replace=False)
-        return np.stack([xs[idx], ys[idx]], axis=1).astype(np.float32)
+        d = np.hypot(xs - cx, ys - cy)
+        w = _proximity_weights(xs, ys, (cx, cy))
+        p = _near_object_probs(w)
+        return p, {
+            "near_object_weight": True,
+            "near_object_object_prompt": object_prompt,
+            "near_object_center": [float(cx), float(cy)],
+            "near_object_center_frame": int(ref_frame),
+            # the cut radius, and the weight scale: mask pixels farther
+            # than this are never drawn, and d/R is what the weights decay in
+            "near_object_radius_px": float(np.median(d)),
+            "near_object_pool_px": int(len(xs)),
+            "near_object_kept_px": int(np.count_nonzero(p)),
+            "near_object_median_w": float(np.median(w)),
+        }
 
     def _motion_mask_union(self, k: int, keyframes: list[int],
                            h: int, w: int) -> tuple[np.ndarray | None, dict]:
@@ -712,16 +860,21 @@ class InitPointsExtract:
         if prompt_roles:
             print(f"    roles: {dict(zip(prompts, prompt_roles))}")
         frames = [self._load_keyframe(k, t) for t in keys]
+        # the sub-task's manipulated object: the reference the manipulator's
+        # keypoints are weighted toward (its own prompt samples unweighted)
+        object_prompt = next((p for p, r in zip(prompts, prompt_roles or [])
+                              if r == "object"), None)
         for i, prompt in enumerate(prompts):
             role = prompt_roles[i] if prompt_roles and i < len(prompt_roles) \
                 else None
             self._process_prompt(seg_dir, k, keys, frames, seg_dets,
-                                 prompt, role)
+                                 prompt, role, object_prompt)
 
     def _process_prompt(self, seg_dir: str, k: int,
                         keyframes: list[int], frames: list[np.ndarray],
                         seg_dets: dict | None, prompt: str,
-                        role: str | None = None) -> None:
+                        role: str | None = None,
+                        object_prompt: str | None = None) -> None:
         slug = re.sub(r"[^a-z0-9]+", "_", prompt.lower()).strip("_")
         pdir = os.path.join(seg_dir, slug)
         os.makedirs(pdir, exist_ok=True)
@@ -789,27 +942,32 @@ class InitPointsExtract:
                 print(f"    motion mask +{added} px onto the row-0 "
                       f"SAM mask")
                 any_mask = any_mask or bool(added)
-                if self.args.viz_motion_union:
+                if self.args.visualize:
                     self._visualize_union(pdir, frames[0], sam0, fm)
 
         keypoints = np.zeros((0, n, 2), dtype=np.float32)
+        near_meta: dict = {}
         if empty_reason is None and self.args.sampling_mode == "no_roma":
-            # Simple baseline (no RoMAv2): uniformly sample top-k points
-            # inside the mask of the span's first frame — the sub-task's
-            # 1st key-frame for the manipulator (and role-less prompts),
-            # the 2nd for the object (the first of its transport span
-            # after the [1:-1] trim above). No cross-frame matching; the
-            # later keypoint columns carry copies of the sampled points so
-            # the frame_indices span — and with it Step-4's trace window
-            # and per-frame mask gating — stays identical to the RoMAv2
-            # modes (Step 4 anchors on the span's leading stem or its
-            # first key-frame, i.e. column 0, in the common case anyway).
+            # Simple baseline (no RoMAv2): sample top-k points inside the
+            # mask of the span's first frame — the sub-task's 1st key-frame
+            # for the manipulator (and role-less prompts), the 2nd for the
+            # object (the first of its transport span after the [1:-1] trim
+            # above). The manipulator's draw is weighted toward the
+            # manipulated object, every other prompt draws uniformly (see
+            # _near_object_draw). No cross-frame matching; the later
+            # keypoint columns carry copies of the sampled points so the
+            # frame_indices span — and with it Step-4's trace window and
+            # per-frame mask gating — stays identical to the RoMAv2 modes
+            # (Step 4 anchors on the span's leading stem or its first
+            # key-frame, i.e. column 0, in the common case anyway).
             if not masks[0].any():
                 empty_reason = "no mask on the sampled key-frame"
             else:
                 seed = zlib.crc32(
                     f"{self.ep_idx}:{k}:{self.cam_key}:{prompt}".encode())
-                pts = self._sample_in_mask(masks[0], top_k, seed)
+                p, near_meta = self._near_object_draw(
+                    masks[0], seg_dets, keyframes, object_prompt, role)
+                pts = _sample_in_mask(masks[0], top_k, seed, p)
                 if len(pts):
                     keypoints = np.repeat(pts[:, None, :], n, axis=1)
                     in_mask_need = 1
@@ -913,11 +1071,16 @@ class InitPointsExtract:
             meta["motion_flow_pair"] = motion_meta.get("motion_flow_pair")
             meta["motion_moving_pixels"] = motion_meta.get(
                 "motion_moving_pixels")
+        # the manipulator's near-object weighting provenance (absent for
+        # every other prompt/role and for the RoMAv2 modes)
+        meta.update(near_meta)
         with open(os.path.join(pdir, "init_points.json"), "w") as f:
             json.dump(meta, f, indent=2)
-        if not self.args.no_viz and len(keypoints):
+        if self.args.visualize and len(keypoints):
             self._visualize(pdir, frames, keypoints, masks, boxes, prompt,
-                            col0_only=self.args.sampling_mode == "no_roma")
+                            col0_only=self.args.sampling_mode == "no_roma",
+                            near=near_meta if near_meta.get(
+                                "near_object_weight") else None)
         status = empty_reason or f"{len(keypoints)} keypoints"
         print(f"    [{slug}] {status} -> {pdir}")
 
@@ -929,7 +1092,7 @@ class InitPointsExtract:
 
     def _visualize_union(self, pdir: str, frame: np.ndarray,
                          sam: np.ndarray, motion: np.ndarray) -> None:
-        """union_mask.png (--viz-motion-union): the manipulator's row-0
+        """union_mask.png (--visualize): the manipulator's row-0
         key-frame tinted with the SAM ∪ motion union — SAM-only red,
         SAM ∩ motion yellow, motion-only green (the pixels the flow
         rescue added, i.e. what the SAM mask alone would have missed),
@@ -953,12 +1116,19 @@ class InitPointsExtract:
     def _visualize(self, pdir: str, frames: list[np.ndarray],
                    keypoints: np.ndarray, masks: np.ndarray,
                    boxes: np.ndarray, prompt: str,
-                   col0_only: bool = False) -> None:
+                   col0_only: bool = False,
+                   near: dict | None = None) -> None:
         """Key-frames side-by-side with the masks, boxes and the tracks.
 
         col0_only: the keypoints exist on the first column only (no_roma)
         — draw them on the first frame's panel without cross-frame lines
         (the other columns are copies, not real tracks).
+
+        near: the near-object provenance of a weighted manipulator draw
+        (near_object_center / _radius_px) — mark the object's box center
+        and the cut radius on the first frame's panel, i.e. the disc the
+        keypoints were drawn from (that panel even when the box itself was
+        backfilled from a later key-frame, see near_object_center_frame).
         """
         imgs = [f[:, :, ::-1] for f in frames]  # RGB -> BGR for cv2
         H0, W0 = imgs[0].shape[:2]
@@ -987,6 +1157,14 @@ class InitPointsExtract:
                 x0, y0, x1, y1 = [int(v) for v in boxes[j]]
                 cv2.rectangle(stacked, (x0 + j * W0, y0), (x1 + j * W0, y1),
                               (0, 255, 0), 2)
+        if near:
+            # the object reference the manipulator's keypoints were weighted
+            # toward: its box center (crosshair) and the cut radius (circle)
+            cx, cy = (int(round(v)) for v in near["near_object_center"])
+            r = int(round(near["near_object_radius_px"]))
+            orange = (0, 165, 255)
+            cv2.circle(stacked, (cx, cy), r, orange, 1)
+            cv2.drawMarker(stacked, (cx, cy), orange, cv2.MARKER_CROSS, 12, 2)
         cv2.imwrite(os.path.join(pdir, "viz.png"), stacked)
 
 

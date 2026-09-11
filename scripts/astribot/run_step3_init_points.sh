@@ -8,6 +8,8 @@ REPO_ID=Kronze157/astribot_making_coffee_vlva_full
 DATA_ROOT=/data/astribot_making_coffee_vlva_full
 
 # sampling modes: uniform, mask, no_roma
+# (no_roma weights the manipulator's draw toward the manipulated object's
+#  detection-box center; --no-manipulator-near-object makes it uniform)
 python tools/astribot/run_step3_init_points.py \
     --repo-id $REPO_ID \
     --data-root $DATA_ROOT --episode-idxes 0 \
@@ -15,5 +17,5 @@ python tools/astribot/run_step3_init_points.py \
     --use-inferred-splits \
     --object-top-k 64 --manipulator-top-k 128 \
     --sampling-mode no_roma \
-    --with-optical-flow-mask --visualize-motion --motion-ratio 0.03
+    --with-optical-flow-mask --visualize --motion-ratio 0.03
 

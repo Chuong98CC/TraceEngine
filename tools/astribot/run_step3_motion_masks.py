@@ -46,11 +46,11 @@ camera) init_points folder Step 3b writes its init points into
 <camera>/`, beside the `<prompt_slug>/` subtrees) — the rescue then sits
 next to the init points it shaped. When no pair in the window reaches
 significance nothing is written: the rescue only unions real motion, so
-Step 3b then keeps that sub-task's SAM mask alone. `--visualize`
-additionally writes the significant pair's `flow.png` (flow_to_image on a
-black background: pixels below --motion-threshold are zeroed, so the
-coloured area is exactly the moving-pixel set) — the mask itself is in
-the RLE, and a scan with no significant pair writes nothing at all.
+Step 3b then keeps that sub-task's SAM mask alone. The mask itself is in
+the RLE, and a scan with no significant pair writes nothing at all —
+`motion_rle.json` is this pass's only output (to eyeball what it adds,
+run Step 3b with `--visualize`: its union_mask.png tints the SAM-only /
+unioned pixels).
 
 Usage
 -----
@@ -59,7 +59,7 @@ Usage
     python tools/astribot/run_step3_motion_masks.py
         --repo-id Kronze157/astri_making_coffee_vlva
         --data-root /data/astri_making_coffee_v1 --episode-idxes 0
-        --camera-idxes 0 --visualize
+        --camera-idxes 0
 """
 
 from __future__ import annotations
@@ -68,7 +68,6 @@ import argparse
 import json
 from pathlib import Path
 
-import cv2
 import numpy as np
 from lerobot.datasets import LeRobotDataset, LeRobotDatasetMetadata
 from tqdm import tqdm
@@ -77,7 +76,6 @@ from tools.general_test.module.infer_waft import _compute_motion_mask_gray
 from utils import astribot_paths as ap
 from utils.file_io.mask_rle import encode_rle
 from utils.keyframe_utils import cap_keyframes
-from utils.visualize.visualize_flow import flow_to_image
 from utils.visualize.visualize_mask import to_pil
 
 #: WAFTv2 torch.export artifact backing the motion masks (the same
@@ -139,12 +137,6 @@ def parse_args(argv: list[str] | None = None):
                         help="moving-pixel fraction of the frame above which "
                              "a mask is significant and the scan early-stops "
                              "(default: %(default)s)")
-    parser.add_argument("--visualize", action="store_true",
-                        help="also write the significant pair's flow.png "
-                             "(flow_to_image) next to its "
-                             "motion_rle.json for eyeballing; a "
-                             "sub-task with no significant pair writes "
-                             "nothing (default: off)")
     parser.add_argument("--skip-done", action="store_true",
                         help="skip sub-tasks whose motion_rle.json "
                              "already exists (a sub-task with no significant "
@@ -161,9 +153,8 @@ class MotionMaskExtract:
     both steps agree on. The frames themselves are decoded online from the
     dataset; nothing is written to disk except the significant masks into
     the (sub-task, camera) init_points folder of the episodes tree
-    (…/subtask_{k:02d}/sampling_points/init_points/<camera>/motion_rle.json,
-    plus the --visualize flow.png of the chosen pair) — the same folder
-    Step 3b writes its <prompt_slug>/ init points into.
+    (…/subtask_{k:02d}/sampling_points/init_points/<camera>/motion_rle.json)
+    — the same folder Step 3b writes its <prompt_slug>/ init points into.
     """
 
     def __init__(self, args):
@@ -241,18 +232,6 @@ class MotionMaskExtract:
         # keep the same parity for the masks / flow artefacts below.
         return np.nan_to_num(flow, nan=0.0, posinf=0.0, neginf=0.0)
 
-    def _write_visuals(self, seg_dir: Path, flow: np.ndarray,
-                       thr: float) -> None:
-        """Debug artefact of one flow pair (--visualize): flow.png
-        (flow_to_image, colour wheel) on a black background — the static
-        pixels are zeroed (flow_to_image renders radius ~0 as bright
-        white), at the same --motion-threshold that decides the mask, so
-        the coloured area is exactly the pair's moving pixels."""
-        seg_dir.mkdir(parents=True, exist_ok=True)
-        vis = flow_to_image(flow, convert_to_bgr=True)
-        vis[np.linalg.norm(flow, axis=-1) <= thr] = 0
-        cv2.imwrite(str(seg_dir / "flow.png"), vis)
-
     # --- Step-3a detections --------------------------------------------------
 
     def _detections_path(self, ep_idx: int, k: int, cam: str) -> Path:
@@ -329,7 +308,6 @@ class MotionMaskExtract:
         folder for that sub-task, beside its <prompt_slug>/ subtrees); a
         sub-task with no significant pair writes nothing (Step 3b then
         keeps its SAM mask alone).
-        --visualize writes the same pair's flow.png too.
         """
         seg_dir = ap.init_points_dir(self.root, self.ep_idx, k, cam)
         rle_path = seg_dir / "motion_rle.json"
@@ -352,7 +330,6 @@ class MotionMaskExtract:
         counts: list[int] = []
         chosen: tuple[int, int] | None = None
         chosen_mask: np.ndarray | None = None
-        chosen_flow: np.ndarray | None = None
         b = a + stride
         while b <= b_max:
             flow = self._pair_flow(a, b)
@@ -361,7 +338,7 @@ class MotionMaskExtract:
             pairs.append([a, b])
             counts.append(n)
             if n > ratio * mask.size:
-                chosen, chosen_mask, chosen_flow = (a, b), mask, flow
+                chosen, chosen_mask = (a, b), mask
                 break
             b += stride
         if chosen is None:
@@ -389,8 +366,6 @@ class MotionMaskExtract:
         }
         with open(rle_path, "w") as f:
             json.dump(meta, f, indent=2)
-        if self.args.visualize:
-            self._write_visuals(seg_dir, chosen_flow, thr)
         print(f"  [subtask {k:02d}] ({cam}) chosen pair {chosen} "
               f"({n} moving px, significant) -> {rle_path}")
 
