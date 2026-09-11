@@ -243,14 +243,27 @@ class SubtaskStreamVisualize:
         results" message). Without: every depth_pose/<camera> dir present
         that maps back to a dataset camera key — a camera the dataset does
         not have is skipped with a message (its frames cannot be decoded
-        online)."""
+        online), and a segment with no camera dirs at all is reported here
+        and returns []."""
         if self.cam_keys is not None:
             return [(self._camera_subdir(key), key)
                     for key in self.cam_keys.values()]
         segment = ap.subtask_name(k)
+        discovered = ap.discover_cameras(self.episodes_root, ep_idx, k,
+                                         ap.DEPTH_POSE)
+        if not discovered:
+            # discovery is Step-1-based (ap.discover_episodes), so an episode
+            # extracted but never streamed reaches here with nothing to
+            # render; without this line the run ends on a bare "0 camera
+            # video(s)". Distinct from camera dirs that exist but map to no
+            # dataset camera key: there the skip messages below are the whole
+            # story.
+            print(f"  [{segment}] no depth_pose outputs under "
+                  f"{ap.task_dir(self.episodes_root, ep_idx, k, ap.DEPTH_POSE)} "
+                  f"— run run_step2_depth_stream.py for this episode")
+            return []
         cameras = []
-        for cam in ap.discover_cameras(self.episodes_root, ep_idx, k,
-                                       ap.DEPTH_POSE):
+        for cam in discovered:
             try:
                 key = self._cam_key_for_subdir(cam)
             except ValueError as e:
@@ -284,14 +297,7 @@ class SubtaskStreamVisualize:
     def _process_segment(self, ep_idx: int, segment: str) -> None:
         k = ap.parse_subtask(segment)
         cameras = self._segment_cameras(ep_idx, k)
-        if not cameras and self.cam_keys is None:
-            # discovery is Step-1-based (ap.discover_episodes), so an episode
-            # extracted but never streamed reaches here with nothing to
-            # render; without this line the run ends on a bare "0 camera
-            # video(s)". With -c the per-camera skip below reports instead.
-            print(f"  [{segment}] no depth_pose outputs under "
-                  f"{ap.task_dir(self.episodes_root, ep_idx, k, ap.DEPTH_POSE)} "
-                  f"— run run_step2_depth_stream.py for this episode")
+        if not cameras:
             return
         for cam, key in cameras:
             cam_dir = ap.depth_pose_dir(self.episodes_root, ep_idx, k, cam)
