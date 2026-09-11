@@ -50,6 +50,7 @@ from depth_models.streaming.loop_utils.sim3utils import (
 )
 from utils.depth_pose_io import (
     DEPTH_FILE,
+    POSES_FILE,
     DepthContainerReader,
     DepthContainerWriter,
     write_poses,
@@ -555,6 +556,12 @@ class BaseStreaming:
         writers: dict[int, DepthContainerWriter] = {}
         for v in slots:
             os.makedirs(out_dirs[v], exist_ok=True)
+            # poses.npz is the completion marker: a leftover one from an
+            # earlier run would make a segment that dies in this pass look
+            # finished (its container is truncated by the writer below).
+            stale = os.path.join(out_dirs[v], POSES_FILE)
+            if os.path.exists(stale):
+                os.remove(stale)
 
         # Per-chunk inference (model forward) timings; the total covers the
         # whole run() including alignment and file I/O.

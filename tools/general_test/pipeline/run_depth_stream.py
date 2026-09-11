@@ -4,14 +4,20 @@ a2f | moge3 | vggt_omega, unified entry point for all backends).
 
 Streams the synchronized RGB frame folders (one per camera, matching frame
 stems) in chunks of the model's fixed num_views frames, aligns consecutive
-chunks via SIM3 and saves per camera and frame the depth + pose npz files:
+chunks via SIM3 and writes one depth_pose folder per camera:
 
     camera folders (one per camera)
                │
                ▼  per-chunk inference + SIM3 alignment
     ┌──────────────────────────────┐
-    │  depth + pose per frame npz  │
+    │  depth.lz4 + poses.npz       │
     └──────────────────────────────┘
+
+Each camera folder holds an appendable ``depth.lz4`` container (metres, the
+SIM3-aligned depth of every frame) next to a ``poses.npz`` with the matching
+frame indices, extrinsics and intrinsics; read them back through
+``utils.depth_pose_io.DepthPoseReader``.  No ``timings.json`` is written —
+poses.npz is the completion marker.
 
 A chunk spans the model's ``num_views`` frames, so it must divide evenly
 across the cameras; a short final chunk is padded at its start (copies of
