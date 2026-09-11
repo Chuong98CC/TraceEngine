@@ -21,6 +21,7 @@ from einops import repeat
 from tqdm import tqdm
 
 from flow_models.tapip3d.utils._common import batch_project
+from utils.depth_pose_io import DepthPoseReader
 
 
 def parse_args():
@@ -110,8 +111,9 @@ def render_tracks(output_dir, fps=10, output=None, trail_len=30,
         meta = json.load(f)
 
     image_dir = meta["image_dir"]
-    # metadata key is "depth_dir" (depth .lz4 + pose .npz folder) since the
-    # infer tool rename; accept the legacy "npz_dir" key for older outputs
+    # metadata key is "depth_dir" (a depth_pose camera folder: depth.lz4 +
+    # poses.npz) since the infer tool rename; accept the legacy "npz_dir"
+    # key for older outputs
     depth_dir = meta.get("depth_dir", meta.get("npz_dir"))
 
     # Resolve relative paths: try as-is, then relative to output dir, then cwd
@@ -192,18 +194,18 @@ def render_tracks(output_dir, fps=10, output=None, trail_len=30,
         if frame_bgr is None:
             continue
 
-        # Load geometry from NPZ
-        npz_path = Path(depth_dir) / f"frame_{frame_idx:06d}.npz"
-        if not npz_path.is_file():
+        # Load geometry from the depth_pose store — pose-only (poses.npz
+        # through DepthPoseReader, the depth container is never decoded);
+        # frames the store does not hold are skipped, like a missing npz.
+        try:
+            with DepthPoseReader(depth_dir) as reader:
+                extr, intr = reader.pose_at(frame_idx)
+        except (FileNotFoundError, KeyError):
             continue
-        data = dict(np.load(str(npz_path), allow_pickle=True))
-        # repo pose-npz keys are plural (extrinsics 3x4 w2c / intrinsics);
-        # accept the legacy singular 4x4 form too and pad 3x4 to 4x4
-        # (batch_project divides by the 4th homogeneous component)
-        extr = data["extrinsics"] if "extrinsics" in data else data["extrinsic"]
+        # the pose store keeps the extrinsics as (3, 4) w2c; batch_project
+        # divides by the 4th homogeneous component, so pad to (4, 4)
         if extr.shape == (3, 4):
             extr = np.vstack([extr, [0, 0, 0, 1]])
-        intr = data["intrinsics"].copy() if "intrinsics" in data else data["intrinsic"].copy()
         intr = intr.astype(np.float32)
         extr = extr.astype(np.float32)
 

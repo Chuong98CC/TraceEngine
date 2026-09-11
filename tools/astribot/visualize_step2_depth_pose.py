@@ -2,18 +2,19 @@
 counterpart of run_step2_depth_stream.py.
 
 Episodes, sub-task segments, cameras and rendered steps are discovered
-from the saved Step-2 outputs themselves — <out-dir>/depth_pose/ep*/
-subtask_XX/depth_<camera>/frame_<abs-idx>.npz — the on-disk segmentation:
-no dataset split inference, no subtask_splits.json, no selection flag
-that must match the Step-2 run; ``-e``/``-c`` only filter what exists on
-disk. For each (sub-task, selected camera) with outputs it renders one
+from the saved Step-2 outputs themselves — the episodes tree of
+utils.astribot_paths, <episodes-root>/<episode>/subtask_XX/depth_pose/
+<camera>/{depth.lz4,poses.npz} — the on-disk segmentation: no dataset
+split inference, no subtask_splits.json, no selection flag that must
+match the Step-2 run; ``-e``/``-c`` only filter what exists on disk. For
+each (sub-task, selected camera) with outputs it renders one
 ``depth_pose.mp4`` (per step the coloured point cloud with the camera's
 frustum and growing path, the view fixed per segment), reusing
 render_stream_video of tools/general_test/pipeline/visualize_stream.py
-(geometry from the saved depth_pose npz files; colour frames decoded
-online from the LeRobotDataset — no extracted frames or videos needed on
-disk). Output:
-<out-dir>/visualization/<episode>/subtask_XX/<camera>/depth_pose.mp4.
+(geometry read from the saved depth_pose containers; colour frames
+decoded online from the LeRobotDataset — no extracted frames or videos
+needed on disk). Output:
+<episodes-root>/<episode>/subtask_XX/visualization/<camera>/depth_pose.mp4.
 
 Examples
 --------
@@ -30,16 +31,18 @@ Examples
 """
 
 import argparse
-import os
-from pathlib import Path
 
 import cv2
 import numpy as np
 from lerobot.datasets import LeRobotDataset, LeRobotDatasetMetadata
 from tqdm import tqdm
 
-from tools.general_test.pipeline.visualize_stream import render_stream_video
-from utils.streaming_utils import load_stream_data
+from tools.general_test.pipeline.visualize_stream import (
+    load_stems,
+    render_stream_video,
+)
+from utils import astribot_paths as ap
+from utils.depth_pose_io import POSES_FILE, DepthPoseReader
 from utils.visualize.visualize_mask import to_pil
 
 
@@ -64,14 +67,15 @@ def parse_args(argv: list[str] | None = None):
                              "(default: every camera that has Step-2 outputs on disk)")
     parser.add_argument("--episode-idxes", "-e", nargs="*", type=int, default=None,
                         help="only visualize these episode indices (default: every "
-                             "episode with Step-2 outputs under <out-dir>/depth_pose)")
+                             "episode with Step-2 outputs under the episodes root)")
     parser.add_argument("--max-episodes", "-x", type=int, default=None,
                         help="cap the number of discovered episodes (first N, after "
                              "any -e filter)")
     parser.add_argument("--out-dir", "-o", default=None,
-                        help="output root (default: <data-root>/eps_data); per-sub-task "
-                             "results are read from <out-dir>/depth_pose/<episode>/subtask_XX/ "
-                             "and the videos are written under <out-dir>/visualization/")
+                        help="episodes root (default: <data-root>/episodes); per-sub-task "
+                             "results are read from <root>/<episode>/subtask_XX/"
+                             "depth_pose/<camera>/ and the videos are written to the "
+                             "sibling visualization task dir")
     parser.add_argument("--fps", type=int, default=10)
     parser.add_argument("--size", default="960x540",
                         help="video size WxH, e.g. 960x540 (default: 960x540)")
@@ -123,28 +127,29 @@ class SubtaskStreamVisualize:
     """Render one depth_pose.mp4 per (sub-task, selected camera), online.
 
     Standalone: the episodes, sub-task segments, cameras and rendered
-    steps are all discovered from the saved Step-2 outputs on disk
-    (depth_pose/<ep>/subtask_XX/depth_<cam>) — never recomputed from
-    dataset splits, so nothing has to match the Step-2 run. The dataset
-    is only consulted for camera_keys (decoding the -c indices and
-    mapping the on-disk camera subdirs back to decode keys) and for the
-    online frame decode; the geometry comes from the saved depth_pose
-    npz files, each camera's video rendered over its own saved stems.
+    steps are all discovered from the saved Step-2 outputs on disk (the
+    depth_pose task dirs of the utils.astribot_paths episodes tree) —
+    never recomputed from dataset splits, so nothing has to match the
+    Step-2 run. The dataset is only consulted for camera_keys (decoding
+    the -c indices and mapping the on-disk camera subdirs back to decode
+    keys) and for the online frame decode; the geometry comes from the
+    saved depth_pose containers, each camera's video rendered over its
+    own frame indices.
     """
 
     def __init__(self, args):
         self.args = args
         # dataset metadata for camera_keys only — episodes/segments come
-        # from the disk (self.depth_pose_dir), not from the dataset
+        # from the disk (self.episodes_root), not from the dataset
         self.ds_meta = LeRobotDatasetMetadata(repo_id=args.repo_id,
                                               root=args.data_root)
         self.dataset = None  # LeRobotDataset handle, created lazily
         self.cam_keys = self._select_cameras()
-        self.out_dir = args.out_dir or os.path.join(args.data_root, "eps_data")
-        # Step-2 outputs read from <out-dir>/depth_pose/<episode>/subtask_XX
-        # — the videos go to the sibling visualization/ tree
-        self.depth_pose_dir = os.path.join(self.out_dir, "depth_pose")
-        self.viz_dir = os.path.join(self.out_dir, "visualization")
+        # the episodes tree (<data-root>/episodes, or --out-dir): Step-2
+        # outputs read from <root>/<episode>/subtask_XX/depth_pose/<camera>,
+        # the videos written to each segment's sibling visualization/ task
+        # dir
+        self.episodes_root = ap.episodes_root(args.data_root, args.out_dir)
         self.n_rendered = 0
 
     # --- dataset access -----------------------------------------------------
@@ -194,9 +199,8 @@ class SubtaskStreamVisualize:
         decodes the step's dataset frame of that camera and resizes it to
         the camera's depth resolution, matching load_pair's image contract
         (RGB — the renderer wants (N, H, W, 3) uint8)."""
-        def load(stem: str) -> np.ndarray:
-            t = int(stem.rsplit("_", 1)[-1])
-            frame = self._ensure_dataset()[t]
+        def load(frame_index: int) -> np.ndarray:
+            frame = self._ensure_dataset()[int(frame_index)]
             # lerobot decodes the RGB camera videos as RGB — no reversal, the
             # renderer wants (N, H, W, 3) uint8 RGB
             rgb = np.asarray(to_pil(frame[key]), dtype=np.uint8)
@@ -208,32 +212,12 @@ class SubtaskStreamVisualize:
 
     # --- disk discovery -----------------------------------------------------
 
-    def _episode_dir(self, ep_idx: int) -> str:
-        """The on-disk episode dir name of a dataset episode index."""
-        return f"ep{ep_idx:06d}"
-
-    def _discover_episodes(self) -> list[int]:
-        """Sorted dataset indices of the episode dirs under depth_pose/
-        (a dir counts when its name is ep<int>)."""
-        eps = []
-        for p in Path(self.depth_pose_dir).iterdir():
-            if not p.is_dir() or not p.name.startswith("ep"):
-                continue
-            try:
-                eps.append(int(p.name[2:]))
-            except ValueError:
-                continue
-        return sorted(eps)
-
     def _segment_dirs(self, ep_idx: int) -> list[str]:
-        """Sorted subtask_* dir names of an episode, as present under
-        depth_pose/ep%06d/ — the Step-2 segmentation itself, never
-        recomputed from dataset splits."""
-        ep_dir = os.path.join(self.depth_pose_dir, self._episode_dir(ep_idx))
-        if not os.path.isdir(ep_dir):
-            return []
-        return sorted(p.name for p in Path(ep_dir).iterdir()
-                      if p.is_dir() and p.name.startswith("subtask_"))
+        """Sorted subtask_* dir names of an episode, as present under the
+        episodes tree — the Step-2 segmentation itself, never recomputed
+        from dataset splits."""
+        return [ap.subtask_name(k)
+                for k in ap.discover_subtasks(self.episodes_root, ep_idx)]
 
     def _select_episodes(self, discovered: list[int]) -> list[int]:
         """Episodes to process: the discovered ones, filtered by -e (a
@@ -243,7 +227,7 @@ class SubtaskStreamVisualize:
             requested = set(self.args.episode_idxes)
             for ep in sorted(requested - set(discovered)):
                 print(f"  episode {ep}: no Step-2 outputs under "
-                      f"{self.depth_pose_dir} — skipped")
+                      f"{self.episodes_root} — skipped")
             eps = [ep for ep in discovered if ep in requested]
         else:
             eps = discovered
@@ -251,27 +235,21 @@ class SubtaskStreamVisualize:
             eps = eps[: self.args.max_episodes]
         return eps
 
-    def _segment_cameras(self, segment: str,
-                         seg_dir: str) -> list[tuple[str, str]]:
+    def _segment_cameras(self, ep_idx: int, k: int) -> list[tuple[str, str]]:
         """(camera subdir, dataset key) pairs of one segment to render.
         With -c: exactly the requested cameras, in dataset order (one
-        without Step-2 outputs keeps the caller's "skip, no npz results"
-        message). Without: every depth_<cam> dir present that has npz
-        results and maps back to a dataset camera key — a dir with no
-        outputs, or whose camera the dataset does not have, is skipped
-        with a message (its frames cannot be decoded online)."""
+        without Step-2 outputs keeps the caller's "skip, no depth_pose
+        results" message). Without: every depth_pose/<camera> dir present
+        that maps back to a dataset camera key — a camera the dataset does
+        not have is skipped with a message (its frames cannot be decoded
+        online)."""
         if self.cam_keys is not None:
             return [(self._camera_subdir(key), key)
                     for key in self.cam_keys.values()]
+        segment = ap.subtask_name(k)
         cameras = []
-        for d in sorted(Path(seg_dir).iterdir()):
-            if not d.is_dir() or not d.name.startswith("depth_"):
-                continue
-            cam = d.name[len("depth_"):]
-            if not list(d.glob("*.npz")):
-                print(f"  [{segment}] camera {cam}: skip, no npz results "
-                      f"in {d}")
-                continue
+        for cam in ap.discover_cameras(self.episodes_root, ep_idx, k,
+                                       ap.DEPTH_POSE):
             try:
                 key = self._cam_key_for_subdir(cam)
             except ValueError as e:
@@ -283,10 +261,9 @@ class SubtaskStreamVisualize:
     # --- orchestration ------------------------------------------------------
 
     def run(self) -> None:
-        discovered = (self._discover_episodes()
-                      if os.path.isdir(self.depth_pose_dir) else [])
+        discovered = ap.discover_episodes(self.episodes_root)
         if not discovered:
-            print(f"\nno Step-2 outputs under {self.depth_pose_dir} — run "
+            print(f"\nno Step-2 outputs under {self.episodes_root} — run "
                   f"run_step2_depth_stream.py first")
             return
         eps = self._select_episodes(discovered)
@@ -296,45 +273,43 @@ class SubtaskStreamVisualize:
                   f"sub-task segment(s)")
         for ep_idx in tqdm(eps, desc="episodes"):
             self._process_episode(ep_idx)
-        print(f"\ndone: {self.n_rendered} camera video(s) -> {self.viz_dir}")
+        print(f"\ndone: {self.n_rendered} camera video(s) -> "
+              f"{self.episodes_root}")
 
     def _process_episode(self, ep_idx: int) -> None:
         for segment in self._segment_dirs(ep_idx):
             self._process_segment(ep_idx, segment)
 
     def _process_segment(self, ep_idx: int, segment: str) -> None:
-        seg_dir = os.path.join(self.depth_pose_dir,
-                               self._episode_dir(ep_idx), segment)
-        for cam, key in self._segment_cameras(segment, seg_dir):
-            depth_dir = os.path.join(seg_dir, f"depth_{cam}")
-            stems = sorted(p.stem for p in Path(depth_dir).glob("*.npz"))
-            if not stems:  # -c picked a camera the Step-2 run skipped
-                print(f"  [{segment}] camera {cam}: skip, no npz results in "
-                      f"{depth_dir} (run run_step2_depth_stream.py for this "
-                      f"camera)")
+        k = ap.parse_subtask(segment)
+        for cam, key in self._segment_cameras(ep_idx, k):
+            cam_dir = ap.depth_pose_dir(self.episodes_root, ep_idx, k, cam)
+            if not (cam_dir / POSES_FILE).is_file():
+                # -c picked a camera the Step-2 run skipped
+                print(f"  [{segment}] camera {cam}: skip, no depth_pose "
+                      f"results in {cam_dir} (run run_step2_depth_stream.py "
+                      f"for this camera)")
                 continue
-            depth0, _, _ = load_stream_data(cam, seg_dir, stems[0])
-            h, w = depth0.shape
-            out_path = os.path.join(self.viz_dir,
-                                    self._episode_dir(ep_idx), segment,
-                                    cam, "depth_pose.mp4")
-            os.makedirs(os.path.dirname(out_path), exist_ok=True)
-            abs_idxes = [int(s.rsplit("_", 1)[-1]) for s in stems]
-            print(f"  [{segment}] camera {cam}: {len(stems)} step(s) at "
-                  f"dataset frames [{abs_idxes[0]}..{abs_idxes[-1]}] -> "
-                  f"{out_path}")
-            # view-fit stride derived from the stems' dataset spacing:
+            frame_indexes = load_stems([str(cam_dir)])
+            with DepthPoseReader(cam_dir) as reader:
+                h, w = reader.shape
+            out_path = (ap.visualization_dir(self.episodes_root, ep_idx, k, cam)
+                        / "depth_pose.mp4")
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            print(f"  [{segment}] camera {cam}: {len(frame_indexes)} step(s) "
+                  f"at dataset frames [{frame_indexes[0]}.."
+                  f"{frame_indexes[-1]}] -> {out_path}")
+            # view-fit stride derived from the frames' dataset spacing:
             # only a spatial thinning of each depth map for the auto
             # view-fit (visualize_stream._union_scene_points) — unrelated
             # to Step-2's frame stride (fallback 1: single-step segment)
-            fit_stride = (abs_idxes[1] - abs_idxes[0]
-                          if len(stems) > 1 else 1)
+            fit_stride = (frame_indexes[1] - frame_indexes[0]
+                          if len(frame_indexes) > 1 else 1)
             w_vid, h_vid = (int(x) for x in self.args.size.lower().split("x"))
             render_stream_video(
-                stems,
-                [cam],
-                seg_dir,
-                out_path,
+                frame_indexes,
+                [str(cam_dir)],
+                str(out_path),
                 fps=self.args.fps,
                 size=(w_vid, h_vid),
                 max_points_per_frame=self.args.max_points,

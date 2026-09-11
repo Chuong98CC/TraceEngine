@@ -21,7 +21,8 @@ exact. If SAM3 produces no mask, or the mask has fewer valid-depth pixels
 than grid_x*grid_y, the script falls back to the regular bbox grid.
 
 Usage:
-    python infer_tapip3d.py --image_dir data/.../frames --depth_dir data/.../depth \
+    python infer_tapip3d.py --image_dir data/.../frames \
+        --depth_dir data/.../depth_pose/cam_head \
         --bbox 70 357 133 396 --grid_x 8 --grid_y 8 --support_grid_size 32 \
         --sam3_checkpoint weights/sam3/sam3_image_exported_bf16.pt2 \
         --text_prompt visual
@@ -51,7 +52,8 @@ def parse_args():
     p = argparse.ArgumentParser(description="Streaming TAPIP3D torch.export inference")
     p.add_argument("--image_dir", type=str, required=True)
     p.add_argument("--depth_dir", type=str, required=True,
-                   help="Directory with per-frame depth (.lz4) + camera pose (.npz)")
+                   help="Depth_pose camera folder (depth.lz4 container + "
+                        "poses.npz, see utils.depth_pose_io)")
     p.add_argument("--output_dir", "-o", type=str, default="output/stream_tracks_pt2")
     p.add_argument("--encoder", type=str, default=_DEFAULT_ENCODER,
                    help="Encoder .pt2 path (image size asserted against --image_size)")
@@ -215,7 +217,8 @@ def main():
 
     # --- depth ROI pre-scan (global, matches the original inference()) ------
     print("[bold]Computing global depth ROI...[/bold]")
-    depth_roi = compute_global_depth_roi(args.depth_dir, file_list, inf_h, inf_w)
+    depth_roi = compute_global_depth_roi(
+        args.depth_dir, [i for i, _ in file_list], inf_h, inf_w)
 
     # --- first batch: queries anchored at global frame 0 ---------------------
     batch0 = load_resized_batch(file_list, args.depth_dir, 0,

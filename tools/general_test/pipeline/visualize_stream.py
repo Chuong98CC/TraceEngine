@@ -4,11 +4,14 @@ model inference (run_depth_stream.py --video exposes the same renderer).
 
 Each video frame shows one time step's coloured point cloud with its camera
 frustums and the growing camera path from the first frame to the current
-one.  Geometry comes from the per-camera depth/pose npz files under
-``--result-dir``, colours from the matching frame folders ``--input-dirs``
-(one per camera, same order and stems as the inference run).  The view is
-fixed for the whole video (aligned to the first camera); with ``--views 4``
-each frame is a 2x2 grid of viewpoints (center / down / left / right).
+one.  Geometry comes from the per-camera ``depth_pose`` folders under
+``--result-dir`` (one ``<input-dir basename>`` folder per camera, each
+holding the ``depth.lz4`` container + ``poses.npz`` of
+utils.depth_pose_io), colours from the matching frame folders
+``--input-dirs`` (one per camera, same order and frame indices as the
+inference run).  The view is fixed for the whole video (aligned to the
+first camera); with ``--views 4`` each frame is a 2x2 grid of viewpoints
+(center / down / left / right).
 
 Usage
 -----
@@ -40,29 +43,40 @@ from utils.visualize.visualize_depth import (  # noqa: E402
     _index_color_rgb,
 )
 
+from utils.depth_pose_io import DepthPoseReader  # noqa: E402
 from utils.streaming_utils import load_stream_data, load_pair  # noqa: E402
 
 
 # ===========================================================================
 # Trajectory video rendering
 # ===========================================================================
-def load_stems(result_dir: str, input_dirs: list[str]) -> list[str]:
-    """Sorted NPZ stems of the first camera's output folder (== time order)."""
-    npz_dir = Path(result_dir) / f"depth_{Path(input_dirs[0]).name}"
-    return sorted(p.stem for p in npz_dir.glob("*.npz"))
+def load_stems(depth_dirs: list[str]) -> list[int]:
+    """Sorted absolute frame indices of the first camera's pose store."""
+    with DepthPoseReader(depth_dirs[0]) as reader:
+        return sorted(int(i) for i in reader.frame_indices)
+
+
+def load_poses(frame_index: int, depth_dirs: list[str]) -> np.ndarray:
+    """World-to-camera extrinsics ``(N, 3, 4)`` of one time step, per camera.
+
+    Pose-only: reads the ``poses.npz`` halves (via DepthPoseReader), never
+    the depth containers."""
+    exts: list[np.ndarray] = []
+    for depth_dir in depth_dirs:
+        with DepthPoseReader(depth_dir) as reader:
+            exts.append(reader.pose_at(frame_index)[0])
+    return np.stack(exts, axis=0)
 
 
 def load_trajectory(
-    stems: list[str],
-    input_dirs: list[str],
-    result_dir: str,
+    frame_indexes: list[int],
+    depth_dirs: list[str],
 ) -> np.ndarray:
-    """World-space camera centers per time step: ``(T, N, 3)``, in stem order."""
+    """World-space camera centers per time step: ``(T, N, 3)``, in frame order."""
     centers: list[np.ndarray] = []
-    for stem in stems:
+    for frame_index in frame_indexes:
         cams = []
-        for img_dir in input_dirs:
-            _, ext, _ = load_stream_data(img_dir, result_dir, stem)
+        for ext in load_poses(frame_index, depth_dirs):
             c2w = np.linalg.inv(_as_homogeneous44(ext))
             cams.append(c2w[:3, 3])
         centers.append(np.stack(cams, axis=0))
@@ -153,9 +167,8 @@ def build_frame_geometries(
 
 
 def _union_scene_points(
-    stems: list[str],
-    input_dirs: list[str],
-    result_dir: str,
+    frame_indexes: list[int],
+    depth_dirs: list[str],
     stride: int,
     extra_points: np.ndarray | None = None,
 ) -> np.ndarray:
@@ -168,10 +181,10 @@ def _union_scene_points(
     Geometry only — the per-frame images are discarded anyway, so this works
     without frame folders (e.g. the online visualizer)."""
     all_pts = []
-    for stem in stems:
+    for frame_index in frame_indexes:
         depths, exts, ints = [], [], []
-        for img_dir in input_dirs:
-            d, e, i = load_stream_data(img_dir, result_dir, stem)
+        for depth_dir in depth_dirs:
+            d, e, i = load_stream_data(depth_dir, frame_index)
             depths.append(d)
             exts.append(e)
             ints.append(i)
@@ -185,7 +198,7 @@ def _union_scene_points(
         dummy = np.zeros((n, h_, w_, 3), dtype=np.uint8)
         pts, _ = _depths_to_world_points_with_colors(d, K, extrs, dummy, None, 0.0)
         all_pts.append(pts)
-    all_pts.append(load_trajectory(stems, input_dirs, result_dir).reshape(-1, 3))
+    all_pts.append(load_trajectory(frame_indexes, depth_dirs).reshape(-1, 3))
     if extra_points is not None:
         all_pts.append(extra_points.reshape(-1, 3))
     return np.concatenate(all_pts, axis=0)
@@ -285,10 +298,10 @@ def _build_inverse_tone_curve(renderer, w: int, h: int) -> np.ndarray:
 
 
 def render_stream_video(
-    stems: list[str],
-    input_dirs: list[str],
-    result_dir: str,
+    frame_indexes: list[int],
+    depth_dirs: list[str],
     out_path: str,
+    image_dirs: list[str] | None = None,
     fps: int = 10,
     size: tuple[int, int] = (960, 540),
     max_points_per_frame: int = 100_000,
@@ -300,7 +313,7 @@ def render_stream_video(
     view_raise: float = 0.1,
     view_back: float = 0.3,
     view_fov: float | None = None,
-    frame_loader: Callable[[str], np.ndarray] | None = None,
+    frame_loader: Callable[[int], np.ndarray] | None = None,
     extra_fit_points: np.ndarray | None = None,
     trace_geoms_fn: Callable[[int, np.ndarray], list | None] | None = None,
 ) -> str:
@@ -324,11 +337,16 @@ def render_stream_video(
     vertical degrees.  Frames are encoded directly into ``out_path``
     (H.264 mp4 via imageio-ffmpeg).
 
+    ``image_dirs`` are the RGB frame folders (one per camera, parallel to
+    ``depth_dirs``, same frame-index file names); they are only read when
+    ``frame_loader`` is None.
+
     ``frame_loader`` overrides the per-step images (``(N, H, W, 3)`` uint8
     RGB, resized to the depth resolution) when the source frames do not
     live on disk — e.g. ``visualize_subtask_stream.py`` decodes them online
-    from a LeRobotDataset.  Geometry (depth/extrinsics/intrinsics) always
-    comes from the saved NPZs in ``result_dir``.
+    from a LeRobotDataset.  It is called with the absolute frame index.
+    Geometry (depth/extrinsics/intrinsics) always comes from the saved
+    depth_pose folders in ``depth_dirs``.
 
     ``extra_fit_points`` (``(M, 3)`` world-space points, NOT yet
     alignment-transformed) is folded into the scene-point union the view
@@ -337,30 +355,32 @@ def render_stream_video(
 
     ``trace_geoms_fn(t, alignment)`` is called once per step, right after
     the frustums are added to the scene, with ``t`` the 0-based step index
-    into ``stems`` and ``alignment`` the computed ``(4, 4)`` transform
-    already applied to the frame geometry.  It returns a list of open3d
-    LineSet/PointCloud geometries whose vertices are ALREADY in the aligned
-    glTF frame (or None/[] for nothing); each is added to that step's scene.
+    into ``frame_indexes`` and ``alignment`` the computed ``(4, 4)``
+    transform already applied to the frame geometry.  It returns a list of
+    open3d LineSet/PointCloud geometries whose vertices are ALREADY in the
+    aligned glTF frame (or None/[] for nothing); each is added to that
+    step's scene.
     """
-    if not stems:
-        raise ValueError("No stems to render.")
+    if not frame_indexes:
+        raise ValueError("No frames to render.")
+    if frame_loader is None and image_dirs is None:
+        raise ValueError(
+            "image_dirs are required when frame_loader is None (they are "
+            "the only source of the per-step RGB frames)"
+        )
 
     w, h = size
     w -= w % 2
     h -= h % 2  # x264 wants even dimensions
 
-    traj = load_trajectory(stems, input_dirs, result_dir)
-    exts0 = []
-    for img_dir in input_dirs:
-        _, e, _ = load_stream_data(img_dir, result_dir, stems[0])
-        exts0.append(e)
-    extr0 = np.stack(exts0, axis=0)
+    traj = load_trajectory(frame_indexes, depth_dirs)
+    extr0 = load_poses(frame_indexes[0], depth_dirs)
     # The cloud wraps around the camera path (not around the trajectory
     # median), so the view is fit to the union of clouds + trajectory
     # (+ any extra trace points, which are fit before ``alignment`` is
     # computed so the geometry callback below sees the final transform).
     scene_pts = _union_scene_points(
-        stems, input_dirs, result_dir, stride, extra_points=extra_fit_points
+        frame_indexes, depth_dirs, stride, extra_points=extra_fit_points
     )
     alignment = compute_view_transform(extr0, scene_pts)
 
@@ -470,22 +490,22 @@ def render_stream_video(
         out_path, fps=fps, codec="libx264", quality=8, macro_block_size=1
     )
     try:
-        for t, stem in enumerate(stems):
+        for t, frame_index in enumerate(frame_indexes):
             if frame_loader is None:
-                depth, extrs, intrs, images = load_pair(stem, input_dirs, result_dir)
+                depth, extrs, intrs, images = load_pair(frame_index, image_dirs, depth_dirs)
             else:
-                # Online images: geometry from the NPZs, frames from the
-                # loader (no frame folders on disk).
+                # Online images: geometry from the depth_pose folders, frames
+                # from the loader (no frame folders on disk).
                 depths, exts, ints = [], [], []
-                for img_dir in input_dirs:
-                    d, e, i = load_stream_data(img_dir, result_dir, stem)
+                for depth_dir in depth_dirs:
+                    d, e, i = load_stream_data(depth_dir, frame_index)
                     depths.append(d)
                     exts.append(e)
                     ints.append(i)
                 depth = np.stack(depths, axis=0)
                 extrs = np.stack(exts, axis=0)
                 intrs = np.stack(ints, axis=0)
-                images = frame_loader(stem)
+                images = frame_loader(frame_index)
             geoms = build_frame_geometries(
                 depth,
                 extrs,
@@ -528,7 +548,7 @@ def render_stream_video(
                     _label_viewport(canvas, name, x0 + 8, y0 + 6)
                 arr = canvas
             writer.append_data(arr)
-            print(f"  rendered {t + 1}/{len(stems)}: {stem}")
+            print(f"  rendered {t + 1}/{len(frame_indexes)}: {frame_index}")
     finally:
         writer.close()
     return out_path
@@ -550,7 +570,9 @@ def main(argv: list[str] | None = None) -> int:
         help="Source image folders (one per camera), same order as inference",
     )
     parser.add_argument("--result-dir", default="output/stream_stereo",
-                        help="Streaming output directory")
+                        help="Streaming output directory: one depth_pose "
+                             "folder per camera, named after the --input-dirs "
+                             "basenames")
     parser.add_argument("--output", default=None,
                         help="Video output path (default: <result-dir>/trajectory.mp4)")
     parser.add_argument("--fps", type=int, default=10)
@@ -600,15 +622,18 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    stems = load_stems(args.result_dir, args.input_dirs)
+    # depth_pose folders are named after the input folders (see BaseStreaming)
+    depth_dirs = [os.path.join(args.result_dir, Path(d).name)
+                  for d in args.input_dirs]
+    frame_indexes = load_stems(depth_dirs)
     w, h = (int(x) for x in args.size.lower().split("x"))
     out_path = args.output or os.path.join(args.result_dir, "trajectory.mp4")
-    print(f"Rendering trajectory video ({len(stems)} frames) -> {out_path}")
+    print(f"Rendering trajectory video ({len(frame_indexes)} frames) -> {out_path}")
     render_stream_video(
-        stems,
-        args.input_dirs,
-        args.result_dir,
+        frame_indexes,
+        depth_dirs,
         out_path,
+        image_dirs=args.input_dirs,
         fps=args.fps,
         size=(w, h),
         max_points_per_frame=args.max_points,

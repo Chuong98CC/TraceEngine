@@ -301,15 +301,18 @@ def main(argv: list[str] | None = None) -> int:
         # needed when a video is requested.
         from tools.general_test.pipeline.visualize_stream import load_stems, render_stream_video
 
-        stems = load_stems(save_dir, args.input_dirs)
+        # the per-camera depth_pose folders are named after the input folders
+        depth_dirs = [os.path.join(save_dir, os.path.basename(d))
+                      for d in args.input_dirs]
+        frame_indexes = load_stems(depth_dirs)
         w, h = (int(x) for x in args.video_size.lower().split("x"))
         video_out = args.video_out or os.path.join(save_dir, "trajectory.mp4")
-        print(f"\nRendering trajectory video ({len(stems)} frames) -> {video_out}")
+        print(f"\nRendering trajectory video ({len(frame_indexes)} frames) -> {video_out}")
         render_stream_video(
-            stems,
-            args.input_dirs,
-            save_dir,
+            frame_indexes,
+            depth_dirs,
             video_out,
+            image_dirs=args.input_dirs,
             fps=args.video_fps,
             size=(w, h),
             max_points_per_frame=args.video_max_points,

@@ -10,8 +10,8 @@ DATA_ROOT=/data/astribot_making_coffee_vlva_full
 # sampling modes: uniform, mask, no_roma
 python tools/astribot/run_step3_init_points.py \
     --repo-id $REPO_ID \
-    --data-root $DATA_ROOT --episode-idxes 1 \
-    --camera-idxes 0 4 5 \
+    --data-root $DATA_ROOT --episode-idxes 0 \
+    --camera-idxes 0  \
     --use-inferred-splits \
     --object-top-k 64 --manipulator-top-k 128 \
     --sampling-mode no_roma \
