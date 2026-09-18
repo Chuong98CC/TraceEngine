@@ -102,7 +102,7 @@ def affine_to_camera(
 ) -> dict:
     """Convert an affine point map to camera space, mirroring v3.infer().
 
-    Returns {points, depth, mask, intrinsics, normal-less} as fp32 tensors.
+    Returns {points, depth, mask, intrinsics, normal-surface, shift and metric_scale} as fp32 tensors.
     """
     device = affine_points.device
     mask_binary = mask > 0.5
@@ -138,4 +138,6 @@ def affine_to_camera(
         points = torch.where(mask_binary[..., None], points, torch.inf)
         depth = torch.where(mask_binary, depth, torch.inf)
 
-    return {'points': points, 'depth': depth, 'mask': mask_binary, 'intrinsics': intrinsics}
+    return {'points': points, 'depth': depth, 'mask': mask_binary, 'intrinsics': intrinsics,
+            'shift': shift, 'metric_scale': metric_scale}
+

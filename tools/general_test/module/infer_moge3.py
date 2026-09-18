@@ -2,17 +2,27 @@
 
 Runs the exported dense graph + the eager sparse refiner on each image of an
 input folder — or on a single image file, or on one image of a folder
-selected by index into the sorted file list. By default nothing is written to
-disk; per-image outputs are opt-in:
+selected by index into the sorted file list. The model returns five outputs at
+the graph's fixed size — ``points`` (camera-space metres), ``depth`` (metres),
+``mask``, ``intrinsics`` and ``normal``. ``mask`` needs no handling of its
+own: the postprocess has already applied it, so a masked-out pixel comes back
+as ``+inf`` depth. ``points`` is only consumed by the commented-out
+reference-mesh block.
+
+By default nothing is written to disk; per-image outputs are opt-in:
   - --save-depth: <stem>.npz with the metric depth (H, W fp32 metres) and the
     model's estimated intrinsics (3x3, rescaled to pixel units),
-  - --visualize: a colour-coded depth .png (Spectral_r heatmap, min-max
-    normalized over valid pixels) + two textured .glb meshes — the export_glb
-    mesh back-projected with the estimated intrinsics and identity
-    extrinsics (camera space; masked-out pixels zeroed), and an
-    official-MoGe-recipe reference mesh ({stem}_mesh.glb) built straight from
-    the model's camera-space points with utils3d (depth-edge-cleaned grid
-    mesh; uncentred).
+  - --save-normal: <stem>_normal.npy (H, W, 3 fp32), the model's normal map,
+  - --save-packed: <stem>_octahedral.png, one uint8 RGB image carrying the
+    normals and the depth ([Oct_U, Oct_V, log depth]; see
+    pack_octahedral_depth / unpack_octahedral_depth). The depth channel uses
+    the repo's log-depth codec over [--depth-min, --depth-max] so it decodes
+    straight back to metres; invalid pixels pack to (0, 0, 0),
+  - --visualize: three .png — <stem>_depth.png (Spectral_r heatmap, min-max
+    normalized over the valid pixels), <stem>_normal.png (the normal map as
+    RGB, xyz -> RGB) and the packed <stem>_octahedral.png above — plus the
+    textured .glb mesh back-projected with the estimated intrinsics and
+    identity extrinsics (camera space; masked-out pixels zeroed).
 
 The graph is compiled for a fixed 640x480 input (non-preserving resize), so
 any input size is accepted; depth is output at that fixed resolution.
@@ -26,7 +36,8 @@ Examples:
   # single image file, full outputs
   python tools/general_test/module/infer_moge3.py \
     -i assets/astribot_test_imgs/head_stereo_left/frame_000210.jpg \
-    --save-depth --visualize --out_dir ./output/moge3
+    --save-depth --save-normal --save-packed --visualize \
+    --out_dir ./output/moge3
 
   # one frame of a folder: frame-idx is a 0-based index into the sorted
   # file list (not a frame number)
@@ -49,6 +60,7 @@ from PIL import Image
 import utils3d_moge as utils3d
 
 from depth_models.moge3.moge_pt2 import MoGev3_PT2
+from utils.depth_utils import MAX_DEPTH, MIN_DEPTH, LogDepthToUint8Transform
 from utils.visualize.visualize_depth import export_glb
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
@@ -144,22 +156,180 @@ def _save_depth_npz(depth: np.ndarray, intrinsics: np.ndarray,
     np.savez(str(out_base) + ".npz", depth=depth, intrinsics=intrinsics)
 
 
-def _save_depth_png(depth: np.ndarray, out_base: Path) -> None:
-    """Save a colour-coded depth heatmap (Spectral_r, min-max normalized over
-    the valid range)."""
-    depth_min = float(np.min(depth))
-    depth_max = float(np.max(depth))
-    if depth_max > depth_min:
-        depth_norm = (depth - depth_min) / (depth_max - depth_min)
-    else:
-        depth_norm = np.zeros_like(depth)
+def _save_depth_png(depth: np.ndarray, valid: np.ndarray, out_base: Path) -> None:
+    """Save a colour-coded depth heatmap (Spectral_r) as <out_base>_depth.png.
 
-    depth_img = (depth_norm * 255.0).astype(np.uint8)
+    Min-max normalized over the *valid* pixels only: the invalid ones are
+    zeroed, so including them would pin the minimum at 0 and squash the whole
+    scene into the top of the colormap.
+    """
+    depth_img = np.zeros(depth.shape, dtype=np.uint8)
+    if valid.any():
+        depth_min = float(depth[valid].min())
+        depth_max = float(depth[valid].max())
+        if depth_max > depth_min:
+            depth_img = (
+                np.clip((depth - depth_min) / (depth_max - depth_min), 0.0, 1.0)
+                * 255.0
+            ).astype(np.uint8)
+
     cmap = matplotlib.colormaps.get_cmap("Spectral_r")
-    depth_img = (cmap(depth_img)[:, :, :3] * 255).astype(np.uint8)
+    Image.fromarray((cmap(depth_img)[:, :, :3] * 255).astype(np.uint8)).save(
+        str(out_base) + "_depth.png"
+    )
 
-    Image.fromarray(depth_img).save(str(out_base) + ".png")
 
+def _save_normal_png(normal: np.ndarray, valid: np.ndarray, out_base: Path) -> None:
+    """Save the model's normal map as <out_base>_normal.png.
+
+    Channels are xyz -> RGB with the usual [-1, 1] -> [0, 255] rescale, so the
+    result is a standard normal map. Its R/G pair carries the same signal as
+    the packed image's octahedral pair, which makes the two directly
+    comparable. Invalid pixels are black.
+    """
+    rgb = np.clip((np.asarray(normal, dtype=np.float32) + 1.0) * 0.5 * 255.0,
+                  0.0, 255.0).astype(np.uint8)
+    rgb[~valid] = 0
+    Image.fromarray(rgb).save(str(out_base) + "_normal.png")
+
+
+def _save_octahedral_png(packed: np.ndarray, out_base: Path) -> None:
+    """Save a packed [Oct_U, Oct_V, log depth] image as
+    <out_base>_octahedral.png (see pack_octahedral_depth)."""
+    Image.fromarray(packed).save(str(out_base) + "_octahedral.png")
+
+
+def pack_octahedral_depth(
+    normals: np.ndarray,
+    depth_m: np.ndarray,
+    valid: np.ndarray | None = None,
+    depth_transform: LogDepthToUint8Transform | None = None,
+) -> np.ndarray:
+    """Pack a normal map and a metric depth map into one uint8 RGB image.
+
+    The layout is [Oct_U, Oct_V, depth], so a single 8-bit PNG carries both
+    signals. U/V are the L1 octahedral projection of the unit normal rescaled
+    to [0, 255]; depth is the repo's log-depth codec
+    (:class:`LogDepthToUint8Transform`) over ``[min_depth_m, max_depth_m]``, so
+    the depth channel decodes straight back to metres. A linear normalization
+    would instead thin out the far range, where most of the scene sits.
+
+    Pixels that are not valid — outside the mask, or carrying a non-finite /
+    non-positive depth such as MoGe's ``+inf`` masked-out sentinel — pack to
+    ``(0, 0, 0)``. On the way back the *depth channel* is the validity marker:
+    the codec decodes 0 to 0.0 m, the same 0-is-invalid convention as every
+    ``.lz4`` depth file, whereas the octahedral pair still decodes to the unit
+    vector ``(0, 0, -1)`` — a plausible-looking back-facing normal. Read the
+    depth channel, not the normals, to find the invalid pixels.
+
+    Two *valid* depths are indistinguishable from that invalid 0, exactly as in
+    the .lz4 storage format: one at or below ``min_depth_m``, and one at or
+    above ``max_depth_m``, which saturates to the top code and decodes back as
+    exactly ``max_depth_m``. Pick the range to bracket the scene — a monocular
+    metric model's background easily runs past a sensor-oriented default.
+
+    Args:
+        normals: (H, W, 3) unit normals (any consistent frame).
+        depth_m: (H, W) metric depth. Metres (float) or uint16 millimetres:
+            the codec auto-detects the latter, and the array is deliberately
+            not cast here so that detection still works.
+        valid: (H, W) bool, or None to treat every pixel as valid.
+        depth_transform: :class:`LogDepthToUint8Transform` the depth channel is
+            encoded with, or None for the default [MIN_DEPTH, MAX_DEPTH] range.
+
+    Returns:
+        (H, W, 3) uint8 image.
+    """
+    if depth_transform is None:
+        depth_transform = LogDepthToUint8Transform()
+    normals = np.asarray(normals, dtype=np.float32)
+    depth_m = np.asarray(depth_m)
+
+    # Non-finite / non-positive depth is invalid whether or not a mask is
+    # handed in: the codec counts +inf as a valid measurement and would clip
+    # it to the far end of the range instead of preserving the invalid 0.
+    valid_mask = np.isfinite(depth_m) & (depth_m > 0.0)
+    if valid is not None:
+        valid_mask &= np.asarray(valid, dtype=bool)
+
+    # Project to the L1 octahedron.
+    l1_norm = np.sum(np.abs(normals), axis=-1, keepdims=True) + 1e-8
+    p = normals[..., :2] / l1_norm
+
+    # Unfold the back-facing hemisphere onto the diamond's outer edges. The
+    # sign must be +/-1, never np.sign: sign(0) is 0, which would zero the
+    # coordinate the fold just derived from the other one.
+    back = normals[..., 2] < 0
+    p[back] = (1.0 - np.abs(p[back, ::-1])) * np.where(p[back] >= 0.0, 1.0, -1.0)
+
+    # Scale to [0, 255], then encode the depth channel on its log grid.
+    u = ((p[..., 0] + 1.0) * 0.5 * 255.0).astype(np.uint8)
+    v = ((p[..., 1] + 1.0) * 0.5 * 255.0).astype(np.uint8)
+    # The integer fill keeps an integer depth_m integer, so the codec still
+    # sees the uint16-mm arrays it is documented to auto-detect.
+    d = np.asarray(depth_transform.encode(np.where(valid_mask, depth_m, 0)),
+                   dtype=np.uint8)
+
+    packed = np.stack([u, v, d], axis=-1)
+    packed[~valid_mask] = 0
+    return packed
+
+
+def unpack_octahedral_depth(
+    packed_img: np.ndarray,
+    depth_transform: LogDepthToUint8Transform | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Inverse of :func:`pack_octahedral_depth`.
+
+    Args:
+        packed_img: (H, W, 3) uint8 image, [Oct_U, Oct_V, log depth].
+        depth_transform: the codec the image was packed with, or None for the
+            default [MIN_DEPTH, MAX_DEPTH] range. Must match the pack side, or
+            the depths come back on the wrong scale.
+
+    Returns:
+        ``(normals (H, W, 3) float32 unit vectors, depth_m (H, W) float32
+        metres)``. A zero depth channel marks an invalid pixel and comes back
+        as 0.0 m; that pixel's normals decode to ``(0, 0, -1)``, so test
+        validity on the depth channel rather than on the normals.
+
+    Example:
+        >>> packed = np.asarray(Image.open("frame_210_octahedral.png"))
+        >>> normals, depth_m = unpack_octahedral_depth(packed)
+    """
+    if depth_transform is None:
+        depth_transform = LogDepthToUint8Transform()
+    packed_img = np.asarray(packed_img, dtype=np.uint8)
+
+    # 1. Unscale back to [-1, 1] for the octahedral coordinates.
+    u = packed_img[..., 0].astype(np.float32) / 255.0 * 2.0 - 1.0
+    v = packed_img[..., 1].astype(np.float32) / 255.0 * 2.0 - 1.0
+
+    # 2. Reconstruct z on the octahedron.
+    z = 1.0 - (np.abs(u) + np.abs(v))
+
+    # 3. Unfold back-facing hemisphere where z < 0.
+    below = z < 0.0
+
+    # Avoid zero-sign issues (np.sign(0) returns 0; keep sign as +1 or -1)
+    sign_u = np.where(u >= 0.0, 1.0, -1.0)
+    sign_v = np.where(v >= 0.0, 1.0, -1.0)
+
+    x = u.copy()
+    y = v.copy()
+
+    x[below] = (1.0 - np.abs(v[below])) * sign_u[below]
+    y[below] = (1.0 - np.abs(u[below])) * sign_v[below]
+
+    # 4. Stack and normalize to unit length.
+    normals = np.stack([x, y, z], axis=-1)
+    norm = np.linalg.norm(normals, axis=-1, keepdims=True)
+    normals = normals / np.maximum(norm, 1e-8)
+
+    # 5. Depth channel: the log codec straight back to metres (0 -> invalid).
+    depth_m = depth_transform.decode(packed_img[..., 2])
+
+    return normals.astype(np.float32), depth_m
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -181,8 +351,30 @@ def parse_args() -> argparse.Namespace:
              "model-estimated intrinsics (3x3, pixel units).",
     )
     parser.add_argument(
+        "--save-normal", action="store_true",
+        help="Save per-image <stem>_normal.npy (H, W, 3 float32), the model's "
+             "normal map.",
+    )
+    parser.add_argument(
+        "--save-packed", action="store_true",
+        help="Save per-image <stem>_octahedral.png: one uint8 RGB carrying "
+             "the normals and the depth ([Oct_U, Oct_V, log depth]). Written "
+             "by --visualize too.",
+    )
+    parser.add_argument(
         "--visualize", action="store_true",
-        help="Save per-image colour heatmap .png and the two mesh .glb files.",
+        help="Save the per-image <stem>_depth.png heatmap, "
+             "<stem>_normal.png, <stem>_octahedral.png and <stem>.glb mesh.",
+    )
+    parser.add_argument(
+        "--depth-min", type=float, default=MIN_DEPTH,
+        help=f"Lower end of the log-depth range used by the packed image's "
+             f"depth channel (metres, default {MIN_DEPTH}).",
+    )
+    parser.add_argument(
+        "--depth-max", type=float, default=MAX_DEPTH,
+        help=f"Upper end of the log-depth range used by the packed image's "
+             f"depth channel (metres, default {MAX_DEPTH}).",
     )
     parser.add_argument(
         "--pt2", type=str, default="weights/moge3/moge3_l.pt2",
@@ -193,9 +385,16 @@ def parse_args() -> argparse.Namespace:
         help="Path to the refiner companion checkpoint (defaults to the .pt2 path with _refiner.pt).",
     )
     parser.add_argument("--device", type=str, default="cuda", help="Device (must be CUDA).")
-    parser.add_argument("--refine_steps", type=int, default=3, help="Sparse refinement steps.")
+    parser.add_argument("--refine_steps", type=int, default=1, help="Sparse refinement steps.")
     parser.add_argument("--out_dir", type=str, default="./output/moge3")
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.depth_min <= 0.0 or args.depth_min >= args.depth_max:
+        parser.error(
+            f"--depth-min ({args.depth_min}) must be > 0 and < --depth-max "
+            f"({args.depth_max}): the packed image's depth channel is "
+            f"log-encoded over that range."
+        )
+    return args
 
 
 def main() -> None:
@@ -235,10 +434,22 @@ def main() -> None:
         elapsed = time.perf_counter() - t0
         print(f"inference took {elapsed * 1000:.1f} ms")
 
-        # out: batched fp32 CUDA tensors; depth/mask at the graph's fixed size.
-        pred = out["depth"].squeeze(0).cpu().numpy().astype(np.float32)  # (H, W)
+        # ---- model outputs, all at the graph's fixed size: depth (H, W)
+        # metres, normal (H, W, 3) and intrinsics (3, 3), plus the camera-space
+        # point map (H, W, 3) that only the commented-out reference-mesh block
+        # below consumes. ----
+        depth_raw = out["depth"].squeeze(0).cpu().numpy().astype(np.float32)  # (H, W)
+        # The postprocess already applies the model's mask, writing +inf over
+        # every pixel it rejected, so the depth's finiteness *is* that mask —
+        # no second validity test to keep in sync. Reading it off the depth
+        # also keeps a stray non-finite depth out of the consumers below, which
+        # is what the mask alone (it survives the +z test on an overflowing
+        # logz) would not. One source of truth for the three PNGs, the packer,
+        # the mesh and the summary.
+        valid = np.isfinite(depth_raw)  # (H, W)
         # masked-out pixels come back as +inf -> zero them like the other tools.
-        pred[~np.isfinite(pred)] = 0.0
+        pred = np.where(valid, depth_raw, 0.0).astype(np.float32)
+        normal = out["normal"].squeeze(0).cpu().numpy().astype(np.float32)  # (H, W, 3)
 
         # ---- model-estimated intrinsics in pixel units. MoGe's intrinsics
         # are expressed in utils3d's normalized-uv space (principal point at
@@ -261,15 +472,52 @@ def main() -> None:
             _save_depth_npz(pred, K, out_base)
             print(f"Saved depth: {out_base}.npz")
 
-        # ---- visualization (--visualize): heatmap + meshes ----
+        # ---- normal data (--save-normal). No mask file: the model's mask is
+        # already applied to the depth, so it is recoverable as ``depth > 0``
+        # from the npz --save-depth writes, and from the packed image's depth
+        # channel. ----
+        if args.save_normal:
+            np.save(str(out_base) + "_normal.npy", normal)
+            print(f"Saved normal: {out_base}_normal.npy")
+
+        # ---- packed normals + depth in one RGB image. --visualize lists the
+        # same file among its three PNGs, hence the either/or. ----
+        if args.save_packed or args.visualize:
+            packed = pack_octahedral_depth(
+                normal, pred, valid,
+                LogDepthToUint8Transform(min_depth_m=args.depth_min,
+                                         max_depth_m=args.depth_max),
+            )
+            _save_octahedral_png(packed, out_base)
+            print(f"Saved packed: {out_base}_octahedral.png")
+
+            # The codec saturates rather than fails, so report how much of the
+            # scene landed on each end of the range: a range that does not
+            # bracket the scene is otherwise invisible in the packed image,
+            # which still looks plausible. Both ends decode to a single value
+            # (min -> invalid 0.0 m, max -> exactly max_depth_m).
+            n_valid = int(valid.sum())
+            near = int((valid & (pred <= args.depth_min)).sum())
+            far = int((valid & (pred >= args.depth_max)).sum())
+            if near or far:
+                print(
+                    f"packed depth: {near} px at/below {args.depth_min}m, "
+                    f"{far} px at/above {args.depth_max}m "
+                    f"({far / max(n_valid, 1):.1%} of valid clipped) — widen "
+                    f"--depth-min/--depth-max to bracket the scene"
+                )
+
+        # ---- visualization (--visualize): three PNGs + the mesh ----
         if args.visualize:
             # colour source for the point cloud, at the depth resolution
             rgb_u8 = image_rgb
             if rgb_u8.shape[:2] != pred.shape:
                 rgb_u8 = cv2.resize(rgb_u8, (pred.shape[1], pred.shape[0]))
 
-            _save_depth_png(pred, out_base)
-            print(f"Saved heatmap: {out_base}.png")
+            _save_depth_png(pred, valid, out_base)
+            _save_normal_png(normal, valid, out_base)
+            print(f"Saved heatmap: {out_base}_depth.png")
+            print(f"Saved normal : {out_base}_normal.png")
 
             # textured surface mesh via export_glb (official-MoGe-style);
             # identity extrinsics: monocular output is in camera space
@@ -302,7 +550,6 @@ def main() -> None:
             #               vertex_normals)
             # print(f"Saved glb : {glb_path_2}")
 
-        valid = pred > 0
         if valid.any():
             print(
                 f"pred depth: {pred[valid].mean():.2f}+/-{pred[valid].std():.2f}m  "
