@@ -16,15 +16,35 @@ By default nothing is written to disk; per-image outputs are opt-in:
     model's estimated intrinsics (3x3, rescaled to pixel units),
   - --save-normal: <stem>_normal.npy (H, W, 3 fp32), the model's normal map,
   - --save-packed: <stem>_octahedral.png, one uint8 RGB carrying the normals
-    and the affine log-depth ([Oct_U, Oct_V, logz]; see pack_octahedral_logz /
-    unpack_octahedral_logz). The depth channel is a linear rescaling of logz
-    over the frame's own affine-z range, intersected with the
-    [--depth-min, --depth-max] rails. Code 0 is reserved for invalid, so valid
-    data uses codes 1..255 and an out-of-range pixel clips to a bound instead
-    of vanishing into the sentinel,
-  - --save-scale: <stem>_scale.npz — shift, metric_scale, intrinsics, the
-    encoded z_min/z_max and the image size. Implied by --save-packed, since
-    the packed image cannot be decoded without it,
+    and the affine depth ([Oct_U, Oct_V, depth]; see utils.normal_depth_pack).
+    The depth channel encodes the frame's own affine-z range, intersected with
+    the [--depth-min, --depth-max] rails. Code 0 is reserved for invalid, so
+    valid data uses codes 1..255 and an out-of-range pixel clips to a bound
+    instead of vanishing into the sentinel,
+  - --save-blend-Dab: <stem>_blend_Dab.png, the depth plus the frame's
+    high-frequency L, ridden in Lab's L channel, with the input frame's own
+    chroma in a and b. Normals are not carried. It still reads as a picture,
+    which is the point: the detail term is what puts the surface markings back
+    on an otherwise bare depth ramp, and it is what the depth costs — see
+    utils.normal_depth_pack and DAB_DETAIL_ALPHA. The ramp runs between
+    DEFAULT_L_DARK and DEFAULT_L_BRIGHT, with DEFAULT_FAR_IS_BRIGHT choosing
+    which end the distance gets -- by default the far surfaces are the bright
+    ones and the near ones the dark. A reader needs the resolved ends, which is
+    why they go in the sidecar,
+  - --save-Alb-norm: <stem>_alb_normal.png — a Retinex albedo of the frame's
+    Lab L in R, with the normal's nx and ny in G and B. The only carrier with
+    no depth in it, and the only one that is lossy rather than merely
+    quantized: two channels cannot say which side of the fold a normal is on,
+    so the reader takes it to be on the pole's side, and the small share of
+    pixels pointing the other way come back mirrored (measured: 0.184% at more
+    than 10 degrees, worst 49). See utils.normal_depth_pack,
+  - --save-scale: <stem>_scale.npz — shift, metric_scale, intrinsics, the pole,
+    the encoded z_min/z_max and the image size, plus the albedo percentiles
+    when --save-Alb-norm asked for them and the Dab ramp's ends when
+    --save-blend-Dab did. Implied by --save-packed, since the packed image
+    cannot be decoded without it, and by --save-blend-Dab for the same reason —
+    those two share one sidecar, because they carry the same depth code over
+    the same range,
   - --visualize: two .png — <stem>_depth.png (Spectral_r heatmap of the
     *metric* depth, min-max normalized over the valid pixels) and
     <stem>_normal.png (the normal map as RGB, xyz -> RGB) — plus the textured
@@ -35,8 +55,9 @@ By default nothing is written to disk; per-image outputs are opt-in:
 
 The packed image plus its sidecar carry the model's whole output::
 
-    normals, logz, valid = unpack_octahedral_logz(packed, z_min, z_max)
-    depth_m = (np.exp(logz) + shift) * metric_scale
+    sidecar = NormalDepthPack.load_scale(scale_path)
+    normals, depth_z, valid = pack.decode_with_scale(packed, sidecar)
+    depth_m = DepthScale.from_dict(sidecar).to_metric(depth_z)
 
 and the point map comes back by back-projecting ``depth_m`` through
 ``intrinsics``. The cost is 8-bit quantization — normals to octahedral
@@ -75,40 +96,203 @@ import numpy as np
 from PIL import Image
 
 from depth_models.moge3.moge_pt2 import MoGev3_PT2
+from utils.normal_depth_pack import (
+    DEFAULT_Z_MAX,
+    DEFAULT_Z_MIN,
+    MOGE_POLE,
+    DepthScale,
+    NormalDepthPack,
+    encode_alb_normal,
+    encode_dab,
+    encode_fused,
+    encode_l_normal,
+)
 from utils.visualize.visualize_depth import export_glb
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
 
-#: Bounds for the packed image's affine-z channel, in metres. The encoded range
-#: is the intersection of these with the frame's own range (see
-#: ``adaptive_logz_range``), so they are a rail rather than the encoding range:
-#: a scene that fits inside them is encoded over its own, tighter one. MoGe's
-#: affine frame is scale-free, so one pair of bounds covers scenes whose metric
-#: scale differs by a lot — the .lz4 format's [MIN_DEPTH, MAX_DEPTH] does not.
-DEFAULT_Z_MIN = 0.25
-DEFAULT_Z_MAX = 3.0
+# ---------------------------------------------------------------- tuning
+# Everything worth experimenting with, in one block so it can be tuned without
+# hunting through the file. Each is the default of the call that uses it and is
+# passed explicitly there, so editing a value here changes the output; the
+# shared codec keeps its own defaults for callers that are not this tool.
 
-#: Depth channel codes: 0 is reserved for invalid, valid data uses 1..255.
-LOGZ_CODE_MIN = 1
-LOGZ_CODE_MAX = 255
-LOGZ_LEVELS = LOGZ_CODE_MAX - LOGZ_CODE_MIN  # 254 steps between those codes
+# --save-blend-Dab: how much of the frame's high-frequency L to lay back over
+# the depth, and the filter that extracts it. The term is what puts surface
+# markings on an otherwise bare depth ramp, and it is also what the depth
+# costs -- the two share one channel. Measured on a real frame, alpha=0.1 with
+# this filter takes the depth from a guarantee of 1.0% to a p99 of ~2.9%.
+# sigma_color is the main dial: it sets how far a strong edge is allowed into
+# the residual (see the codec's DAB_DETAIL_* for what each does).
+DEFAULT_ALPHA = 0.0
+DEFAULT_D = 15
+DEFAULT_SIGMA_COLOR = 0.2
+DEFAULT_SIGMA_SPACE = 9
 
-#: Frame correction applied to the normals before the octahedral projection.
-#: MoGe emits normals in the OpenCV camera frame, where a surface facing the
-#: camera has nz = -1, so the bulk of the data sits on the -z axis. The
-#: octahedral map is well conditioned at its pole and degenerate at the
-#: opposite one — measured 12.5 codes of movement per degree of normal change
-#: at the far pole against 1.2 in the best-conditioned band. On the far pole
-#: that turns a 0.56-degree step between neighbouring pixels of one flat
-#: surface into a 359-code jump: the blocky blotches on every flat wall.
-#: Flipping z moves the projection pole onto the data. Its own inverse, and
-#: applied on both sides, so pack/unpack still round-trip in MoGe's frame.
+#: The gate the depth ramp lives inside, and which end of it is bright.
+#: Kept as limits rather than as ends so the direction can be flipped without
+#: touching them -- and note that unlike everything above, these are a property
+#: of the *encoding*: a reader cannot recover the depth without them, which is
+#: why the tool writes the resolved ends into the sidecar.
 #:
-#: float32 on purpose: a float64 factor here would promote the whole projection
-#: to float64, where the ``+1e-8`` in the L1 norm no longer rounds away and
-#: axis normals land one code short of the edge.
-POLE_FLIP = np.array([1.0, 1.0, -1.0], dtype=np.float32)
+#: Keeping the ramp off 0 and 100 is the point. At the full span the nearest
+#: surface lands near-black and the farthest near-white, so the image reads as
+#: an exposure problem rather than as a depth map. Narrowing the span further
+#: costs depth accuracy, because each code becomes a smaller step in L for the
+#: 8-bit round trip to resolve: measured over the ramp, 0-100 and 10-90 both
+#: give a 0.98% max error, 20-85 gives 1.97%, 40-65 gives 3.93%.
+DEFAULT_L_DARK = 0.1
+DEFAULT_L_BRIGHT = 99.9
 
+#: Which end of the ramp the far surfaces get. True puts the distance *behind*
+#: the subject at the bright end, which is how a photograph of a lit room
+#: usually falls; False puts the near surfaces there instead.
+DEFAULT_FAR_IS_BRIGHT = True
+
+
+#: Floor for a frame-derived ramp end. The encoder needs both ends above zero
+#: -- an L* of 0 is pure black, which is what an invalid pixel is written as --
+#: and the sRGB round trip reaches black at around L* 0.17, so the floor sits
+#: clear of that rather than on it. sRGB 4 at this value.
+DEFAULT_L_FLOOR = 1.0
+
+#: Smallest luminance span worth scaling to. Below it the two ends would land
+#: on the same value, which the encoder rejects, so one flat frame would abort
+#: the run; the gate stands in instead.
+DEFAULT_MIN_L_SPAN = 2.0
+
+
+def _dab_ramp(dark: float, bright: float, far_is_bright: bool) -> tuple[float, float]:
+    """Resolve the gate and the direction into the L* at each end of the ramp.
+
+    Returns ``(l_far, l_near)``, which is what both the encoder and a reader
+    need -- the gate and the flag are how this tool spells them, not what the
+    encoding stores.
+    """
+    return (bright, dark) if far_is_bright else (dark, bright)
+
+# --save-fused reuses DEFAULT_ALPHA above: the detail term is converted into
+# depth codes so one setting means the same texture strength in both carriers.
+
+# --save-L-norm: how far the normal's nx, ny are stretched into Lab's a and b.
+# Like the ramp ends below, this is a property of the *encoding* -- a reader
+# cannot recover the pair without it, so it goes in the sidecar. 56 is the
+# largest that fits the gamut's narrower channel at mid luminance; past it the
+# mid-tones clip too and the whole frame loses the normals rather than just its
+# bright and dark ends. See the codec's LN_SCALE for why this carrier is the
+# weakest of the three at carrying them.
+DEFAULT_L_NORM_SCALE = 56.0
+
+# --save-Alb-norm: the Retinex split's illumination scale and range, plus a
+# pre-filter on the log image. The pre-filter matters because the split's
+# residual is stretched hard -- its p1-p99 span is only ~0.37, so the
+# normalization multiplies every step in it by ~680x, and the pixel-level
+# noise already in L lands on flat surfaces as visible speckle. Measured over
+# six cameras it takes flat-region noise from 2.15x to 1.22x while the
+# retained fine detail only moves from 1.58x to 1.45x. A larger denoise
+# sigma_r (0.25) starts flattening real texture instead, and raising sigma_r
+# past its knee near 1.0 absorbs real albedo into the illumination.
+DEFAULT_SIGMA_S = 30
+DEFAULT_SIGMA_R = 1.0
+DEFAULT_DENOISE_SIGMA_S = 3
+DEFAULT_DENOISE_SIGMA_R = 0.15
+
+
+def _scaled_dab_ramp(l_star, far_is_bright: bool,
+                     floor: float = DEFAULT_L_FLOOR,
+                     min_span: float = DEFAULT_MIN_L_SPAN) -> tuple[float, float]:
+    """The Dab ramp's ends, taken from the frame's own luminance.
+
+    Where :func:`_dab_ramp` is handed fixed limits, this reads them off the
+    image: the brightest pixel becomes one end of the depth ramp and the
+    darkest the other, so a low-contrast frame gets a low-contrast ramp instead
+    of being stretched over the gate.
+
+    The floor is not part of that idea, it is the sentinel's: an L* of 0 is
+    pure black, which is exactly what an invalid pixel is written as, so a
+    frame with a black pixel would make the two indistinguishable. A frame
+    with no span at all has nothing to scale to and falls back to the gate.
+    """
+    low = max(float(np.min(l_star)), floor)
+    high = min(float(np.max(l_star)), 100.0)
+    if high - low < min_span:
+        return _dab_ramp(DEFAULT_L_DARK, DEFAULT_L_BRIGHT, far_is_bright)
+    return _dab_ramp(low, high, far_is_bright)
+
+
+def extract_albedo_retinex(l_channel, sigma_s=DEFAULT_SIGMA_S,
+                           sigma_r=DEFAULT_SIGMA_R,
+                           denoise_sigma_s=DEFAULT_DENOISE_SIGMA_S,
+                           denoise_sigma_r=DEFAULT_DENOISE_SIGMA_R):
+    """
+    Separates L* into an illumination-invariant albedo channel and an illumination map.
+
+    Parameters:
+        l_channel: (H, W) uint8 or float32 array in [0, 255]
+        sigma_s: Spatial standard deviation (smooths over large lighting gradients)
+        sigma_r: Range/intensity standard deviation in log space (preserves texture edges)
+        denoise_sigma_s: Spatial extent of the pre-filter. 0 disables it.
+        denoise_sigma_r: Range sigma of the pre-filter, same units as sigma_r.
+
+    Returns:
+        albedo: (H, W) uint8 in [0, 255], free of slow-moving shadows/highlights
+        illumination: (H, W) uint8 in [0, 255], smooth ambient light map
+        p_low, p_high: the 1st and 99th percentiles the albedo was scaled
+            between. Returned because the scaling is per-image and otherwise
+            uninvertible: without them ``albedo`` cannot be turned back into
+            the reflectance it came from, and two frames' albedos are not
+            comparable. --save-Alb-norm records them in the sidecar.
+
+    Both sigmas are read against an image spanning about 5 log units, so they
+    are easy to set an order of magnitude too small -- 0.25 is 5% of that span,
+    which leaves the bilateral treating almost every texture edge as one to
+    preserve, and the illumination hugging the input. The residual is then
+    almost pure fine detail and the stretch below blows it up. Raise sigma_r
+    until the result stops changing rather than until it looks smooth: the
+    curve has a knee near 1.0, and past it the filter starts absorbing real
+    albedo into the illumination.
+    """
+    # 1. Normalize L to (0, 1] and move to log domain
+    l_float = l_channel.astype(np.float32) / 255.0
+    l_log = np.log(np.maximum(l_float, 1e-4))
+
+    # 2. Pre-filter, in log space so the noise is additive and one range sigma
+    #    fits dark and bright regions alike. This is a denoise, not the
+    #    illumination estimate -- it is deliberately far smaller than step 3.
+    if denoise_sigma_s > 0:
+        l_log = cv2.bilateralFilter(
+            l_log,
+            d=-1,
+            sigmaColor=denoise_sigma_r,
+            sigmaSpace=denoise_sigma_s
+        )
+
+    # 3. Estimate illumination via Bilateral Filter in log domain
+    # Large d or spatial sigma captures wide shadow gradients
+    illum_log = cv2.bilateralFilter(
+        l_log,
+        d=-1,
+        sigmaColor=sigma_r,
+        sigmaSpace=sigma_s
+    )
+
+    # 4. Extract reflectance (albedo) in log domain
+    albedo_log = l_log - illum_log
+
+    # 5. Map back to linear domain
+    albedo = np.exp(albedo_log)
+    illum = np.exp(illum_log)
+
+    # 6. Contrast-normalize albedo to [0, 255]
+    # Percentile clipping prevents outlier artifacts from compressing dynamic range
+    p_low, p_high = np.percentile(albedo, (1.0, 99.0))
+    albedo_scaled = np.clip((albedo - p_low) / (p_high - p_low + 1e-6), 0.0, 1.0)
+    albedo_u8 = (albedo_scaled * 255.0).astype(np.uint8)
+
+    illum_scaled = np.clip(illum, 0.0, 1.0)
+    illum_u8 = (illum_scaled * 255.0).astype(np.uint8)
+
+    return albedo_u8, illum_u8, p_low, p_high
 
 def list_images(input_path: Path) -> list[Path]:
     """Image paths to process from ``input_path``: the file itself when it is
@@ -135,40 +319,33 @@ def _save_depth_npz(depth: np.ndarray, intrinsics: np.ndarray,
 
 
 def _save_scale_npz(
-    shift: float,
-    metric_scale: float,
+    pack: NormalDepthPack,
+    scale: DepthScale,
     intrinsics: np.ndarray,
     z_min: float,
     z_max: float,
     shape: tuple[int, int],
     out_base: Path,
+    **extra: object,
 ) -> None:
-    """Save the scalars that decode a packed image back to metres and points.
+    """Save the sidecar that decodes a packed image back to metres and points.
 
-    The packed image is not self-contained: its depth channel is ``logz``
-    rescaled over ``[log z_min, log z_max]``, so both bounds are needed before
-    the codes mean anything, and turning ``z`` into metres needs the two
-    per-image scalars the postprocess fit. With all of them, everything the
-    graph returned is recoverable::
+    Everything the codec does not own, plus everything it does: the two
+    per-image scalars the postprocess fit, the pole, the range the depth
+    channel was encoded over and the image size (see
+    :meth:`NormalDepthPack.scale_dict`). ``intrinsics`` is 3x3 in pixels for a
+    ``shape``-sized grid, so the point map is reconstructable too — the focal
+    is an independent per-image estimate and appears nowhere in the packed
+    image.
 
-        normals, logz, valid = unpack_octahedral_logz(packed, z_min, z_max)
-        depth_m = (np.exp(logz) + shift) * metric_scale
-        # points: back-project depth_m through intrinsics (see the module doc)
-
-    ``intrinsics`` is 3x3 in pixels for a ``shape``-sized grid, so the point
-    map is reconstructable too — the focal is an independent per-image
-    estimate and appears nowhere in the packed image.
+    ``**extra`` carries whatever a particular carrier needs and the codec does
+    not own — currently the albedo percentiles, which only --save-Alb-norm
+    knows and only its reader needs.
     """
-    h, w = shape
     np.savez(
         str(out_base) + "_scale.npz",
-        shift=np.float64(shift),
-        metric_scale=np.float64(metric_scale),
-        intrinsics=intrinsics,
-        z_min=np.float64(z_min),
-        z_max=np.float64(z_max),
-        image_h=np.int32(h),
-        image_w=np.int32(w),
+        **pack.scale_dict(scale, z_min, z_max, shape, intrinsics=intrinsics),
+        **extra,
     )
 
 
@@ -210,223 +387,57 @@ def _save_normal_png(normal: np.ndarray, valid: np.ndarray, out_base: Path) -> N
 
 
 def _save_octahedral_png(packed: np.ndarray, out_base: Path) -> None:
-    """Save a packed [Oct_U, Oct_V, logz] image as <out_base>_octahedral.png
-    (see pack_octahedral_logz). Undecodable without the sidecar's z_min/z_max."""
+    """Save a packed [Oct_U, Oct_V, depth] image as <out_base>_octahedral.png
+    (see utils.normal_depth_pack). Undecodable without its sidecar."""
     Image.fromarray(packed).save(str(out_base) + "_octahedral.png")
 
 
-def adaptive_logz_range(
-    logz: np.ndarray,
-    valid: np.ndarray | None,
-    z_min: float,
-    z_max: float,
-) -> tuple[float, float]:
-    """Tighten ``[z_min, z_max]`` to the affine-z range this frame actually uses.
+def _save_scale_dab_png(blended: np.ndarray, out_base: Path) -> None:
+    """Save a scale-Dab blend as <out_base>_scale_Dab.png.
 
-    Quantization error is set by the encoded span, so a scene occupying a
-    narrow slice of the caller's bounds should be encoded over that slice —
-    measured over the test frames, at 0.29-0.62% against 0.97% for a fixed
-    span. The caller's bounds stay a hard rail: the result never escapes them.
-
-    ``(z_min, z_max)`` come back unchanged when the data cannot tighten them,
-    which is the no-valid-pixels case and the disjoint case (intersecting there
-    would invert the range). Both fall back to the bounds, which clip rather
-    than fail.
-
-    Args:
-        logz: (H, W) natural log of the affine z.
-        valid: (H, W) bool, or None to use every finite pixel.
-        z_min: caller's lower affine-z bound, metres.
-        z_max: caller's upper affine-z bound, metres.
-
-    Returns:
-        ``(z_min, z_max)`` in metres, within the caller's bounds.
+    The same format as <out_base>_blend_Dab.png -- only the ramp's ends differ,
+    and those live in the sidecar rather than in the image.
     """
-    logz = np.asarray(logz, dtype=np.float64)
-    usable = np.isfinite(logz)
-    if valid is not None:
-        usable &= np.asarray(valid, dtype=bool)
-    if not usable.any():
-        return z_min, z_max
-
-    data_min = float(np.exp(logz[usable].min()))
-    data_max = float(np.exp(logz[usable].max()))
-    lo, hi = max(z_min, data_min), min(z_max, data_max)
-    if not lo < hi:
-        # Data clear of the bounds, or a scene flat enough that the span would
-        # divide by zero.
-        return z_min, z_max
-    return lo, hi
+    Image.fromarray(blended).save(str(out_base) + "_scale_Dab.png")
 
 
-def _logz_encode(logz: np.ndarray, z_min: float, z_max: float) -> np.ndarray:
-    """logz -> uint8 codes 1..255. Code 0 is left reserved for invalid."""
-    lo, hi = np.log(z_min), np.log(z_max)
-    norm = np.clip((logz - lo) / (hi - lo), 0.0, 1.0)
-    # 1 + norm * 254 floors into 1..255; the cast truncates toward zero.
-    return (LOGZ_CODE_MIN + norm * LOGZ_LEVELS).astype(np.uint8)
+def _save_blend_dab_png(blended: np.ndarray, out_base: Path) -> None:
+    """Save a Lab(depth, a, b) blend as <out_base>_blend_Dab.png.
 
-
-def _logz_decode(code: np.ndarray, z_min: float, z_max: float) -> np.ndarray:
-    """uint8 codes -> logz. Code 0 is invalid and decodes to 0.0."""
-    lo, hi = np.log(z_min), np.log(z_max)
-    logz = lo + (code.astype(np.float32) - LOGZ_CODE_MIN) / LOGZ_LEVELS * (hi - lo)
-    return np.where(code > 0, logz, 0.0).astype(np.float32)
-
-
-def pack_octahedral_logz(
-    normals: np.ndarray,
-    logz: np.ndarray,
-    valid: np.ndarray | None = None,
-    z_min: float = DEFAULT_Z_MIN,
-    z_max: float = DEFAULT_Z_MAX,
-) -> np.ndarray:
-    """Pack a normal map and a log-depth map into one uint8 RGB image.
-
-    The layout is [Oct_U, Oct_V, logz]. U/V are the L1 octahedral projection of
-    the unit normal rescaled to [0, 255]; the last channel is the affine
-    log-depth the MoGe graph produces, rescaled linearly over
-    ``[log z_min, log z_max]``.
-
-    The projection is taken about -z rather than +z, because MoGe's normals are
-    in the camera frame and their bulk sits on -z (see :data:`POLE_FLIP`).
-    :func:`unpack_octahedral_logz` undoes that, so both sides speak in MoGe's
-    frame.
-
-    ``logz`` rather than metres because the graph's output is already
-    logarithmic: encoding it directly skips an exp-then-log round trip and, the
-    real reason, the ``+0.001 m`` offset the .lz4 codec adds before its log,
-    which biases the bottom of its range by up to a quarter of a code.
-
-    The channel decodes back to metres through the sidecar's two scalars::
-
-        depth_m = (exp(logz) + shift) * metric_scale
-
-    Codes run 1..255 and **code 0 is reserved for invalid** — a deliberate
-    departure from the .lz4 convention, where 0 means both "invalid" and "at or
-    below min_depth". Reserving it matters here because the encoded range is
-    adaptive: its lower bound is the scene's own minimum, so under the .lz4
-    convention every frame's *nearest* surfaces would decode as masked-out
-    (measured at 21-356 px/frame). With 0 reserved, an out-of-range *valid*
-    pixel clips to code 1 or 255 and stays valid; only a masked pixel reads
-    back invalid.
-
-    Pixels that are not valid — outside the mask, or carrying a non-finite
-    logz such as MoGe's ``+inf`` masked-out sentinel — pack to ``(0, 0, 0)``.
-    The octahedral pair of such a pixel still decodes to the unit vector
-    ``(0, 0, -1)``, so read validity off the depth channel, not the normals.
-
-    Args:
-        normals: (H, W, 3) unit normals (any consistent frame).
-        logz: (H, W) natural log of the affine z.
-        valid: (H, W) bool, or None to treat every non-finite-logz pixel as
-            valid.
-        z_min: lower end of the encoded range, metres of affine z.
-        z_max: upper end of the encoded range, metres of affine z.
-
-    Returns:
-        (H, W, 3) uint8 image.
+    Still a data container -- decode_dab recovers the depth with the same
+    sidecar -- but one that reads as a picture, so unlike the octahedral image
+    it is not nonsense to look at.
     """
-    normals = np.asarray(normals, dtype=np.float32)
-    logz = np.asarray(logz, dtype=np.float32)
-
-    # Project about the data rather than about +z (see POLE_FLIP).
-    normals = normals * POLE_FLIP
-
-    # A non-finite logz is invalid whether or not a mask is handed in: MoGe's
-    # masked-out sentinel arrives as +inf, and left alone it would clip to the
-    # far end of the range instead of preserving the invalid 0.
-    valid_mask = np.isfinite(logz)
-    if valid is not None:
-        valid_mask &= np.asarray(valid, dtype=bool)
-
-    # Project to the L1 octahedron.
-    l1_norm = np.sum(np.abs(normals), axis=-1, keepdims=True) + 1e-8
-    p = normals[..., :2] / l1_norm
-
-    # Unfold the back-facing hemisphere onto the diamond's outer edges. The
-    # sign must be +/-1, never np.sign: sign(0) is 0, which would zero the
-    # coordinate the fold just derived from the other one.
-    back = normals[..., 2] < 0
-    p[back] = (1.0 - np.abs(p[back, ::-1])) * np.where(p[back] >= 0.0, 1.0, -1.0)
-
-    # Scale to [0, 255], then encode the depth channel on its log grid. The
-    # placeholder keeps a -inf or NaN away from the log; those pixels are
-    # zeroed wholesale below regardless.
-    u = ((p[..., 0] + 1.0) * 0.5 * 255.0).astype(np.uint8)
-    v = ((p[..., 1] + 1.0) * 0.5 * 255.0).astype(np.uint8)
-    d = _logz_encode(np.where(valid_mask, logz, 0.0).astype(np.float64),
-                     z_min, z_max)
-
-    packed = np.stack([u, v, d], axis=-1)
-    packed[~valid_mask] = 0
-    return packed
+    Image.fromarray(blended).save(str(out_base) + "_blend_Dab.png")
 
 
-def unpack_octahedral_logz(
-    packed_img: np.ndarray,
-    z_min: float = DEFAULT_Z_MIN,
-    z_max: float = DEFAULT_Z_MAX,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Inverse of :func:`pack_octahedral_logz`.
+def _save_fused_png(image: np.ndarray, out_base: Path) -> None:
+    """Save a [Oct_U, Oct_V, depth + detail] image as <out_base>_fused.png.
 
-    Args:
-        packed_img: (H, W, 3) uint8 image, [Oct_U, Oct_V, logz].
-        z_min: lower bound the image was packed with, metres. Must match the
-            pack side (``z_min`` in the sidecar), or the depths come back on
-            the wrong scale.
-        z_max: upper bound the image was packed with, metres.
-
-    Returns:
-        ``(normals (H, W, 3) float32, logz (H, W) float32, valid (H, W) bool)``.
-        ``valid`` is the depth channel being non-zero. Test validity on it, not
-        on the other two: an invalid pixel's logz is 0.0, which is a real depth
-        (z = 1 m), and its normals decode to ``(0, 0, -1)``, a plausible-looking
-        back-facing normal.
-
-    Example:
-        >>> packed = np.asarray(Image.open("frame_000210_octahedral.png"))
-        >>> sidecar = np.load("frame_000210_scale.npz")
-        >>> normals, logz, valid = unpack_octahedral_logz(
-        ...     packed, float(sidecar["z_min"]), float(sidecar["z_max"])
-        ... )
-        >>> depth_m = (np.exp(logz) + sidecar["shift"]) * sidecar["metric_scale"]
+    Laid out exactly like --save-packed's image, so the same reader decodes it
+    and the surface markings are the only difference.
     """
-    packed_img = np.asarray(packed_img, dtype=np.uint8)
+    Image.fromarray(image).save(str(out_base) + "_fused.png")
 
-    # 1. Unscale back to [-1, 1] for the octahedral coordinates.
-    u = packed_img[..., 0].astype(np.float32) / 255.0 * 2.0 - 1.0
-    v = packed_img[..., 1].astype(np.float32) / 255.0 * 2.0 - 1.0
 
-    # 2. Reconstruct z on the octahedron.
-    z = 1.0 - (np.abs(u) + np.abs(v))
+def _save_l_normal_png(image: np.ndarray, out_base: Path) -> None:
+    """Save an [L, nx, ny] carrier as <out_base>_L_normal.png.
 
-    # 3. Unfold back-facing hemisphere where z < 0.
-    below = z < 0.0
+    The frame's own luminance with its colour replaced by the surface normals,
+    so it reads as a photograph shot under strange light.
+    """
+    Image.fromarray(image).save(str(out_base) + "_L_normal.png")
 
-    # Avoid zero-sign issues (np.sign(0) returns 0; keep sign as +1 or -1)
-    sign_u = np.where(u >= 0.0, 1.0, -1.0)
-    sign_v = np.where(v >= 0.0, 1.0, -1.0)
 
-    x = u.copy()
-    y = v.copy()
+def _save_alb_normal_png(image: np.ndarray, out_base: Path) -> None:
+    """Save an [albedo, nx, ny] carrier as <out_base>_alb_normal.png.
 
-    x[below] = (1.0 - np.abs(v[below])) * sign_u[below]
-    y[below] = (1.0 - np.abs(u[below])) * sign_v[below]
+    The albedo is the frame's Lab L through a Retinex split, so unlike the
+    normal channels it is not a geometric quantity -- it is what the surface
+    would look like unlit.
+    """
+    Image.fromarray(image).save(str(out_base) + "_alb_normal.png")
 
-    # 4. Stack and normalize to unit length.
-    normals = np.stack([x, y, z], axis=-1)
-    norm = np.linalg.norm(normals, axis=-1, keepdims=True)
-    normals = normals / np.maximum(norm, 1e-8)
-
-    # Back out of the packer's projection frame, into MoGe's camera frame.
-    normals = normals * POLE_FLIP
-
-    # 5. Depth channel back to logz (code 0 -> invalid).
-    code = packed_img[..., 2]
-    return (normals.astype(np.float32),
-            _logz_decode(code, z_min, z_max),
-            code > 0)
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -455,15 +466,66 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--save-packed", action="store_true",
         help="Save per-image <stem>_octahedral.png: one uint8 RGB carrying "
-             "the normals and the affine log-depth ([Oct_U, Oct_V, logz]). "
+             "the normals and the affine depth ([Oct_U, Oct_V, depth]). "
              "Always writes <stem>_scale.npz too — the image cannot be "
              "decoded without it. Not implied by --visualize.",
     )
     parser.add_argument(
         "--save-scale", action="store_true",
         help="Save per-image <stem>_scale.npz: shift, metric_scale, "
-             "intrinsics, the encoded z_min/z_max and the image size. Together "
-             "with the packed image this rebuilds the model's whole output.",
+             "intrinsics, the pole, the encoded z_min/z_max and the image "
+             "size. Together with the packed image this rebuilds the model's "
+             "whole output.",
+    )
+    parser.add_argument(
+        # An explicit dest: argparse would otherwise spell the attribute
+        # save_blend_Dab, carrying the flag's capital into the code.
+        "--save-blend-Dab", action="store_true", dest="save_blend_dab",
+        help="Save per-image <stem>_blend_Dab.png: the input frame's own chroma "
+             "in Lab's a/b, with the depth code plus the frame's high-frequency "
+             "L in the L channel. Carries the depth only (no normals) and still "
+             "reads as a picture. The detail term is what shows surface "
+             "markings, and is also what the depth costs: ~1% of the depth for "
+             "a bare ramp against a p99 of ~3% with it. Implies "
+             "<stem>_scale.npz, same as --save-packed; the two share one "
+             "sidecar.",
+    )
+    parser.add_argument(
+        # Explicit dest, same reason as --save-blend-Dab above: argparse would
+        # spell the attribute save_Alb_norm.
+        "--save-Alb-norm", action="store_true", dest="save_alb_norm",
+        help="Save per-image <stem>_alb_normal.png: an albedo map (Retinex on "
+             "the frame's Lab L) in R, the normal's nx and ny in G and B. The "
+             "hemisphere for the missing nz comes from the declared pole, so "
+             "pixels pointing the other way come back mirrored. Implies "
+             "<stem>_scale.npz, which also gains the albedo's percentiles.",
+    )
+    parser.add_argument(
+        # Explicit dest, same reason as --save-blend-Dab above.
+        "--save-L-norm", action="store_true", dest="save_l_norm",
+        help="Save per-image <stem>_L_normal.png: the frame's own Lab L with "
+             "the normal's nx and ny in a and b. Reads as a photograph under "
+             "strange light. Carries no depth and no albedo, and carries the "
+             "normals poorly -- the sRGB gamut limits a and b by the pixel's "
+             "own luminance, so they survive at mid grey and not at the ends. "
+             "Implies <stem>_scale.npz, which records the scale.",
+    )
+    parser.add_argument(
+        "--save-fused", action="store_true",
+        help="Save per-image <stem>_fused.png: the packed image "
+        "([Oct_U, Oct_V, depth]) with the frame's high-frequency L laid over "
+        "the depth channel, so the surfaces carry their markings instead of "
+        "reading as a flat ramp. Decoded by the same reader as --save-packed; "
+        "the detail is what the depth costs.",
+    )
+    parser.add_argument(
+        # Explicit dest, same reason as --save-blend-Dab above.
+        "--save-scale-Dab", action="store_true", dest="save_scale_dab",
+        help="Save per-image <stem>_scale_Dab.png: as --save-blend-Dab, but "
+             "the ramp's ends come from the frame's own luminance extremes "
+             "rather than the fixed gate, so a low-contrast frame gets a "
+             "low-contrast ramp instead of being stretched. Implies "
+             "<stem>_scale.npz, which records the ends a reader needs.",
     )
     parser.add_argument(
         "--visualize", action="store_true",
@@ -494,6 +556,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--refine_steps", type=int, default=1, help="Sparse refinement steps.")
     parser.add_argument("--out_dir", type=str, default="./output/moge3")
     args = parser.parse_args()
+    if args.save_blend_dab and args.save_scale_dab:
+        parser.error(
+            "--save-blend-Dab and --save-scale-Dab share one <stem>_scale.npz, "
+            "and it records a single ramp -- theirs differ, so a reader could "
+            "not tell which image the ends belonged to. Run them separately."
+        )
     if args.depth_min <= 0.0 or args.depth_min >= args.depth_max:
         parser.error(
             f"--depth-min ({args.depth_min}) must be > 0 and < --depth-max "
@@ -564,18 +632,25 @@ def main() -> None:
         pred = np.where(valid, depth_raw, 0.0).astype(np.float32)
         normal = out["normal"].squeeze(0).cpu().numpy().astype(np.float32)  # (H, W, 3)
 
-        # Affine z = exp(logz): the model's scale-free depth, before the
-        # per-image shift and metric scale the postprocess applies. Recovered
-        # by inverting it (depth = (z + shift) * metric_scale) — the graph's
-        # raw logz never leaves moge_pt2, so this log is unavoidable here. The
-        # -inf placeholder cannot leak: every consumer gates on `valid`.
-        logz = np.where(valid, np.log(pred / metric_scale - shift), -np.inf)
+        # Affine z: the model's scale-free depth, before the per-image shift
+        # and metric scale the postprocess applies. Recovered by inverting that
+        # (depth = (z + shift) * metric_scale) — the graph's raw z never leaves
+        # moge_pt2. The zero placeholder cannot leak: every consumer gates on
+        # `valid`, and the codec masks non-positive depths of its own accord.
+        depth_z = np.where(valid, pred / metric_scale - shift, 0.0).astype(np.float32)
+
+        # The codec, with MoGe's normal convention declared: the model emits
+        # normals in the OpenCV camera frame, so camera-facing surfaces point
+        # along -z. Declaring that puts the projection pole on the data, which
+        # is what keeps flat surfaces from coming out as hard-edged colour
+        # blocks.
+        pack = NormalDepthPack(pole=MOGE_POLE, z_min=args.depth_min,
+                               z_max=args.depth_max)
 
         # The packed channel encodes the frame's own affine-z span, intersected
-        # with the caller's rails (see adaptive_logz_range). Computed here so
-        # --save-scale alone still records the range the packed image would use.
-        z_min, z_max = adaptive_logz_range(logz, valid,
-                                           args.depth_min, args.depth_max)
+        # with the caller's rails. Resolved here so --save-scale alone still
+        # records the range the packed image would use.
+        z_min, z_max = pack.resolve_range(depth_z, valid)
         # ---- model-estimated intrinsics in pixel units. MoGe's intrinsics
         # are expressed in utils3d's normalized-uv space (principal point at
         # 0.5, focal in image-extent units), while export_glb back-projects on
@@ -589,6 +664,13 @@ def main() -> None:
         K[1, 1] *= h          # fy in pixels
         K[0, 2] = K[0, 2] * w - 0.5
         K[1, 2] = K[1, 2] * h - 0.5
+
+        # The input at the model's output resolution. Depth is 640x480 by
+        # construction, so the frame's chroma has to be resampled onto that
+        # grid to blend against it — and the mesh wants the same thing.
+        rgb_model = image_rgb
+        if rgb_model.shape[:2] != pred.shape:
+            rgb_model = cv2.resize(rgb_model, (pred.shape[1], pred.shape[0]))
 
         out_base = out_dir / image_path.stem
 
@@ -609,7 +691,7 @@ def main() -> None:
         # A data container rather than a visualization, so --visualize does
         # not imply it — that flag writes only the human-viewable artefacts. ----
         if args.save_packed:
-            packed = pack_octahedral_logz(normal, logz, valid, z_min, z_max)
+            packed = pack.encode(normal, depth_z, valid, z_range=(z_min, z_max))
             _save_octahedral_png(packed, out_base)
             print(f"Saved packed: {out_base}_octahedral.png "
                   f"(affine z {z_min:.3f}-{z_max:.3f}m)")
@@ -621,10 +703,13 @@ def main() -> None:
             # they fire when the caller's rails cut into the scene. Both ends
             # stay *valid* (code 1 / 255, not the 0 sentinel), so those pixels
             # survive — their depth is just only good to the bound.
+            # Strictly outside, not merely equal: with an adaptive range the
+            # bounds *are* the frame's extremes, so a non-strict test reports
+            # the two boundary pixels on every frame. A pixel sitting exactly
+            # on a bound encodes to code 1 / 255 and decodes back exactly.
             n_valid = int(valid.sum())
-            affine_z = np.exp(logz)
-            near = int((valid & (affine_z <= z_min)).sum())
-            far = int((valid & (affine_z >= z_max)).sum())
+            near = int((valid & (depth_z < z_min)).sum())
+            far = int((valid & (depth_z > z_max)).sum())
             if near or far:
                 print(
                     f"packed depth: {near} px at/below {z_min:.3f}m affine z, "
@@ -633,21 +718,147 @@ def main() -> None:
                     f"— widen --depth-min/--depth-max to bracket the scene"
                 )
 
+        # ---- depth in Lab's L channel, the frame's chroma in a/b
+        # (--save-blend-Dab only). Format details live in
+        # utils.normal_depth_pack; what matters here is that it is the *same*
+        # depth code the octahedral image carries, so one sidecar decodes both
+        # and a reader needs no second vocabulary. No normals: this carrier
+        # holds the depth alone.
+        dab_extra: dict[str, object] = {}
+        if args.save_blend_dab or args.save_scale_dab:
+            if args.save_scale_dab:
+                # The one difference from --save-blend-Dab: the ends are read
+                # off the frame instead of the gate, so the depth ramp spans
+                # the luminance the picture actually uses.
+                _dab_l_far, _dab_l_near = _scaled_dab_ramp(
+                    cv2.cvtColor(rgb_model.astype(np.float32) / 255.0,
+                                 cv2.COLOR_RGB2LAB)[..., 0],
+                    DEFAULT_FAR_IS_BRIGHT,
+                )
+                _dab_tag, _dab_name = "Scaledab", "_scale_Dab.png"
+                _dab_saver = _save_scale_dab_png
+            else:
+                _dab_l_far, _dab_l_near = _dab_ramp(
+                    DEFAULT_L_DARK, DEFAULT_L_BRIGHT, DEFAULT_FAR_IS_BRIGHT
+                )
+                _dab_tag, _dab_name = "Blend   ", "_blend_Dab.png"
+                _dab_saver = _save_blend_dab_png
+
+            blended = encode_dab(
+                rgb_model, depth_z, valid, z_range=(z_min, z_max),
+                detail_alpha=DEFAULT_ALPHA,
+                detail_d=DEFAULT_D,
+                detail_sigma_color=DEFAULT_SIGMA_COLOR,
+                detail_sigma_space=DEFAULT_SIGMA_SPACE,
+                l_far=_dab_l_far, l_near=_dab_l_near,
+            )
+            _dab_saver(blended, out_base)
+            print(f"Saved {_dab_tag}: {out_base}{_dab_name} "
+                  f"(affine z {z_min:.3f}-{z_max:.3f}m, "
+                  f"L* {_dab_l_near:.1f}-{_dab_l_far:.1f})")
+
+            # The ramp's ends are part of the encoding, not of the codec, so a
+            # reader has to be told them -- without this a retuned span decodes
+            # silently wrong, which looks exactly like a correct decode.
+            dab_extra = {
+                "dab_l_far": np.float64(_dab_l_far),
+                "dab_l_near": np.float64(_dab_l_near),
+            }
+
+            # The ramp's ends are part of the encoding, not of the codec, so a
+            # reader has to be told them -- without this a retuned span decodes
+            # silently wrong, which looks exactly like a correct decode.
+            dab_extra = {
+                "dab_l_far": np.float64(_dab_l_far),
+                "dab_l_near": np.float64(_dab_l_near),
+            }
+
+        # ---- packed normals + depth, with the frame's texture over the
+        # depth channel (--save-fused only). Same layout as the packed image,
+        # so the detail term is the whole of the difference.
+        if args.save_fused:
+            fused = encode_fused(
+                normal, depth_z, rgb_model, valid, z_range=(z_min, z_max),
+                pack=pack,
+                detail_alpha=DEFAULT_ALPHA,
+                detail_d=DEFAULT_D,
+                detail_sigma_color=DEFAULT_SIGMA_COLOR,
+                detail_sigma_space=DEFAULT_SIGMA_SPACE,
+            )
+            _save_fused_png(fused, out_base)
+            print(f"Saved fused : {out_base}_fused.png "
+                  f"(affine z {z_min:.3f}-{z_max:.3f}m, detail a={DEFAULT_ALPHA})")
+
+        # ---- the frame's own luminance + the normal's nx, ny in a/b
+        # (--save-L-norm only). Reads as a photograph under strange light; the
+        # normals are there but do not survive it well -- see the codec.
+        l_norm_extra: dict[str, object] = {}
+        if args.save_l_norm:
+            _save_l_normal_png(
+                encode_l_normal(rgb_model, normal, valid,
+                                scale=DEFAULT_L_NORM_SCALE),
+                out_base,
+            )
+            # The scale is part of the encoding: a reader that guesses it comes
+            # back with normals of the wrong magnitude, which looks like a
+            # normal map rather than like an error.
+            l_norm_extra = {"l_normal_scale": np.float64(DEFAULT_L_NORM_SCALE)}
+            print(f"Saved Lnorm : {out_base}_L_normal.png "
+                  f"(nx,ny scale {DEFAULT_L_NORM_SCALE:.0f})")
+
+        # ---- albedo + the normal's nx, ny (--save-Alb-norm only). The one
+        # carrier here with no depth in it: R is a Retinex albedo, G and B are
+        # the normal's x and y, and the hemisphere for the missing nz is
+        # resolved by the reader from the pole rather than stored.
+        albedo_extra: dict[str, object] = {}
+        if args.save_alb_norm:
+            # The helper's contract is L in [0, 255]; cv2's *float* Lab hands
+            # back L in [0, 100]. Feeding it the raw value would darken the
+            # albedo by a factor of 2.55 while still looking like an albedo,
+            # which is exactly the kind of error that survives a glance.
+            lab_model = cv2.cvtColor(
+                rgb_model.astype(np.float32) / 255.0, cv2.COLOR_RGB2LAB
+            )
+            albedo, _, p_low, p_high = extract_albedo_retinex(
+                lab_model[..., 0] / 100.0 * 255.0
+            )
+
+            _save_alb_normal_png(
+                encode_alb_normal(albedo, normal, valid), out_base
+            )
+            # Recorded because the albedo's scaling is per-image: without these
+            # the channel cannot be turned back into reflectance, and no two
+            # frames' albedos are comparable.
+            albedo_extra = {
+                "albedo_p_low": np.float64(p_low),
+                "albedo_p_high": np.float64(p_high),
+            }
+            print(f"Saved alb   : {out_base}_alb_normal.png "
+                  f"(albedo p1-p99 {p_low:.4f}-{p_high:.4f})")
+
         # ---- sidecar (--save-scale). Implied by --save-packed, because the
         # packed image is undecodable without its z_min/z_max and its depth
-        # channel is metric-less without the two scalars. ----
-        if args.save_scale or args.save_packed:
-            _save_scale_npz(shift, metric_scale, K, z_min, z_max, pred.shape,
-                            out_base)
+        # channel is metric-less without the two scalars. --save-blend-Dab
+        # needs it for exactly the same reason; --save-Alb-norm for the
+        # albedo percentiles, which nothing else records. ----
+        if (args.save_scale or args.save_packed or args.save_blend_dab
+                or args.save_alb_norm):
+            _save_scale_npz(
+                pack,
+                DepthScale(shift=shift, metric_scale=metric_scale),
+                K,
+                z_min,
+                z_max,
+                pred.shape,
+                out_base,
+                **albedo_extra,
+                **dab_extra,
+                **l_norm_extra,
+            )
             print(f"Saved scale : {out_base}_scale.npz")
 
         # ---- visualization (--visualize): two PNGs + the mesh ----
         if args.visualize:
-            # colour source for the point cloud, at the depth resolution
-            rgb_u8 = image_rgb
-            if rgb_u8.shape[:2] != pred.shape:
-                rgb_u8 = cv2.resize(rgb_u8, (pred.shape[1], pred.shape[0]))
-
             _save_depth_png(pred, valid, out_base)
             _save_normal_png(normal, valid, out_base)
             print(f"Saved heatmap: {out_base}_depth.png")
@@ -660,7 +871,7 @@ def main() -> None:
                 depth=pred[None],
                 intrinsics=K[None],
                 extrinsics=np.eye(4, dtype=np.float64)[None],  # camera space
-                images_u8=rgb_u8[None].astype(np.uint8),
+                images_u8=rgb_model[None].astype(np.uint8),
                 conf=None,
                 out_path=str(glb_path),
                 mesh=True,

@@ -83,16 +83,27 @@ src/
 └── utils/                       # shared camera types, image I/O, visualizers
     ├── cam_structure.py         # CameraIntrinsics, CameraExtrinsics, read_calib_file
     ├── astribot_dataloader.py   # Astribot dataset: load_rgbd, CAMERA_SETS, depth configs
+    ├── libero_wrapper.py        # LIBERO LeRobot v3.0 dataset: episode table + frame decode
     ├── keyframe_utils.py        # Step-3 key-frame discovery (episode + folder layouts)
     ├── depth_utils.py           # .lz4 depth I/O (metres log-encoded to uint8) + point-map helpers
     ├── streaming_utils.py       # image-folder pipeline helpers (load_stream_data, load_batch_frames)
-    ├── file_io/                 # image_io (ImageInput, letterbox…), video_io, mask_rle
+    ├── file_io/                 # image_io (ImageInput, letterbox…), mask_rle,
+    │                            #   video_io (cv2 VideoWriter + ffmpeg-pipe
+    │                            #   iter_video_frames / FFV1VideoWriter /
+    │                            #   H264VideoWriter)
     └── visualize/               # depth / flow / mask / tapip3d visualizers + export_glb
 tools/
 ├── general_test/               # Case 1 (README): general-purpose inference + viz entry points
 │   ├── module/                 # one tool per model — infer_<model>.py (test each component)
 │   │   ├── infer_any2full.py   # RGB-D depth densification (single frame → .glb)
 │   │   ├── infer_moge3.py      # MoGe v3 monocular metric depth + .glb mesh (single image)
+│   │   ├── infer_moge3_video.py # MoGe v3 over the episodes of a local LeRobot v3.0 dataset
+│   │   │                        #   (LiberoWrapper) → octahedral-packed lossless FFV1 .mkv
+│   │   │                        #   + .npz sidecar per episode-camera (--save-viz also
+│   │   │                        #   writes a small side-by-side H.264 mp4 to look at);
+│   │   │                        #   the per-episode anchor alignment is opt-in
+│   │   │                        #   (--align), needs a fixed camera, and is refused
+│   │   │                        #   on a wrist camera by name
 │   │   ├── infer_waft.py       # dense optical flow → motion masks
 │   │   ├── infer_rexomni.py    # open-vocabulary detection (.venv-rexomni)
 │   │   ├── infer_sam3.py       # promptable segmentation
