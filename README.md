@@ -39,6 +39,19 @@ For LeRobot dataset, we temporally use this branch to fix the HF streaming datas
 lerobot = { git = "https://github.com/huggingface/lerobot.git", rev = "pr/4027" }
 ```
 
+`uv sync` also compiles the vendored **pointops2** CUDA extension (TAPIP3D's
+KNN). That build runs inside the project environment instead of an isolated
+build env (its `setup.py` imports torch), so the environment must ship the build
+backend itself — `setuptools` is a project dependency for exactly this reason —
+and `CUDA_HOME` must point at a CUDA toolkit **at least as new as torch's
+`cu128`** build. A 12.0 `nvcc` fails with `Unsupported gpu architecture
+'compute_120'` on Blackwell GPUs; any 12.8+ toolkit works:
+
+```bash
+export CUDA_HOME=/usr/local/cuda-12.8
+uv sync
+```
+
 ### Rex-Omni environment
 
 Rex-Omni uses a separate Python environment because its tested stack

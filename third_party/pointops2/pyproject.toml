@@ -1,0 +1,17 @@
+# Vendored package: metadata is declared statically here rather than left to
+# setup.py alone. Without it, uv has no metadata for this path dependency and
+# must run the setuptools backend *during dependency resolution* — which fails
+# ("No module named 'setuptools'"), because pointops2 is listed in
+# `no-build-isolation-package` and the project environment does not exist yet
+# at that point. Declaring [project] outright lets uv resolve without building.
+#
+# Keep `dependencies` in sync with setup.py's install_requires.
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pointops2"
+version = "1.0"
+description = "Point cloud operators (CUDA) vendored for TAPIP3D"
+dependencies = ["torch", "numpy"]
