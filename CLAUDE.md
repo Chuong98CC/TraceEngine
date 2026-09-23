@@ -45,6 +45,20 @@ The editable install puts both the repo root and `src/` on `sys.path`, so
 `depth_models`, `flow_models`, `det_seg_models`, `utils`, `tools`, and `mu0`
 are all importable as top-level packages.
 
+`uv sync` also compiles the vendored **pointops2** CUDA extension
+(`third_party/pointops2`, TAPIP3D's KNN). It is listed in
+`no-build-isolation-package` (its `setup.py` imports torch at build time), so
+the build runs in the project environment itself rather than an isolated build
+env — meaning (a) the environment must supply the build backend, which is why
+`setuptools` is a direct dependency, and (b) `CUDA_HOME` must select a toolkit
+**≥12.8**, matching torch's `cu128` build. An older toolkit fails with
+`nvcc fatal : Unsupported gpu architecture 'compute_120'` on Blackwell (sm_120)
+GPUs. A `[tool.uv.extra-build-dependencies]` entry does **not** cover this — uv
+ignores it for packages under `no-build-isolation-package` (verified on uv
+0.11.25); the vendored `pyproject.toml`'s static metadata is what lets
+resolution skip the build, and `setuptools` must be a real project dependency.
+On this box: `export CUDA_HOME=/usr/local/cuda-12.8`.
+
 ## Package structure
 
 ```

@@ -40,6 +40,9 @@ dependencies = [
     "pycolmap",
     "numba",
     "ninja", # build-time parallel backend for the vendored pointops2 CUDA extension
+    # pointops2 builds without isolation, so its backend must be importable from
+    # the project environment itself — see the comment on pointops2 below.
+    "setuptools",
     "pointops2",
     "ftfy",
     "matplotlib",
@@ -70,7 +73,10 @@ explicit = true
 torch = { index = "pytorch-cu128" }
 torchvision = { index = "pytorch-cu128" }
 # pointops2's setup.py imports torch at build time, so it must build inside the
-# project environment (no build isolation).
+# project environment (no build isolation). That in turn means the environment
+# must already carry the build backend (setuptools) and a CUDA toolkit no older
+# than torch's own (cu128) — both are covered in the dependencies list above and
+# in third_party/pointops2/pyproject.toml.
 pointops2 = { path = "third_party/pointops2" }
 # flex_gemm (FlexGEMM) has no PyPI release — git install at a pinned commit.
 # Default build is pure-Triton (no compile); the optional CUDA extension
